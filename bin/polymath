@@ -147,8 +147,19 @@ case "$cmd" in
     _pp_logs_follow=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        -n) _pp_logs_n="${2:-10}"; shift 2 ;;
-        --lens) _pp_logs_lens="$2"; shift 2 ;;
+        -n)
+          # Review fix F3: validate value EXISTS before shift, otherwise
+          # `shift 2` on a 1-arg list returns non-zero, the loop re-matches
+          # $1=-n on the next iteration, and we spin forever.
+          [ -n "${2:-}" ] || { printf 'polymath logs: -n requires a value\n' >&2; exit 2; }
+          _pp_logs_n="$2"
+          shift 2
+          ;;
+        --lens)
+          [ -n "${2:-}" ] || { printf 'polymath logs: --lens requires a value\n' >&2; exit 2; }
+          _pp_logs_lens="$2"
+          shift 2
+          ;;
         --follow|-f) _pp_logs_follow=1; shift ;;
         -h|--help)
           cat <<HELP
@@ -181,20 +192,51 @@ HELP
     # Determine session_id
     _pp_logs_session="${PP_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
     if [ -z "$_pp_logs_session" ]; then
+      # Review fix F1: previous `([^-]+)` truncated multi-dash session IDs
+      # (e.g. `abc-def-ghi` extracted to just `abc`). Use a greedy `(.+)` with
+      # the trailing lens-id anchor `[A-Za-z0-9_]+\.txt$` as the boundary so
+      # the longest possible session-id matches up to the final dash.
+      # Review fix F5: also skip -verdict/-streak sidecars when sniffing the
+      # session — they share the same glob but have different content.
+      # SC2010: ls + grep is the cleanest expression here; mtime ordering is
+      # provided by `ls -t` and filenames are constrained (no embedded
+      # newlines/spaces — we author them in this same script).
+      # shellcheck disable=SC2010
       _pp_logs_session=$(ls -t "$_pp_cache_dir"/cc-monitor-*-*.txt 2>/dev/null \
+        | grep -v -- '-verdict\.txt$' \
+        | grep -v -- '-streak\.txt$' \
         | head -1 \
-        | sed -nE 's@.*/cc-monitor-([^-]+)-.*\.txt$@\1@p')
+        | sed -nE 's@.*/cc-monitor-(.+)-[A-Za-z0-9_]+\.txt$@\1@p')
     fi
     if [ -z "$_pp_logs_session" ]; then
       printf 'polymath logs: no observations yet (run a session to produce them)\n'
       exit 0
     fi
 
+    # Review fix F7: portable file-mtime → human timestamp.
+    # macOS BSD `date -r FILE` interprets the arg as epoch seconds (not a
+    # filename), so the prior chained fallback silently produced `?` on Macs.
+    # Try BSD stat first (-f %m → epoch), then GNU stat (-c %Y → epoch),
+    # formatting each with its native `date` flag.
+    _pp_logs_get_mtime() {
+      local f="$1"
+      local secs out
+      if secs=$(stat -f %m "$f" 2>/dev/null) && [ -n "$secs" ]; then
+        out=$(date -r "$secs" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+      fi
+      if secs=$(stat -c %Y "$f" 2>/dev/null) && [ -n "$secs" ]; then
+        out=$(date -d "@$secs" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+      fi
+      printf '?'
+    }
+
     _pp_logs_print_one() {
       local file="$1"
       [ -s "$file" ] || return 0
       local lens_id
-      lens_id=$(printf '%s' "$file" | sed -nE 's@.*-([A-Z_]+)\.txt$@\1@p')
+      # Review fix F2: previous `([A-Z_]+)` rejected lens IDs with digits or
+      # lowercase (LENS1, engineering_v2). Broaden to [A-Za-z0-9_]+.
+      lens_id=$(printf '%s' "$file" | sed -nE 's@.*-([A-Za-z0-9_]+)\.txt$@\1@p')
       [ -n "$_pp_logs_lens" ] && [ "$lens_id" != "$_pp_logs_lens" ] && return 0
       local raw
       raw=$(head -1 "$file" 2>/dev/null)
@@ -203,11 +245,9 @@ HELP
       local hook body
       hook="${raw%%|||*}"
       body="${raw#*|||}"
-      # Timestamp from file mtime (portable: stat varies macOS vs Linux)
+      # Timestamp from file mtime (portable BSD/GNU; review fix F7)
       local ts
-      ts=$(date -r "$file" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
-        || stat -c '%y' "$file" 2>/dev/null | cut -c1-19 \
-        || echo '?')
+      ts=$(_pp_logs_get_mtime "$file")
       printf '%s  %s\n  %s\n  %s\n' "$ts" "$lens_id" "$hook" "$body"
       # Verdict sidecar — print only if present and contains DROP
       local verdict_file="${file%.txt}-verdict.txt"
@@ -224,16 +264,29 @@ HELP
     if [ "$_pp_logs_follow" = "1" ]; then
       printf 'polymath logs --follow: waiting for new observations (Ctrl-C to exit)\n\n'
       # tail -F the most recent cc-monitor file for this session (newest only —
-      # following all 7 simultaneously is more complex; v0.3 may improve)
-      latest=$(ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null | head -1)
+      # following all 7 simultaneously is more complex; v0.3 may improve).
+      # Review fix F5: filter -verdict/-streak sidecars so tail -F doesn't
+      # latch onto a verdict file (different format, not observations).
+      # shellcheck disable=SC2010
+      latest=$(ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null \
+        | grep -v -- '-verdict\.txt$' \
+        | grep -v -- '-streak\.txt$' \
+        | head -1)
       [ -z "$latest" ] && { printf 'no observations yet for session %s\n' "$_pp_logs_session"; exit 0; }
       tail -F "$latest" 2>/dev/null
       exit 0
     fi
 
-    # Default mode: collect, sort by mtime desc, print top N (filtered if --lens)
+    # Default mode: collect, sort by mtime desc, print top N (filtered if --lens).
+    # Review fix F5: post-filter -verdict.txt / -streak.txt sidecars — the glob
+    # matches them but they have a different content shape and would render as
+    # garbled "observations".
     _pp_logs_tmp=$(mktemp)
-    ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null | head -"$_pp_logs_n" > "$_pp_logs_tmp"
+    # shellcheck disable=SC2010
+    ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null \
+      | grep -v -- '-verdict\.txt$' \
+      | grep -v -- '-streak\.txt$' \
+      | head -"$_pp_logs_n" > "$_pp_logs_tmp"
     if [ ! -s "$_pp_logs_tmp" ]; then
       printf 'polymath logs: no observations for session %s yet\n' "$_pp_logs_session"
       rm -f "$_pp_logs_tmp"
@@ -275,45 +328,87 @@ HELP
       exit 1
     fi
 
+    # Review fix F6: detect the upstream default branch instead of hardcoding
+    # `main`. Forks / branch-tracking installs were silently broken.
+    _pp_default_branch=$(git -C "$PP_ROOT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    _pp_default_branch="${_pp_default_branch:-main}"
+
+    # Review fix F8: dry-run must NOT mutate `.git/` state. `git fetch` writes
+    # FETCH_HEAD and updates remote-tracking refs, which breaks the "no
+    # changes" contract. Use `git ls-remote` (read-only) instead.
+    if [ "$_pp_update_dry" = "1" ]; then
+      _pp_update_remote_head=$(git -C "$PP_ROOT" ls-remote --heads origin "$_pp_default_branch" 2>/dev/null | awk '{print $1}')
+      if [ -z "$_pp_update_remote_head" ]; then
+        printf '[dry-run] Could not query origin/%s (network? auth?). No changes made.\n' "$_pp_default_branch"
+        exit 0
+      fi
+      _pp_update_local_head=$(git -C "$PP_ROOT" rev-parse HEAD 2>/dev/null)
+      if [ "$_pp_update_remote_head" = "$_pp_update_local_head" ]; then
+        printf '[dry-run] Already up to date.\n'
+        exit 0
+      fi
+      printf '[dry-run] Would: git pull --ff-only origin %s && (re-run installer if not --yes)\n' "$_pp_default_branch"
+      printf '[dry-run] origin/%s HEAD: %s\n[dry-run] local HEAD:        %s\n' \
+        "$_pp_default_branch" "$_pp_update_remote_head" "$_pp_update_local_head"
+      exit 0
+    fi
+
+    # Real path — fetch + diff + (maybe) prompt + pull + install
     printf 'Fetching from origin...\n'
     if ! git -C "$PP_ROOT" fetch origin --tags --quiet 2>&1; then
       printf 'polymath update: git fetch failed (network? auth?)\n' >&2
       exit 1
     fi
 
-    _pp_update_new=$(git -C "$PP_ROOT" log --oneline HEAD..origin/main 2>/dev/null)
+    _pp_update_new=$(git -C "$PP_ROOT" log --oneline "HEAD..origin/$_pp_default_branch" 2>/dev/null)
     if [ -z "$_pp_update_new" ]; then
       printf 'Already up to date.\n'
       exit 0
     fi
 
-    printf '\nNew commits on origin/main:\n'
+    printf '\nNew commits on origin/%s:\n' "$_pp_default_branch"
     printf '%s\n' "$_pp_update_new" | sed 's/^/  /'
     printf '\n'
 
-    if [ "$_pp_update_dry" = "1" ]; then
-      printf '[dry-run] Would: git pull --ff-only && ./bin/install.sh\n'
-      exit 0
-    fi
-
+    # Review fix F9: failed `read` (non-interactive stdin EOF) used to default
+    # to "Y" via `${_pp_update_ans:-Y}`, silently proceeding with pull +
+    # install. Detect non-TTY explicitly and refuse to proceed without --yes,
+    # and treat a failed `read` as abort, not consent.
     if [ "$_pp_update_yes" != "1" ]; then
+      if ! [ -t 0 ]; then
+        printf 'polymath update: non-interactive stdin without --yes — refusing to proceed.\n' >&2
+        printf 'Re-run with --yes (skips installer) or in an interactive shell.\n' >&2
+        exit 1
+      fi
       printf 'Pull and re-run installer? [Y/n] '
-      read -r _pp_update_ans
+      if ! read -r _pp_update_ans; then
+        printf '\npolymath update: read failed (EOF?); aborting.\n' >&2
+        exit 1
+      fi
       case "${_pp_update_ans:-Y}" in
         [Yy]*|"") ;;
         *) printf 'Aborted.\n'; exit 0 ;;
       esac
     fi
 
-    if ! git -C "$PP_ROOT" pull --ff-only origin main 2>&1; then
+    if ! git -C "$PP_ROOT" pull --ff-only origin "$_pp_default_branch" 2>&1; then
       printf '\npolymath update: pull failed.\n' >&2
       printf 'Local branch may have diverged. Inspect with: cd %s && git status\n' "$PP_ROOT" >&2
       exit 1
     fi
 
-    printf '\nRe-running installer (idempotent — preserves your settings.json + user.env)...\n'
-    # --yes lands in P2.3; until then this is interactive
-    bash "$PP_ROOT/bin/install.sh"
+    # Review fix F4: install.sh has multiple interactive `read` calls. Under
+    # --yes (advertised as non-interactive) it would hang in CI / piped-stdin
+    # contexts. Skip the installer in that mode and print clear guidance so
+    # the user can re-run manually if dependencies actually changed.
+    if [ "$_pp_update_yes" = "1" ]; then
+      printf '\n[--yes] Pull complete. Skipping interactive installer re-run.\n'
+      printf '[--yes] If new commits touched bin/install.sh, re-run manually:\n'
+      printf '          bash %s/bin/install.sh\n' "$PP_ROOT"
+    else
+      printf '\nRe-running installer (idempotent — preserves your settings.json + user.env)...\n'
+      bash "$PP_ROOT/bin/install.sh"
+    fi
     ;;
 
   help|-h|--help|"")

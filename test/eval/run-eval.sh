@@ -141,21 +141,43 @@ for fix in $fixtures; do
     cwd_state_dir="$fix_dir"
   fi
 
-  # Rewrite placeholder paths in input.json. Use a literal find/replace via sed
-  # with `|` delimiter so embedded slashes don't need escaping.
-  sed_script="s|@TRANSCRIPT@|$transcript|g"
+  # Rewrite @TRANSCRIPT@ / @CWD@ placeholders. R1 code-reviewer H2 + GPT
+  # HIGH: previous sed-based approach interpolated paths INTO the sed
+  # program body, so a path containing |, &, or \n would corrupt the sed
+  # script (`s|@TRANSCRIPT@|/tmp/p|p-eval-foo|g` — broken delimiter on the
+  # second `|`). Use jq's string-replace on the parsed JSON instead: paths
+  # become safe arguments via --arg, not interpolated into a script body.
   if [ -n "$cwd_state_dir" ]; then
-    sed_script="$sed_script
-s|@CWD@|$cwd_state_dir|g"
+    jq --arg t "$transcript" --arg c "$cwd_state_dir" '
+      walk(if type == "string" then
+        gsub("@TRANSCRIPT@"; $t) | gsub("@CWD@"; $c)
+      else . end)
+    ' "$input_json" > "$input_resolved" 2>/dev/null || {
+      printf 'run-eval.sh: failed to rewrite placeholders in %s\n' "$input_json" >&2
+      return 1
+    }
+  else
+    jq --arg t "$transcript" '
+      walk(if type == "string" then gsub("@TRANSCRIPT@"; $t) else . end)
+    ' "$input_json" > "$input_resolved" 2>/dev/null || {
+      printf 'run-eval.sh: failed to rewrite placeholders in %s\n' "$input_json" >&2
+      return 1
+    }
   fi
-  sed -e "$sed_script" "$input_json" > "$input_resolved"
 
   # Build a synthetic session_id from the fixture name so cache paths are
   # predictable (bin/statusline.sh sanitizes anyway, but we want determinism).
   fix_session="fixture-$(printf '%s' "$fix" | tr -cd 'a-zA-Z0-9._-')"
-  # Splice session_id into the resolved input.json
-  resolved_with_session=$(jq --arg sid "$fix_session" '.session_id = $sid' "$input_resolved" 2>/dev/null || cat "$input_resolved")
-  printf '%s\n' "$resolved_with_session" > "$input_resolved"
+  # Splice session_id into the resolved input.json. R1 code-reviewer M2:
+  # `|| cat` fallback hid jq failures and could leave session_id unset →
+  # cache collisions across fixtures. If jq fails here something is
+  # actually broken; fail loud instead.
+  if ! jq --arg sid "$fix_session" '.session_id = $sid' "$input_resolved" > "${input_resolved}.tmp" 2>/dev/null; then
+    printf 'run-eval.sh: failed to set session_id in %s\n' "$input_resolved" >&2
+    rm -f "${input_resolved}.tmp"
+    return 1
+  fi
+  mv "${input_resolved}.tmp" "$input_resolved"
 
   obs_file="$run_dir/${fix}.observations.txt"
   err_file="$run_dir/${fix}.stderr.txt"

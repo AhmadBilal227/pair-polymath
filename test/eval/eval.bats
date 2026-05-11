@@ -118,19 +118,29 @@ EOF
     PP_EVAL_MODE=1 PP_EXTERNAL_LLM=0 PP_PARALLEL_INTERVAL_S=1 PP_IDLE_THRESHOLD_S=999999 \
     bash -c "bash '$REPO_ROOT/bin/statusline.sh' < '$sandbox/input.json'"
   [ "$status" -eq 0 ]
-  # Exactly 7 lens lines (default lens count)
+  # Read PP_LENS_COUNT from the lens loader rather than hardcoding 7. The
+  # default registry can grow/shrink and the test should follow (R1
+  # code-reviewer / GPT M3).
+  expected_count=$(PP_ROOT="$REPO_ROOT" bash -c ". '$REPO_ROOT/lib/lens-loader.sh' && pp_load_lenses >/dev/null 2>&1 && echo \$PP_LENS_COUNT")
   line_count=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
-  [ "$line_count" -eq 7 ]
+  [ "$line_count" -eq "$expected_count" ]
   # Every line matches the LENS_ID|||...|||...|||... shape
   printf '%s\n' "$output" | grep -Eq '^[A-Z_]+\|\|\|'
   rm -rf "$sandbox"
 }
 
 @test "eval: PP_EVAL_MODE has no effect when unset (normal render path)" {
-  # Verifies the env gate is a strict opt-in.
+  # Strict opt-in: with PP_EVAL_MODE unset, the script must NOT emit any
+  # line matching the eval-mode `LENS_ID|||...` shape on stdout.
+  # R1 code-reviewer H3: previous assertion was `|| skip` which converted
+  # any failure into a skip — the test could never fail. Fixed: assert
+  # NO line matches the eval shape (positive negative-control).
   run bash -c "echo '{}' | bash '$REPO_ROOT/bin/statusline.sh'"
   [ "$status" -eq 0 ]
-  # Normal render emits at least one line; eval-mode rows have ||| separators,
-  # the normal render does not at line 1 (it's the colored status line).
-  ! printf '%s' "${lines[0]:-}" | grep -q '|||' || skip "first line happened to contain ||| in non-eval mode"
+  # No line on stdout should look like an eval-mode emission. If one does,
+  # PP_EVAL_MODE has leaked into the default path.
+  if printf '%s\n' "$output" | grep -Eq '^[A-Z_]+\|\|\|.*\|\|\|.*\|\|\|'; then
+    printf 'EVAL_MODE leak detected — stdout has lens-shape lines without PP_EVAL_MODE set:\n%s\n' "$output" >&2
+    return 1
+  fi
 }

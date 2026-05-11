@@ -237,6 +237,19 @@ Dependencies: `jq`, `llm` (≥0.20). Optional: `gh` for richer git grounding, `g
 
 ---
 
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) — cycle diagram + sequence diagram + module map + state-file invariants
+- [`docs/customization.md`](docs/customization.md) — full `PP_*` env var reference
+- [`docs/cost-model.md`](docs/cost-model.md) — the formula behind `polymath cost`
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failure modes by doctor check
+- [`docs/security.md`](docs/security.md) — operational companion to [SECURITY.md](SECURITY.md)
+- [`docs/demo-recipe.md`](docs/demo-recipe.md) — how to (re)record the asciinema demo
+- [`docs/v0.2-plan.md`](docs/v0.2-plan.md) — what's coming next
+- [`CHANGELOG.md`](CHANGELOG.md) — every commit explained
+
+---
+
 ## What's coming in v0.2
 
 Deferred from this lean alpha (full list in [CHANGELOG.md](CHANGELOG.md)):

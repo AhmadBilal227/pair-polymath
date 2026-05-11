@@ -107,6 +107,13 @@ fi
 step "Setting up user override directory"
 mkdir -p "$USER_CONFIG_DIR"/{lenses,prompts,cache,config}
 chmod 700 "$USER_CONFIG_DIR" 2>/dev/null || true
+# Tighten ~/.claude/cache to 700 ONLY when we create it fresh. Never chmod
+# a user-existing directory — they may have intentionally relaxed perms
+# (e.g. shared dev box) and we shouldn't override that decision.
+if [ ! -d "$CLAUDE_DIR/cache" ]; then
+  mkdir -p "$CLAUDE_DIR/cache"
+  chmod 700 "$CLAUDE_DIR/cache" 2>/dev/null || true
+fi
 if [ ! -f "$USER_CONFIG_DIR/config/user.env" ]; then
   cat > "$USER_CONFIG_DIR/config/user.env" <<'EOF'
 # Pair Polymath user overrides — copy any defaults you want to change here.

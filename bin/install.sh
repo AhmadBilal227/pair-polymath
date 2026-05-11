@@ -108,18 +108,19 @@ _pp_run() {
     return 0
   fi
 
-  # R2 fix (DevOps M2 / Code-rev M2): --verbose previously skipped stderr
-  # capture entirely, losing the audit-log diagnostic at the exact moment
-  # the user needs it (failure with --verbose = post-mortem JSONL has no
-  # stderr_tail). Now: tee stderr to BOTH terminal and capture file so the
-  # user sees live output AND the audit log retains the last-500-bytes tail.
+  # R3 fix (R2's tee >&2 had a process-substitution race: bash doesn't wait
+  # on the proc-sub child before continuing, so `tail -c 500` could read
+  # before tee finished flushing → empty audit log under --verbose, exactly
+  # the regression R2 claimed to fix). Simpler + race-free: always capture
+  # stderr to a file, then if --verbose, cat the file to stderr AFTER the
+  # command completes. Trades real-time streaming for reliability — most
+  # installer steps finish in <30s and "see why it failed" is the use case.
   local stderr_tmp
   stderr_tmp=$(mktemp 2>/dev/null) || stderr_tmp="/tmp/pp-stderr-$$"
   local rc=0
-  if [ "$PP_VERBOSE" = "1" ]; then
-    "$@" 2> >(tee "$stderr_tmp" >&2) || rc=$?
-  else
-    "$@" 2> "$stderr_tmp" || rc=$?
+  "$@" 2> "$stderr_tmp" || rc=$?
+  if [ "$PP_VERBOSE" = "1" ] && [ -s "$stderr_tmp" ]; then
+    cat "$stderr_tmp" >&2
   fi
   local stderr_tail=""
   if [ -s "$stderr_tmp" ]; then
@@ -155,14 +156,15 @@ _pp_eval() {
     return 0
   fi
 
-  # R2 fix: same tee pattern as _pp_run so --verbose preserves the audit log.
+  # R3 fix: same race-free pattern as _pp_run — capture to file, then if
+  # --verbose, cat to stderr after the command completes. No process
+  # substitution, no wait gymnastics, no truncated audit log.
   local stderr_tmp
   stderr_tmp=$(mktemp 2>/dev/null) || stderr_tmp="/tmp/pp-stderr-$$"
   local rc=0
-  if [ "$PP_VERBOSE" = "1" ]; then
-    eval "$cmd_str" 2> >(tee "$stderr_tmp" >&2) || rc=$?
-  else
-    eval "$cmd_str" 2> "$stderr_tmp" || rc=$?
+  eval "$cmd_str" 2> "$stderr_tmp" || rc=$?
+  if [ "$PP_VERBOSE" = "1" ] && [ -s "$stderr_tmp" ]; then
+    cat "$stderr_tmp" >&2
   fi
   local stderr_tail=""
   if [ -s "$stderr_tmp" ]; then
@@ -562,22 +564,38 @@ else
   fi
 fi
 
-check_or_install jq "$PKG_INSTALL_JQ"
-check_or_install llm "$PIP_INSTALL_LLM"
-
-# R2 fix (Code-reviewer M1 + DevOps H2): pipx installs llm to ~/.local/bin
-# but doesn't update the current shell's PATH. Without this, the immediately-
-# following `command -v llm` check fails and the user sees "install succeeded
-# → install failed" two lines apart. Prepend now; pipx ensurepath will make
-# it permanent across shell sessions.
+# R3 fix (R2 ordering bug — multiple reviewers): PATH prepend MUST happen
+# before check_or_install llm so the post-install `command -v llm` check
+# (at the top-level script ~line 600) can find pipx's installation. R2 had
+# this block AFTER check_or_install which meant pipx-installed llm was
+# silently invisible until the next shell.
 case "$PIP_INSTALL_LLM" in
   *pipx*)
     case ":$PATH:" in
       *":$HOME/.local/bin:"*) ;;
       *) export PATH="$HOME/.local/bin:$PATH" ;;
     esac
-    # pipx ensurepath edits shell rc files so the path persists across
-    # sessions. Run it now (idempotent if already done).
+    ;;
+esac
+
+# R3 fix (DevOps H2): pipx 1.x refuses to run as root unless PIPX_HOME +
+# PIPX_BIN_DIR point to system locations. Linux containers (Alpine/Ubuntu
+# Docker) default to root, so the new apt/apk pipx install paths would
+# fail at the second `&&` link. Set the system-bin location for root.
+if [ "$(id -u)" = "0" ] && [ "$PP_OS" != "macos" ]; then
+  export PIPX_HOME="${PIPX_HOME:-/opt/pipx}"
+  export PIPX_BIN_DIR="${PIPX_BIN_DIR:-/usr/local/bin}"
+fi
+
+check_or_install jq "$PKG_INSTALL_JQ"
+check_or_install llm "$PIP_INSTALL_LLM"
+
+# Post-install: run pipx ensurepath so the user's NEXT shell session finds
+# llm without manual PATH editing. Idempotent — pipx ensurepath is safe to
+# re-run. Don't fail the install if ensurepath errors (e.g. on root or in
+# CI where shell rc files don't exist).
+case "$PIP_INSTALL_LLM" in
+  *pipx*)
     if command -v pipx >/dev/null 2>&1 && [ "$PP_DRY_RUN" != "1" ]; then
       pipx ensurepath >/dev/null 2>&1 || true
     fi

@@ -26,8 +26,11 @@ _pp_doctor_red()    { printf '  %s✗%s %s%s\n' "$_DC_RED"    "$_DC_RESET" "$1" 
 # === Individual checks ===
 
 doctor_check_bash() {
-  local v="${BASH_VERSION%%.*}"
-  if [ "${v:-0}" -ge 3 ]; then
+  # Enforce >= 3.2 (the macOS-default floor we ship against). Bash 3.0/3.1
+  # would otherwise sneak through a major-only check (review fix L1).
+  local major="${BASH_VERSINFO[0]:-0}"
+  local minor="${BASH_VERSINFO[1]:-0}"
+  if [ "$major" -ge 4 ] || { [ "$major" -eq 3 ] && [ "$minor" -ge 2 ]; }; then
     _pp_doctor_green "bash" "$BASH_VERSION"
     return 0
   fi
@@ -84,6 +87,29 @@ doctor_check_settings_json() {
   return 0
 }
 
+# Extract a filesystem path from a settings.json command string like
+#   "bash '/path with spaces/bin/statusline.sh'"
+#   "bash /Users/x/bin/statusline.sh"
+#   "/Users/x/hooks/inject-monitor-insight.sh"
+# Echoes the path; returns 0 if extraction succeeded.
+_pp_doctor_extract_path() {
+  local cmd="$1"
+  # Strip a leading "bash " or "/usr/bin/env bash " etc.
+  cmd="${cmd#bash }"
+  cmd="${cmd#/usr/bin/env bash }"
+  # Strip surrounding single quotes if present
+  case "$cmd" in
+    \'*\') cmd="${cmd#\'}"; cmd="${cmd%\'}" ;;
+  esac
+  # Strip surrounding double quotes if present
+  case "$cmd" in
+    \"*\") cmd="${cmd#\"}"; cmd="${cmd%\"}" ;;
+  esac
+  # Take only the first argument (path may have spaces if quoted; if unquoted,
+  # we can't recover spaces — accept the caller's risk).
+  printf '%s' "$cmd"
+}
+
 doctor_check_statusline_wired() {
   local settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
   [ -f "$settings" ] || { _pp_doctor_yellow "statusLine wired" "skipped (no settings.json)"; return 1; }
@@ -93,24 +119,54 @@ doctor_check_statusline_wired() {
     _pp_doctor_yellow "statusLine wired" "no statusLine in settings.json"
     return 1
   fi
-  case "$cmd" in
-    *statusline.sh*) _pp_doctor_green "statusLine wired" "→ statusline.sh" ;;
-    *) _pp_doctor_yellow "statusLine wired" "points elsewhere: $cmd" ;;
-  esac
-  return 0
+
+  # Strict-match: resolve both paths and compare. Substring match (the previous
+  # implementation) would false-pass a /tmp/statusline.sh decoy (review fix H2).
+  # The yellow branch now returns 1 so the summary counts honestly (review fix H1).
+  local extracted want_real got_real
+  extracted=$(_pp_doctor_extract_path "$cmd")
+  want_real=$(cd "$PP_ROOT" 2>/dev/null && realpath "bin/statusline.sh" 2>/dev/null)
+  got_real=$(realpath "$extracted" 2>/dev/null)
+
+  if [ -n "$want_real" ] && [ "$got_real" = "$want_real" ]; then
+    _pp_doctor_green "statusLine wired" "→ $extracted"
+    return 0
+  fi
+  _pp_doctor_yellow "statusLine wired" "points to a different script: $extracted"
+  return 1
 }
 
 doctor_check_hooks_wired() {
   local settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
   [ -f "$settings" ] || { _pp_doctor_yellow "hooks wired" "skipped"; return 1; }
-  local user_hook post_hook
-  user_hook=$(jq -r '[.hooks?.UserPromptSubmit[]?.hooks[]?.command] | map(select(. // "" | test("inject-monitor-insight\\.sh"))) | length' "$settings" 2>/dev/null)
-  post_hook=$(jq -r '[.hooks?.PostToolUse[]?.hooks[]?.command]      | map(select(. // "" | test("cache-test-result\\.sh"))) | length' "$settings" 2>/dev/null)
-  if [ "${user_hook:-0}" -ge 1 ] && [ "${post_hook:-0}" -ge 1 ]; then
-    _pp_doctor_green "hooks wired" "UserPromptSubmit + PostToolUse"
+
+  # Strict-match: hook command must resolve to OUR script under $PP_ROOT/hooks/,
+  # not just any file with that basename (review fix H2).
+  local want_user want_post
+  want_user=$(cd "$PP_ROOT" 2>/dev/null && realpath "hooks/inject-monitor-insight.sh" 2>/dev/null)
+  want_post=$(cd "$PP_ROOT" 2>/dev/null && realpath "hooks/cache-test-result.sh" 2>/dev/null)
+
+  local user_match=0 post_match=0
+  local cmd extracted resolved
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    extracted=$(_pp_doctor_extract_path "$cmd")
+    resolved=$(realpath "$extracted" 2>/dev/null)
+    [ -n "$want_user" ] && [ "$resolved" = "$want_user" ] && user_match=1
+  done < <(jq -r '.hooks?.UserPromptSubmit[]?.hooks[]?.command // empty' "$settings" 2>/dev/null)
+
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    extracted=$(_pp_doctor_extract_path "$cmd")
+    resolved=$(realpath "$extracted" 2>/dev/null)
+    [ -n "$want_post" ] && [ "$resolved" = "$want_post" ] && post_match=1
+  done < <(jq -r '.hooks?.PostToolUse[]?.hooks[]?.command // empty' "$settings" 2>/dev/null)
+
+  if [ "$user_match" -eq 1 ] && [ "$post_match" -eq 1 ]; then
+    _pp_doctor_green "hooks wired" "UserPromptSubmit + PostToolUse → \$PP_ROOT/hooks"
     return 0
   fi
-  _pp_doctor_red "hooks wired" "missing (UserPromptSubmit=$user_hook PostToolUse=$post_hook); re-run installer"
+  _pp_doctor_red "hooks wired" "missing or pointing elsewhere (UserPromptSubmit=$user_match PostToolUse=$post_match); re-run installer"
   return 2
 }
 
@@ -185,17 +241,30 @@ doctor_check_statusline_smoke() {
 }
 
 doctor_check_network() {
-  # Only when --network flag passed. Costs ~$0.0001.
+  # Only when --network flag passed. Costs ~$0.0001. Bounded by 15s timeout
+  # to prevent DNS/TLS stalls (review fix M3). Match the model's reply exactly,
+  # not as a substring, so an error message that happens to contain "ok" can't
+  # false-pass (review fix M2).
   if ! command -v llm >/dev/null 2>&1; then
     _pp_doctor_yellow "network probe" "skipped (no llm)"
     return 1
   fi
-  local out
-  out=$(printf 'ok' | llm -m gpt-5-mini 'reply with the single word: ok' 2>&1)
-  case "$out" in
-    *ok*) _pp_doctor_green "network probe" "OpenAI reachable; key works" ; return 0 ;;
-    *)    _pp_doctor_red   "network probe" "failed: ${out:0:100}" ; return 2 ;;
-  esac
+  local timeout_cmd=""
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="timeout 15"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="gtimeout 15"
+  fi
+  local out trimmed
+  out=$($timeout_cmd llm -m gpt-5-mini 'Reply with the single word: ok' 2>&1)
+  # Trim whitespace + lowercase + take first line for exact comparison
+  trimmed=$(printf '%s' "$out" | head -1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  if [ "$trimmed" = "ok" ]; then
+    _pp_doctor_green "network probe" "OpenAI reachable; key works"
+    return 0
+  fi
+  _pp_doctor_red "network probe" "failed: ${out:0:100}"
+  return 2
 }
 
 # === Driver ===

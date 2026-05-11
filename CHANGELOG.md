@@ -15,6 +15,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - M4: 6 LLM prompts externalized to `prompts/*.md` (planner, analyst-primary, analyst-retry, critique, escalation-investigation, tip-digest), `lib/prompt-loader.sh` with `${var}` substitution
   - User-customizable: drop `.md` into `~/.claude/pair-polymath/prompts/` to override any prompt
   - 6 inline heredoc system prompts → loader calls in `bin/statusline.sh`
+- M5-lean: `bin/install.sh`, `bin/uninstall.sh`, `bin/polymath` CLI (`status`, `version`, `help`), `test/cli.bats`
+  - Installer auto-detects jq + llm, prompts to install via brew/apt/pip3, prompts for OpenAI key (no-echo), merges `settings.json` with backup
+  - Idempotent (re-run safe), preserves third-party hooks, smoke-tests before activating
+
+### Fixed (M5-lean GPT review pass)
+- **(HIGH H1)** Installer no longer silently clobbers an existing user `statusLine`: detects conflicts and prompts before replacing (default keep)
+- **(HIGH H2)** Uninstaller jq filter now uses `// []` guards: handles `settings.json` where `hooks.UserPromptSubmit` / `PostToolUse` is absent or null
+- **(HIGH H3)** Smoke test runs **before** the `settings.json` merge — a broken `statusline.sh` aborts cleanly instead of leaving the user with a broken activated config
+- **(MEDIUM M2)** Command strings in `settings.json` now single-quote `$PP_ROOT` paths so installs from a directory with spaces work correctly
+- **(MEDIUM M3)** Uninstaller matches by **basename** (e.g. `statusline.sh`, `inject-monitor-insight.sh`): an old install whose checkout was moved/renamed still gets cleaned up
+- **(LOW L1)** `polymath status` now honors `$CLAUDE_DIR` consistently with install/uninstall (was hardcoded `$HOME/.claude`)
+- **(LOW L2)** `polymath: unknown command` test now asserts on the stderr message, not just exit code
+- Post-install PATH check warns if `pip3 --user` placed `llm` outside `$PATH`
 
 ### Fixed (M4 GPT review pass)
 - **Secret-leak guard (H1)**: substitution is now single-pass over placeholders found in the ORIGINAL template — a critique-LLM-supplied value like `${OPENAI_API_KEY}` can no longer be re-scanned and expanded into the rendered prompt

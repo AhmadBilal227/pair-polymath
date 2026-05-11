@@ -2,6 +2,10 @@
 # Pair Polymath uninstaller. Removes our settings.json entries; preserves
 # everything else (including user's other hooks and the override dir + cache
 # by default — separate prompt for those).
+#
+# Match strategy: filter by BASENAME of our scripts (statusline.sh,
+# inject-monitor-insight.sh, cache-test-result.sh) so an old install from
+# a moved/renamed checkout still gets cleaned up (review fix M3).
 
 set -u
 
@@ -25,21 +29,23 @@ else
   ok "backup: $bak"
 
   tmp=$(mktemp)
-  jq --arg sl "bash $PP_ROOT/bin/statusline.sh" \
-     --arg hook_user "$PP_ROOT/hooks/inject-monitor-insight.sh" \
-     --arg hook_post "$PP_ROOT/hooks/cache-test-result.sh" '
-    # Remove our statusLine if it points to our script
-    (if .statusLine?.command == $sl then del(.statusLine) else . end)
+  # Match by basename via jq's `test` regex so orphans from a moved checkout
+  # still get cleaned up. The `// []` guards prevent jq from crashing when
+  # the array is null/absent (review fix H2).
+  jq '
+    # Drop our statusLine if its command references our statusline.sh basename
+    (if (.statusLine?.command // "") | test("statusline\\.sh") then del(.statusLine) else . end)
     |
-    # Filter out any hook entry whose hooks[].command matches ours
     .hooks.UserPromptSubmit |= (
-      map(.hooks |= map(select(.command != $hook_user)))
-      | map(select(.hooks | length > 0))
+      (. // [])
+      | map(.hooks |= ((. // []) | map(select((.command // "") | test("inject-monitor-insight\\.sh") | not))))
+      | map(select((.hooks // []) | length > 0))
     )
     |
     .hooks.PostToolUse |= (
-      map(.hooks |= map(select(.command != $hook_post)))
-      | map(select(.hooks | length > 0))
+      (. // [])
+      | map(.hooks |= ((. // []) | map(select((.command // "") | test("cache-test-result\\.sh") | not))))
+      | map(select((.hooks // []) | length > 0))
     )
   ' "$SETTINGS_FILE" > "$tmp"
 

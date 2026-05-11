@@ -9,7 +9,6 @@
 set -e
 set -u
 
-# Locate plugin root (the dir containing bin/, lib/, etc.)
 PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 USER_CONFIG_DIR="$CLAUDE_DIR/pair-polymath"
@@ -55,7 +54,6 @@ check_or_install() {
   esac
 }
 
-# Detect package manager
 if command -v brew >/dev/null 2>&1; then
   PKG_INSTALL_JQ="brew install jq"
 elif command -v apt-get >/dev/null 2>&1; then
@@ -65,11 +63,20 @@ else
   exit 1
 fi
 
-# Use pip3 for llm (Python). Pinned for supply-chain safety.
 PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
 
 check_or_install jq "$PKG_INSTALL_JQ"
 check_or_install llm "$PIP_INSTALL_LLM"
+
+# pip --user installs to ~/.local/bin (Linux) or ~/Library/Python/.../bin (macOS),
+# which may not be on PATH. Verify llm is now invocable; print PATH hint if not.
+if ! command -v llm >/dev/null 2>&1; then
+  warn "'llm' was installed but is not on PATH."
+  warn "Add this to your shell rc (\$HOME/.bashrc / .zshrc) and restart the shell:"
+  printf '    export PATH="$HOME/.local/bin:$PATH"\n'
+  warn "Then re-run this installer."
+  exit 1
+fi
 
 # === Step 3: OpenAI key ===
 step "OpenAI API key"
@@ -79,8 +86,7 @@ else
   printf '  Pair Polymath uses gpt-5 family models.\n'
   printf '  Get a key: https://platform.openai.com/api-keys\n'
   prompt "Paste your OpenAI key (sk-...) or press Enter to skip:"
-  # Read with no-echo for the secret. `|| true` so a non-tty stdin (CI/heredoc)
-  # doesn't trip set -e — we still read, just without the echo guard.
+  # No-echo for the secret. `|| true` keeps set -e happy when stdin isn't a tty.
   stty -echo 2>/dev/null || true
   read -r openai_key || openai_key=""
   stty echo 2>/dev/null || true
@@ -112,32 +118,71 @@ else
   ok "$USER_CONFIG_DIR/config/user.env already exists — preserved"
 fi
 
-# === Step 5: Merge into settings.json ===
+# === Step 5: Smoke-test BEFORE touching settings.json (review fix H3) ===
+# If statusline.sh is broken in this checkout, fail before pointing settings
+# at it. Otherwise we'd leave the user with a broken statusLine.
+step "Smoke-testing statusline before activating"
+if [ -f "$PP_ROOT/test/fixtures/stdin-sample.json" ]; then
+  if cat "$PP_ROOT/test/fixtures/stdin-sample.json" | bash "$PP_ROOT/bin/statusline.sh" >/dev/null 2>&1; then
+    ok "statusline.sh exits 0 on sample input"
+  else
+    err "statusline.sh failed smoke test — aborting; settings.json untouched."
+    exit 1
+  fi
+else
+  warn "no smoke fixture found; skipping pre-flight test"
+fi
+
+# === Step 6: Merge into settings.json ===
 step "Merging into $SETTINGS_FILE"
+
+# Quote paths so the shell command string in settings.json survives word-splitting
+# when PP_ROOT contains spaces (review fix M2). Single-quoted around the path
+# means bash strips the quotes and runs the path as one argument.
+SL_CMD="bash '${PP_ROOT}/bin/statusline.sh'"
+HOOK_USER_CMD="'${PP_ROOT}/hooks/inject-monitor-insight.sh'"
+HOOK_POST_CMD="'${PP_ROOT}/hooks/cache-test-result.sh'"
+
 if [ -f "$SETTINGS_FILE" ]; then
   bak="${SETTINGS_FILE}.bak.$(date +%s)"
   cp "$SETTINGS_FILE" "$bak"
   ok "backup: $bak"
+
+  # Review fix H1: if a different statusLine is already set, prompt before clobber.
+  existing_sl=$(jq -r '.statusLine?.command // ""' "$SETTINGS_FILE" 2>/dev/null)
+  install_statusline=1
+  if [ -n "$existing_sl" ] && [ "$existing_sl" != "$SL_CMD" ]; then
+    warn "Existing statusLine detected:"
+    printf '    %s\n' "$existing_sl"
+    prompt "Replace with Pair Polymath statusLine? [y/N]"
+    read -r ans
+    case "${ans:-N}" in
+      [Yy]*) install_statusline=1 ;;
+      *)     install_statusline=0; warn "Keeping existing statusLine; installing hooks only." ;;
+    esac
+  fi
 else
   echo '{}' > "$SETTINGS_FILE"
+  install_statusline=1
 fi
 
-# Use jq to atomically merge our entries. Idempotent: re-running won't double-add.
 tmp=$(mktemp)
-jq --arg sl "bash $PP_ROOT/bin/statusline.sh" \
-   --arg hook_user "$PP_ROOT/hooks/inject-monitor-insight.sh" \
-   --arg hook_post "$PP_ROOT/hooks/cache-test-result.sh" '
-  # statusLine
-  .statusLine = {type: "command", command: $sl, refreshInterval: 2}
+jq --arg sl "$SL_CMD" \
+   --arg hook_user "$HOOK_USER_CMD" \
+   --arg hook_post "$HOOK_POST_CMD" \
+   --argjson set_sl "$install_statusline" '
+  # statusLine (conditional on $set_sl)
+  (if $set_sl == 1 then .statusLine = {type: "command", command: $sl, refreshInterval: 2} else . end)
   |
-  # UserPromptSubmit hook
-  (.hooks.UserPromptSubmit //= [])
+  # UserPromptSubmit hook — append if not already present (idempotent)
+  (.hooks //= {})
+  | (.hooks.UserPromptSubmit //= [])
   | (.hooks.UserPromptSubmit |= (
       if any(.[]; .hooks[]?.command == $hook_user) then .
       else . + [{matcher: "*", hooks: [{type: "command", command: $hook_user, timeout: 3}]}]
       end))
   |
-  # PostToolUse hook
+  # PostToolUse hook — append if not already present (idempotent)
   (.hooks.PostToolUse //= [])
   | (.hooks.PostToolUse |= (
       if any(.[]; .hooks[]?.command == $hook_post) then .
@@ -152,17 +197,10 @@ if ! jq empty "$tmp" 2>/dev/null; then
 fi
 
 mv "$tmp" "$SETTINGS_FILE"
-ok "settings.json updated (statusLine + 2 hooks)"
-
-# === Step 6: Smoke test ===
-step "Smoke-testing statusline"
-if [ -f "$PP_ROOT/test/fixtures/stdin-sample.json" ]; then
-  if cat "$PP_ROOT/test/fixtures/stdin-sample.json" | bash "$PP_ROOT/bin/statusline.sh" >/dev/null 2>&1; then
-    ok "statusline.sh exits 0 on sample input"
-  else
-    err "statusline.sh failed smoke test — installation aborted before activating"
-    exit 1
-  fi
+if [ "$install_statusline" = "1" ]; then
+  ok "settings.json updated (statusLine + 2 hooks)"
+else
+  ok "settings.json updated (2 hooks; existing statusLine preserved)"
 fi
 
 # === Done ===

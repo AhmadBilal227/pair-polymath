@@ -37,7 +37,9 @@ teardown() {
   [[ "$output" == *"Pair Polymath status"* ]]
 }
 
-@test "polymath: unknown command → exit 2 + stderr" {
-  run bash "$PP_ROOT/bin/polymath" nope
+@test "polymath: unknown command → exit 2 + stderr message" {
+  run bash "$PP_ROOT/bin/polymath" nope 2>&1
   [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown command"* ]]
+  [[ "$output" == *"polymath help"* ]]
 }

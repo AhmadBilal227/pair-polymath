@@ -45,7 +45,8 @@ case "$cmd" in
     prompt_count=$(find "$PP_ROOT/prompts" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
     printf '  Prompts:         %s built-in\n' "$prompt_count"
 
-    user_prompts=$(find "$HOME/.claude/pair-polymath/prompts" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+    # Honor $CLAUDE_DIR like install/uninstall do (review fix L1)
+    user_prompts=$(find "${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/prompts" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
     [ "$user_prompts" -gt 0 ] && printf '    +%s user overrides\n' "$user_prompts"
 
     # Feature flags

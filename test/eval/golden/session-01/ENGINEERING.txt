@@ -1,0 +1,1 @@
+ARCH|||Inner findMany loop is the classic n+1 — 1+N queries per request|||listUsersWithPosts iterates users and fires prisma.post.findMany per row. Replace with a single findMany using include: { posts: true } or a JOIN. Verify with EXPLAIN ANALYZE.

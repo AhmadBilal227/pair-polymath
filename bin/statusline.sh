@@ -430,6 +430,17 @@ is_active=1
 last_parallel=$(cat "$PP_LAST_PARALLEL" 2>/dev/null || echo 0)
 parallel_age=$(($(date +%s) - last_parallel))
 
+# === PP_EVAL_MODE — eval harness short-circuit ===
+# When set to "1", force the cycle gates open (idle/interval/cache-staleness)
+# so a single statusline invocation deterministically runs ONE full cycle and
+# emits the raw lens observations to stdout. Used by test/eval/run-eval.sh to
+# replay frozen fixtures. No effect when unset — normal users never see this
+# path. Honors PP_EXTERNAL_LLM=0 for offline/dry-run runs.
+if [ "${PP_EVAL_MODE:-0}" = "1" ]; then
+  is_active=1
+  parallel_age=$((PP_PARALLEL_INTERVAL_S + 1))
+fi
+
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
     && [ "$is_active" -eq 1 ] \
     && [ "${PP_EXTERNAL_LLM:-1}" = "1" ] \
@@ -954,8 +965,48 @@ $critique_input"
 
       # Cycle cleanup (metrics flush + lock release) handled by the EXIT
       # trap above so SIGTERM mid-cycle can't lose data (review fix R2-M1).
+      #
+      # In normal operation the cycle is fire-and-forget (`&`) so the 2-second
+      # statusline render isn't blocked by ~30-60s of LLM calls. In eval mode
+      # (PP_EVAL_MODE=1) we run the cycle synchronously so observations are
+      # available when we read the caches below.
     ) >/dev/null 2>&1 &
+    _pp_cycle_pid=$!
+    if [ "${PP_EVAL_MODE:-0}" = "1" ]; then
+      wait "$_pp_cycle_pid" 2>/dev/null || true
+    fi
   fi
+fi
+
+# === PP_EVAL_MODE — emit raw lens observations and exit ===
+# Reads each lens's cache file written by the cycle above and emits one line
+# per lens to stdout in the eval format: LENS_ID|||TOPIC|||HOOK|||BODY.
+# TOPIC = the HAT prefix (e.g. ARCH), HOOK = the hook one-liner, BODY = the
+# concrete next-step body. Lines for lenses with no observation (SILENT,
+# malformed, or DROP-without-retry) are emitted with empty fields so the
+# scorer can detect the absence. The normal statusline render is suppressed.
+if [ "${PP_EVAL_MODE:-0}" = "1" ]; then
+  for _ev_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    _ev_id="${PP_LENS_IDS[$_ev_idx]}"
+    _ev_cache="${PP_CACHE_DIR}/cc-monitor-${session_id}-${_ev_id}.txt"
+    _ev_line=""
+    if [ -f "$_ev_cache" ] && [ -s "$_ev_cache" ]; then
+      _ev_line=$(head -1 "$_ev_cache" 2>/dev/null)
+    fi
+    if [ -n "$_ev_line" ] && printf '%s' "$_ev_line" | LC_ALL=C grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
+      # Parse "HAT: hook|||body" into (HAT, hook, body)
+      _ev_hat="${_ev_line%%:*}"
+      _ev_rest="${_ev_line#*: }"
+      _ev_hook="${_ev_rest%%|||*}"
+      _ev_body="${_ev_rest#*|||}"
+      printf '%s|||%s|||%s|||%s\n' "$_ev_id" "$_ev_hat" "$_ev_hook" "$_ev_body"
+    else
+      # Empty observation slot — emit blank fields so consumers see the lens
+      # ran but produced nothing scorable (SILENT, dropped, no llm key, etc.)
+      printf '%s|||||||\n' "$_ev_id"
+    fi
+  done
+  exit 0
 fi
 
 # Resolve monitor: rotate through PP_LENS_COUNT lenses based on time slot (30s per lens)

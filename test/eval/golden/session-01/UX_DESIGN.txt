@@ -1,0 +1,1 @@
+UX|||No client-side loading state for a known-slow endpoint|||/api/users is timing out per the user's own report; no spinner or skeleton mentioned anywhere in the visible code path. Add a Suspense boundary or fetch-state badge before the refactor lands. Defer.

@@ -170,7 +170,12 @@ else
   install_statusline=1
 fi
 
-tmp=$(mktemp)
+# Create tmp in the SAME directory as settings.json so the eventual mv stays
+# atomic-rename-within-filesystem. Bare `mktemp` lands in /tmp (often tmpfs on
+# Linux) which makes mv a non-atomic copy+delete with a race window — Claude
+# Code reads settings.json on every prompt, so a partial read is a real risk.
+# Caught by the ENGINEERING lens on 2026-05-11.
+tmp=$(mktemp "${SETTINGS_FILE}.XXXXXX") || { err "mktemp failed"; exit 1; }
 jq --arg sl "$SL_CMD" \
    --arg hook_user "$HOOK_USER_CMD" \
    --arg hook_post "$HOOK_POST_CMD" \

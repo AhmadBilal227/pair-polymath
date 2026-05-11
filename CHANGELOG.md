@@ -12,6 +12,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   - Eliminates the duplicate-case-statement drift bug between primary and retry analyst paths
   - Eliminates dead `LENS_NAMES` (line 382 stale 5-entry array)
   - User-customizable: drop JSON into `~/.claude/pair-polymath/lenses/` to add/override
+- M4: 6 LLM prompts externalized to `prompts/*.md` (planner, analyst-primary, analyst-retry, critique, escalation-investigation, tip-digest), `lib/prompt-loader.sh` with `${var}` substitution
+  - User-customizable: drop `.md` into `~/.claude/pair-polymath/prompts/` to override any prompt
+  - 6 inline heredoc system prompts → loader calls in `bin/statusline.sh`
+
+### Fixed (M4 GPT review pass)
+- **Secret-leak guard (H1)**: substitution is now single-pass over placeholders found in the ORIGINAL template — a critique-LLM-supplied value like `${OPENAI_API_KEY}` can no longer be re-scanned and expanded into the rendered prompt
+- LLM calls now guard `[ -n "$_sys" ]` at all 6 sites — a missing/broken prompt no longer silently sends an empty system prompt to the model (also saves budget on no-op calls)
+- Replaced `grep | head` placeholder probe with bash regex `[[ =~ ]]` + `BASH_REMATCH` (no pipeline → no `set -e -o pipefail` interaction)
+- Fixed infinite-loop bug where a stray `}` before a real placeholder could prevent advancing past the match; now advances by full `${BASH_REMATCH[0]}` length
 
 ### Fixed (M3 GPT review pass)
 - Lens count cap (`PP_LENS_MAX`, default 16): stuffed user dir can no longer turn a refresh into a parallel-LLM cost bomb

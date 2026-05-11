@@ -330,7 +330,11 @@ if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
 
       if [ -n "$stories" ] && command -v llm >/dev/null 2>&1; then
         tip_digest_sys=$(pp_render_prompt tip-digest)
-        digest=$(printf "USER PROJECT CONTEXT (from CLAUDE.md):\n%s\n\nRECENT WORK (last 5 commits):\n%s\n\nHN STORIES:\n%s\n\nARXIV PAPERS (cs.AI / cs.HC):\n%s" "$project_ctx" "$recent_commits" "$stories" "$arxiv_titles" | run_llm 40 -m gpt-5-mini -s "$tip_digest_sys" 2>/dev/null)
+        # Skip the LLM call entirely if the prompt is missing (review fix M1).
+        # Empty $tip_digest_sys means pp_render_prompt failed; we already logged
+        # to stderr. Falling through with -s "" would burn budget on a no-op.
+        digest=""
+        [ -n "$tip_digest_sys" ] && digest=$(printf "USER PROJECT CONTEXT (from CLAUDE.md):\n%s\n\nRECENT WORK (last 5 commits):\n%s\n\nHN STORIES:\n%s\n\nARXIV PAPERS (cs.AI / cs.HC):\n%s" "$project_ctx" "$recent_commits" "$stories" "$arxiv_titles" | run_llm 40 -m gpt-5-mini -s "$tip_digest_sys" 2>/dev/null)
 
         if [ -n "$digest" ]; then
           echo "$digest" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*[-*0-9.)]*[[:space:]]*//' > "${TIP_CACHE}.tmp"
@@ -532,7 +536,8 @@ PLAN
       candidate_file=""
       if command -v llm >/dev/null 2>&1; then
         planner_prompt=$(pp_render_prompt planner)
-        candidate_file=$(printf "%s" "$planner_input" | run_llm 30 -m gpt-5-mini -s "$planner_prompt" 2>/dev/null | head -1 | tr -d "\"'" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        candidate_file=""
+        [ -n "$planner_prompt" ] && candidate_file=$(printf "%s" "$planner_input" | run_llm 30 -m gpt-5-mini -s "$planner_prompt" 2>/dev/null | head -1 | tr -d "\"'" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       fi
 
       # Read the chosen file (validated, 5KB cap)
@@ -657,7 +662,8 @@ GROUND
             lens_evidence=""
             if [ "$is_escalated" -eq 1 ]; then
               inv_sys=$(pp_render_prompt escalation-investigation)
-              inv_output=$(printf "%s" "$grounded" | run_llm 25 -m gpt-5-mini -s "$inv_sys" 2>/dev/null)
+              inv_output=""
+              [ -n "$inv_sys" ] && inv_output=$(printf "%s" "$grounded" | run_llm 25 -m gpt-5-mini -s "$inv_sys" 2>/dev/null)
               # Note: counted under worst-case-23 reservation at cycle start.
 
               if [ -n "$inv_output" ]; then
@@ -698,7 +704,8 @@ $lens_evidence"
             fi
 
             analyst_prompt=$(pp_render_prompt analyst-primary)
-            lens_suggestion=$(printf "%s" "$lens_grounded" | run_llm 60 -m "$agent_model" -s "$analyst_prompt" 2>/dev/null)
+            lens_suggestion=""
+            [ -n "$analyst_prompt" ] && lens_suggestion=$(printf "%s" "$lens_grounded" | run_llm 60 -m "$agent_model" -s "$analyst_prompt" 2>/dev/null)
 
             # Validate + write per-lens cache
             if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
@@ -737,7 +744,8 @@ ${grounded:0:3000}
 
 OBSERVATIONS TO JUDGE:
 $critique_input"
-          critique_output=$(printf "%s" "$critique_data" | run_llm 30 -m "$PP_MODEL_CRITIQUE" -s "$critique_sys" 2>/dev/null)
+          critique_output=""
+          [ -n "$critique_sys" ] && critique_output=$(printf "%s" "$critique_data" | run_llm 30 -m "$PP_MODEL_CRITIQUE" -s "$critique_sys" 2>/dev/null)
           # Note: counted under worst-case-23 reservation at cycle start.
 
           # Apply verdicts + 1-retry auto-correction loop + streak tracking for escalation
@@ -770,7 +778,8 @@ $critique_input"
 
                   retry_sys=$(pp_render_prompt analyst-retry)
 
-                  retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
+                  retry_result=""
+                  [ -n "$retry_sys" ] && retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
                   # Note: counted under worst-case-23 reservation at cycle start.
 
                   # Validate and accept the retry (loosened body min to 40 for retries)

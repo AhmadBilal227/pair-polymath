@@ -57,3 +57,29 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$output" = "X Y X" ]
 }
+
+# Regression test for review fix H1: a substitution VALUE that looks like a
+# placeholder must NOT be re-scanned and expanded. If an LLM produces a
+# critique reason of "${OPENAI_API_KEY}", the rendered prompt must contain
+# that literal string, NOT the actual environment value.
+@test "loader: substitution values are NOT re-scanned (secret-leak guard)" {
+  mkdir -p "$HOME/.claude/pair-polymath/prompts"
+  echo 'reason: ${drop_reason}' > "$HOME/.claude/pair-polymath/prompts/dropguard.md"
+  export OPENAI_API_KEY="sk-NEVER-LEAK-THIS-12345"
+  drop_reason='${OPENAI_API_KEY}' run pp_render_prompt dropguard
+  [ "$status" -eq 0 ]
+  # The literal "${OPENAI_API_KEY}" should appear in output, but NOT the secret
+  [[ "$output" == *'${OPENAI_API_KEY}'* ]]
+  [[ "$output" != *"sk-NEVER-LEAK-THIS"* ]]
+  unset OPENAI_API_KEY
+}
+
+# Regression for the advance-past-match infinite-loop bug: a template with a
+# stray `}` before a placeholder must still be processed correctly.
+@test "loader: handles templates with stray } before placeholder" {
+  mkdir -p "$HOME/.claude/pair-polymath/prompts"
+  printf 'func() { return ${val}; }\n' > "$HOME/.claude/pair-polymath/prompts/strayrbrace.md"
+  val="42" run pp_render_prompt strayrbrace
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"return 42;"* ]]
+}

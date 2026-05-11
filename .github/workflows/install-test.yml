@@ -170,12 +170,28 @@ jobs:
         # Issue #14 Phase 1: always surface diagnostics. The previous version
         # swallowed /tmp/dry-run.log on failure so we couldn't see WHICH of the
         # three assertions tripped or what the installer actually printed.
+        #
+        # Issue #14 Phase 2 root cause: GitHub's default `run:` shell is
+        # `bash --noprofile --norc -eo pipefail {0}`. On the fresh Ubuntu
+        # runner, $HOME/.local/bin, $HOME/.local/share, and $HOME/.config may
+        # not exist — `find` then exits non-zero, and `... | sort` with
+        # -o pipefail propagates that, so `home_before=$(snapshot)` aborts
+        # under -e BEFORE any echo runs. macOS (where the runner user owns
+        # those paths from prior tooling) never tripped this. Fix: ensure
+        # the paths exist before snapshotting, and don't let stderr-suppressed
+        # find failures break the pipeline.
         run: |
           set -uo pipefail
-          mkdir -p "$HOME/.claude"   # baseline dir; dry-run shouldn't add anything
+          # Pre-create the snapshot targets so `find` always has valid
+          # arguments. dry-run should not add anything to these dirs;
+          # creating empty dirs here is part of the snapshot baseline, not
+          # something the installer is responsible for.
+          mkdir -p "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config"
           snapshot() {
-            find "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config" \
-              -mindepth 1 2>/dev/null | sort
+            # `|| true` keeps the pipeline rc=0 even if find hits a
+            # transiently missing path (defense in depth on top of mkdir).
+            { find "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config" \
+                -mindepth 1 2>/dev/null || true; } | sort
           }
           home_before=$(snapshot)
           echo "=== home_before (first 30 lines) ==="

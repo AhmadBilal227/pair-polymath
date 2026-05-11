@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a new capability or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case or pain point. Be specific about the workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: What would you want it to do? Optional — sometimes the problem is clear and the maintainer should design.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any existing workarounds, or other tools that solve this?
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This fits within the project's mission (advisor + teacher for Claude Code)
+        - label: This does NOT require a new mandatory dependency
+        - label: I'm willing to contribute the PR

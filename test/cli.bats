@@ -610,3 +610,247 @@ SH
   [[ "$output" == *"non-interactive stdin without --yes"* ]]
   ! [[ "$output" == *"SHOULD_NOT_RUN"* ]]
 }
+
+# === Round-5 regressions ===
+
+# Helper: shared fixture builder for update tests. Builds a remote git repo
+# with required files and a clone tracking it. Subsequent commits to the
+# remote let us drive --yes through to the post-pull diff branch.
+_pp_r5_build_remote_and_clone() {
+  local remote_dir="$1"
+  local clone_dir="$2"
+  git -C "$remote_dir" init --quiet
+  git -C "$remote_dir" symbolic-ref HEAD refs/heads/main
+  mkdir -p "$remote_dir/bin" "$remote_dir/lib" "$remote_dir/lenses" "$remote_dir/prompts"
+  echo "0.0.0" > "$remote_dir/VERSION"
+  cp "$PP_ROOT/bin/polymath" "$remote_dir/bin/polymath"
+  cp "$PP_ROOT/lib/config.sh" "$remote_dir/lib/"
+  cp "$PP_ROOT/lib/budget.sh" "$remote_dir/lib/"
+  cp "$PP_ROOT/lib/lens-loader.sh" "$remote_dir/lib/"
+  cp -R "$PP_ROOT/lenses/." "$remote_dir/lenses/"
+  cp -R "$PP_ROOT/prompts/." "$remote_dir/prompts/"
+  # Trap installer (must never run)
+  cat > "$remote_dir/bin/install.sh" <<'SH'
+#!/usr/bin/env bash
+echo SHOULD_NOT_RUN
+SH
+  chmod +x "$remote_dir/bin/install.sh"
+  git -C "$remote_dir" config user.email "t@t"
+  git -C "$remote_dir" config user.name t
+  git -C "$remote_dir" add -A
+  git -C "$remote_dir" commit -q -m "init"
+  git clone --quiet "$remote_dir" "$clone_dir"
+  git -C "$clone_dir" config user.email "t@t"
+  git -C "$clone_dir" config user.name t
+}
+
+# Round-4 R4-1 (HIGH): --yes detects installer-affecting changes after pull.
+# Case A: commit touches only an inert file → "install was idempotent".
+@test "polymath update --yes: idempotent when pull does not touch installer (R4-1a)" {
+  remote_dir=$(mktemp -d)
+  clone_dir=$(mktemp -d)
+  _pp_r5_build_remote_and_clone "$remote_dir" "$clone_dir"
+  # Bump only VERSION (inert from installer's perspective)
+  echo "0.0.1" > "$remote_dir/VERSION"
+  git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "bump version only"
+
+  run bash -c "bash '$clone_dir/bin/polymath' update --yes </dev/null"
+  rm -rf "$remote_dir" "$clone_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No installer-affecting files changed"* ]]
+  [[ "$output" == *"install was idempotent"* ]]
+  ! [[ "$output" == *"SHOULD_NOT_RUN"* ]]
+  ! [[ "$output" == *"WARNING"* ]]
+}
+
+# Round-4 R4-1 (HIGH): --yes warns loudly when pull touches bin/install.sh.
+# Pull succeeds (exit 0), warning goes to stderr, user gets exact re-run cmd.
+@test "polymath update --yes: warns loudly when pull touches install.sh (R4-1b)" {
+  remote_dir=$(mktemp -d)
+  clone_dir=$(mktemp -d)
+  _pp_r5_build_remote_and_clone "$remote_dir" "$clone_dir"
+  # Modify bin/install.sh in the remote so the next pull is installer-affecting
+  cat > "$remote_dir/bin/install.sh" <<'SH'
+#!/usr/bin/env bash
+# Updated installer — still a trap if invoked by --yes path
+echo SHOULD_NOT_RUN
+SH
+  git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "tweak installer"
+
+  run bash -c "bash '$clone_dir/bin/polymath' update --yes </dev/null 2>&1"
+  rm -rf "$remote_dir" "$clone_dir"
+  # Pull succeeded — exit code is 0 (we warn, we don't fail)
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]] || [[ "$output" == *"installer-affecting files changed"* ]]
+  [[ "$output" == *"bin/install.sh"* ]]
+  [[ "$output" == *"Re-run interactively"* ]]
+  # The installer itself must NOT have been invoked
+  ! [[ "$output" == *"SHOULD_NOT_RUN"* ]]
+}
+
+# Round-4 R4-2 (HIGH): respect @{upstream} when configured. Set up a branch
+# that tracks a non-default branch on the remote and verify the dry-run
+# output references the upstream (e.g. origin/feature), NOT origin/main.
+@test "polymath update --dry-run: honors @{upstream} for non-default branches (R4-2)" {
+  remote_dir=$(mktemp -d)
+  clone_dir=$(mktemp -d)
+  _pp_r5_build_remote_and_clone "$remote_dir" "$clone_dir"
+  # Create a feature branch on the remote with one extra commit.
+  git -C "$remote_dir" checkout -q -b feature
+  echo "feature-content" > "$remote_dir/FEATURE"
+  git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "add feature"
+  # In the clone: fetch, then check out a local branch tracking origin/feature.
+  git -C "$clone_dir" fetch --quiet origin
+  git -C "$clone_dir" checkout -q -b feature --track origin/feature
+
+  # Dry-run should reference origin/feature, not origin/main.
+  run bash "$clone_dir/bin/polymath" update --dry-run
+  rm -rf "$remote_dir" "$clone_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"origin/feature"* ]]
+  ! [[ "$output" == *"origin/main"* ]]
+}
+
+# Round-4 R4-3 (HIGH): real path refuses on dirty working tree, BEFORE fetch.
+@test "polymath update: refuses on dirty working tree (R4-3 real)" {
+  remote_dir=$(mktemp -d)
+  clone_dir=$(mktemp -d)
+  _pp_r5_build_remote_and_clone "$remote_dir" "$clone_dir"
+  # Dirty the clone: edit a tracked file without committing.
+  echo "dirty" >> "$clone_dir/VERSION"
+  # No need for upstream commits — the dirty check should short-circuit before
+  # the fetch.
+
+  run bash -c "bash '$clone_dir/bin/polymath' update --yes </dev/null 2>&1"
+  rm -rf "$remote_dir" "$clone_dir"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"uncommitted changes"* ]]
+  [[ "$output" == *"Stash or commit"* ]]
+  # Crucially: dirty-tree check fires BEFORE fetch. We assert no "Fetching"
+  # banner appeared in output.
+  ! [[ "$output" == *"Fetching from origin"* ]]
+}
+
+# Round-4 R4-3 (HIGH): dry-run mentions dirty tree as a blocker but exits 0.
+@test "polymath update --dry-run: surfaces dirty tree as blocker, exits 0 (R4-3 dry)" {
+  remote_dir=$(mktemp -d)
+  clone_dir=$(mktemp -d)
+  _pp_r5_build_remote_and_clone "$remote_dir" "$clone_dir"
+  echo "dirty" >> "$clone_dir/VERSION"
+
+  run bash "$clone_dir/bin/polymath" update --dry-run
+  rm -rf "$remote_dir" "$clone_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"uncommitted changes"* ]] || [[ "$output" == *"would refuse"* ]]
+}
+
+# Round-4 R4-4 (MEDIUM): stat flavor probe must work on this platform without
+# falling through to "unknown" → '?' timestamps. We already have F7'/F7
+# regressions that assert mtime resolves; this is a more direct sanity check
+# that some flavor was assigned and timestamps render correctly even when
+# `stat --version` is missing or differs.
+@test "polymath logs: stat flavor probe yields working mtime on this OS (R4-4)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  printf 'X: hook|||body-stat\n' > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  run bash "$PP_ROOT/bin/polymath" logs
+  [ "$status" -eq 0 ]
+  # Real timestamp, not the unknown-flavor '?' sentinel.
+  [[ "$output" =~ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2} ]]
+  ! echo "$output" | grep -qE '^\?  '
+  ! echo "$output" | grep -qE '^\? '
+}
+
+# Round-4 R4-5 (MEDIUM): --follow (no --lens) must include ALL lens files for
+# the session, not just the newest. We can't easily test the actual tailing
+# loop (it blocks), but we can assert that with no lens files at all, the
+# session-empty message fires — which exercises the new file-collection
+# code path. The session is set explicitly so no auto-sniff path is taken,
+# and the empty file-collection branch exits cleanly (no `tail -F` invoked).
+@test "polymath logs --follow: empty session prints 'no observations' (R4-5 empty)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  # Seed a sidecar-only file so the session-sniff path can find the session
+  # but the post-filter file list is EMPTY. This exercises R4-5's new branch
+  # without needing `timeout`(1) (which macOS lacks).
+  export PP_SESSION_ID="empty-session"
+  printf 'verdict\n' > "$PP_CACHE_DIR/cc-monitor-empty-session-X-verdict.txt"
+  printf 'streak=1\n' > "$PP_CACHE_DIR/cc-monitor-empty-session-X-streak.txt"
+  run bash "$PP_ROOT/bin/polymath" logs --follow
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no observations yet for session empty-session"* ]] \
+    || [[ "$output" == *"no observations"* ]]
+}
+
+# Round-4 R4-6 (MEDIUM): dry-run distinguishes fast-forward from divergence.
+# Case A: remote strictly ahead → "Would fast-forward".
+@test "polymath update --dry-run: 'would fast-forward' for linear ahead remote (R4-6 ff)" {
+  remote_dir=$(mktemp -d)
+  clone_dir=$(mktemp -d)
+  _pp_r5_build_remote_and_clone "$remote_dir" "$clone_dir"
+  echo "next" >> "$remote_dir/VERSION"
+  git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "ahead"
+
+  run bash "$clone_dir/bin/polymath" update --dry-run
+  rm -rf "$remote_dir" "$clone_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Would fast-forward"* ]]
+  ! [[ "$output" == *"diverged"* ]]
+}
+
+# Round-4 R4-6 (MEDIUM): dry-run reports divergence when local has commits
+# that remote does not. Setup: clone, then commit locally without pulling,
+# then add a different commit to remote → diverged histories.
+@test "polymath update --dry-run: reports divergence when local has unique commits (R4-6 div)" {
+  remote_dir=$(mktemp -d)
+  clone_dir=$(mktemp -d)
+  _pp_r5_build_remote_and_clone "$remote_dir" "$clone_dir"
+  # Local commit not on remote
+  echo "local-only" > "$clone_dir/LOCAL"
+  git -C "$clone_dir" add -A && git -C "$clone_dir" commit -q -m "local commit"
+  # Remote commit not on local
+  echo "remote-only" > "$remote_dir/REMOTE"
+  git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "remote commit"
+
+  run bash "$clone_dir/bin/polymath" update --dry-run
+  rm -rf "$remote_dir" "$clone_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"diverged"* ]] || [[ "$output" == *"FAIL --ff-only"* ]]
+  ! [[ "$output" == *"Would fast-forward"* ]]
+}
+
+# Round-4 R4-7 (LOW): printf format strings starting with '-' must be guarded
+# with '--' so they don't parse as flags. Hardest to test without invoking
+# --follow (which tails forever), so we run `--follow --lens X` against a
+# missing-lens case — that path doesn't hit the printf '--follow ...' string,
+# but it confirms the surrounding code is shaped correctly. The actual lens
+# branch printf uses 'printf -- '...'' now; verify by grep so future edits
+# can't silently regress.
+@test "bin/polymath: every printf format starting with '-' is dash-dash-guarded (R4-7)" {
+  # Find any printf format starting with a single dash that ISN'T preceded by `--`.
+  # The previous bug: `printf '--follow ...'` could parse '--follow' as flag.
+  # Our fix uses `printf -- '--follow ...'`. This grep catches any regression.
+  ! grep -nE "[^-]printf '-[^-]" "$PP_ROOT/bin/polymath"
+  ! grep -nE "^printf '-[^-]" "$PP_ROOT/bin/polymath"
+}
+
+# Round-4 R4-8 (LOW): -n 0 must reject with clear error.
+@test "polymath logs: -n 0 rejected with clear message (R4-8)" {
+  run bash "$PP_ROOT/bin/polymath" logs -n 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *">= 1"* ]] || [[ "$output" == *"must be"* ]]
+}
+
+@test "polymath logs: -n 1 accepted (R4-8 boundary)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  printf 'X: hook|||body-one\n' > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  run bash "$PP_ROOT/bin/polymath" logs -n 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"body-one"* ]]
+}

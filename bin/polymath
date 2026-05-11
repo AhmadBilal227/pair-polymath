@@ -10,7 +10,7 @@ PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/budget.sh"
 
-# Detect GNU vs BSD stat ONCE, upfront (review fix F7').
+# Detect GNU vs BSD stat ONCE, upfront (review fix F7' + R4-4).
 # Round-1 F7 used a fallback chain `stat -f %m FILE || stat -c %Y FILE`. The
 # problem: on GNU/Linux `stat -f %m FILE` does NOT fail — `-f` means
 # "filesystem mode" and `%m` is the mount point string (e.g. `/`). That
@@ -18,10 +18,20 @@ PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # accepts as a filename, yielding the MOUNT POINT'S mtime as every log
 # entry's timestamp. Format-valid but value-wrong; tests that asserted only
 # format passed. Explicit detection avoids the trap.
-if stat --version 2>/dev/null | grep -qE 'GNU|coreutils'; then
+#
+# Round-4 R4-4: previous version probed with `stat --version | grep -qE
+# 'GNU|coreutils'`. That returns FALSE on BusyBox / Alpine even though
+# BusyBox's `stat` supports `-c %Y` (GNU-style flag for compat). Then we
+# fell through to the BSD branch `stat -f %m`, which BusyBox doesn't
+# implement → every timestamp resolved to '?'. Probe by trying the flag
+# itself: this works correctly on GNU stat AND BusyBox AND OpenBSD AND
+# macOS BSD.
+if stat -c %Y /dev/null >/dev/null 2>&1; then
   _PP_STAT_FLAVOR=gnu
-else
+elif stat -f %m /dev/null >/dev/null 2>&1; then
   _PP_STAT_FLAVOR=bsd
+else
+  _PP_STAT_FLAVOR=unknown
 fi
 
 # _pp_set_user_env_var KEY VALUE
@@ -194,10 +204,13 @@ HELP
       esac
     done
 
-    # Cap -n to a sane upper bound
+    # Validate + cap -n. Round-4 R4-8: previous validator allowed 0 even
+    # though the error message claimed "positive integer". Explicit `< 1`
+    # check after the digit validator.
     case "$_pp_logs_n" in
       ''|*[!0-9]*) printf 'polymath logs: -n requires a positive integer\n' >&2; exit 2 ;;
     esac
+    [ "$_pp_logs_n" -lt 1 ] && { printf 'polymath logs: -n must be >= 1\n' >&2; exit 2; }
     [ "$_pp_logs_n" -gt 200 ] && _pp_logs_n=200
 
     _pp_cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
@@ -295,22 +308,33 @@ HELP
             "$_pp_logs_lens" "$_pp_logs_session"
           exit 0
         fi
-        printf '--follow on lens %s (Ctrl-C to exit)\n\n' "$_pp_logs_lens"
+        # Round-4 R4-7: printf format strings starting with '-' parse as flags
+        # on some shells. Prefix '--' so '--follow on lens ...' is treated as
+        # format, not option.
+        printf -- '--follow on lens %s (Ctrl-C to exit)\n\n' "$_pp_logs_lens"
         tail -F "$target" 2>/dev/null
         exit 0
       fi
+      # Round-4 R4-5: --follow without --lens used to tail only the NEWEST
+      # single cache file for the session — if a different lens wrote mid-
+      # session, the user silently saw nothing. Now tail ALL existing lens
+      # files for this session. tail -F accepts multiple files. Caveat: a
+      # lens whose cache file is CREATED after the --follow starts won't be
+      # auto-watched; v0.3 may use inotify/fswatch for fully-dynamic follow.
       printf 'polymath logs --follow: waiting for new observations (Ctrl-C to exit)\n\n'
-      # tail -F the most recent cc-monitor file for this session (newest only —
-      # following all 7 simultaneously is more complex; v0.3 may improve).
       # Review fix F5: filter -verdict/-streak sidecars so tail -F doesn't
       # latch onto a verdict file (different format, not observations).
       # shellcheck disable=SC2010
-      latest=$(ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null \
+      _pp_follow_files=$(ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null \
         | grep -v -- '-verdict\.txt$' \
-        | grep -v -- '-streak\.txt$' \
-        | head -1)
-      [ -z "$latest" ] && { printf 'no observations yet for session %s\n' "$_pp_logs_session"; exit 0; }
-      tail -F "$latest" 2>/dev/null
+        | grep -v -- '-streak\.txt$')
+      if [ -z "$_pp_follow_files" ]; then
+        printf 'polymath logs --follow: no observations yet for session %s\n' "$_pp_logs_session"
+        exit 0
+      fi
+      printf -- '--follow on session %s (Ctrl-C to exit)\n\n' "$_pp_logs_session"
+      # shellcheck disable=SC2086  # intentional word-splitting of file list
+      tail -F $_pp_follow_files 2>/dev/null
       exit 0
     fi
 
@@ -369,11 +393,17 @@ HELP
 polymath update — Pull latest + re-run installer (idempotent)
 
 Usage:
-  polymath update              Interactive: shows diff, asks confirm
-  polymath update --yes        Non-interactive: pull + re-install if any new commits
-  polymath update --dry-run    Show what would happen; make no changes
+  polymath update              Interactive: shows diff, asks confirm, pulls,
+                               re-runs bin/install.sh.
+  polymath update --yes        Non-interactive: fetch + ff-only pull. Skips
+                               install.sh; prints loud warning if pull touched
+                               installer or hooks (re-run bin/install.sh
+                               manually in that case).
+  polymath update --dry-run    Show what would happen; make no changes.
 
-Refuses on local divergence (use 'git pull --rebase' manually if needed).
+Honors the current branch's configured upstream (\`@{upstream}\`); falls back
+to origin/<default-branch> only when no upstream is set. Refuses to proceed
+when the working tree has uncommitted changes (real path).
 HELP
           exit 0
           ;;
@@ -381,7 +411,9 @@ HELP
       esac
     done
 
-    if [ ! -d "$PP_ROOT/.git" ]; then
+    # `.git` may be a directory (normal checkout) OR a file (linked worktree).
+    # Both are valid git checkouts. Test the rev-parse path instead.
+    if ! git -C "$PP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       printf 'polymath update: PP_ROOT (%s) is not a git checkout — manual update needed\n' "$PP_ROOT" >&2
       exit 1
     fi
@@ -391,13 +423,45 @@ HELP
     _pp_default_branch=$(git -C "$PP_ROOT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
     _pp_default_branch="${_pp_default_branch:-main}"
 
+    # Round-4 R4-2: respect @{upstream} when configured. Previously we always
+    # pulled origin/<default-branch>, which is wrong on forks / release
+    # branches / feature branches where the user's branch tracks something
+    # other than origin/main. Falling back to origin/<default-branch> only
+    # when no upstream is set keeps the legacy contract for plain installs.
+    # Detached HEAD: no current branch, no upstream — only safe move is to
+    # query origin/<default-branch> for dry-run (read-only). A real pull
+    # against detached HEAD would be a separate problem we surface later.
+    _pp_current_branch=$(git -C "$PP_ROOT" symbolic-ref --short HEAD 2>/dev/null) || _pp_current_branch=""
+    _pp_upstream=""
+    if [ -n "$_pp_current_branch" ]; then
+      _pp_upstream=$(git -C "$PP_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || _pp_upstream=""
+    fi
+    if [ -n "$_pp_upstream" ]; then
+      _pp_compare_ref="$_pp_upstream"
+    else
+      # No upstream (either detached HEAD, or branch with no tracking config).
+      # Fall back to origin/<default-branch>.
+      _pp_compare_ref="origin/$_pp_default_branch"
+    fi
+    # `git pull` takes a refspec without the `origin/` prefix.
+    _pp_pull_branch="${_pp_compare_ref#origin/}"
+
     # Review fix F8: dry-run must NOT mutate `.git/` state. `git fetch` writes
     # FETCH_HEAD and updates remote-tracking refs, which breaks the "no
     # changes" contract. Use `git ls-remote` (read-only) instead.
     if [ "$_pp_update_dry" = "1" ]; then
-      _pp_update_remote_head=$(git -C "$PP_ROOT" ls-remote --heads origin "$_pp_default_branch" 2>/dev/null | awk '{print $1}')
+      # Round-4 R4-3 (dry-run variant): if the working tree is dirty, mention
+      # that the real path would refuse — but don't exit nonzero (dry-run
+      # promises no filesystem change, including exit-code surprises).
+      if [ -n "$(git -C "$PP_ROOT" status --porcelain 2>/dev/null)" ]; then
+        printf '[dry-run] Working tree has uncommitted changes; a real update would refuse.\n'
+        printf '[dry-run] Stash or commit before running without --dry-run.\n'
+        # Continue to also print the would-pull plan so the user sees both
+        # blockers in one shot.
+      fi
+      _pp_update_remote_head=$(git -C "$PP_ROOT" ls-remote --heads origin "$_pp_pull_branch" 2>/dev/null | awk '{print $1}')
       if [ -z "$_pp_update_remote_head" ]; then
-        printf '[dry-run] Could not query origin/%s (network? auth?). No changes made.\n' "$_pp_default_branch"
+        printf '[dry-run] Could not query %s (network? auth?). No changes made.\n' "$_pp_compare_ref"
         exit 0
       fi
       _pp_update_local_head=$(git -C "$PP_ROOT" rev-parse HEAD 2>/dev/null)
@@ -405,10 +469,67 @@ HELP
         printf '[dry-run] Already up to date.\n'
         exit 0
       fi
-      printf '[dry-run] Would: git pull --ff-only origin %s && (re-run installer if not --yes)\n' "$_pp_default_branch"
-      printf '[dry-run] origin/%s HEAD: %s\n[dry-run] local HEAD:        %s\n' \
-        "$_pp_default_branch" "$_pp_update_remote_head" "$_pp_update_local_head"
+      # Round-4 R4-6: distinguish fast-forward from diverged history. The
+      # previous version printed "Would pull" regardless, so a user with
+      # local commits ahead of upstream would see a false-positive plan.
+      # `merge-base --is-ancestor A B` returns 0 iff A is an ancestor of B
+      # (i.e. linear ff path); nonzero on divergence.
+      #
+      # Subtlety: ls-remote returns the remote SHA which may not yet exist
+      # in the local object store (we haven't fetched). If it isn't local,
+      # we can't run ancestry — fall back to the inverse check: is the
+      # current local HEAD an ancestor of the local-tracking ref? If neither
+      # is determinable, we honestly say "ff/divergence undetermined".
+      if git -C "$PP_ROOT" cat-file -e "$_pp_update_remote_head" 2>/dev/null; then
+        # Remote SHA is in our local object DB (post-fetch state or coincident
+        # history). We can do a definitive ancestry check.
+        if git -C "$PP_ROOT" merge-base --is-ancestor "$_pp_update_local_head" "$_pp_update_remote_head" 2>/dev/null; then
+          printf '[dry-run] Would fast-forward to %s\n' "$_pp_update_remote_head"
+          printf '[dry-run] %s: %s\n[dry-run] local HEAD: %s\n' \
+            "$_pp_compare_ref" "$_pp_update_remote_head" "$_pp_update_local_head"
+        else
+          printf '[dry-run] Local branch has diverged from %s. A real update would FAIL --ff-only.\n' "$_pp_compare_ref"
+          printf '[dry-run] %s: %s\n[dry-run] local:  %s\n' \
+            "$_pp_compare_ref" "$_pp_update_remote_head" "$_pp_update_local_head"
+          printf '[dry-run] Resolve with: cd %s && git status; consider git pull --rebase if appropriate\n' "$PP_ROOT"
+        fi
+      else
+        # Remote SHA not yet in local object DB — use the local remote-
+        # tracking ref as a proxy. If local HEAD is ancestor of the local
+        # tracking ref, ff is plausible (though staler than ls-remote shows).
+        if git -C "$PP_ROOT" merge-base --is-ancestor "$_pp_update_local_head" "$_pp_compare_ref" 2>/dev/null; then
+          printf '[dry-run] Would fast-forward to %s\n' "$_pp_update_remote_head"
+          printf '[dry-run] %s: %s\n[dry-run] local HEAD: %s\n' \
+            "$_pp_compare_ref" "$_pp_update_remote_head" "$_pp_update_local_head"
+          printf '[dry-run] (Ancestry verified against last-known %s; run without --dry-run to fetch + pull.)\n' "$_pp_compare_ref"
+        else
+          printf '[dry-run] Local branch has diverged from %s. A real update would FAIL --ff-only.\n' "$_pp_compare_ref"
+          printf '[dry-run] %s: %s\n[dry-run] local:  %s\n' \
+            "$_pp_compare_ref" "$_pp_update_remote_head" "$_pp_update_local_head"
+          printf '[dry-run] Resolve with: cd %s && git status; consider git pull --rebase if appropriate\n' "$PP_ROOT"
+        fi
+      fi
       exit 0
+    fi
+
+    # Real path: detached HEAD is a degenerate case. Dry-run can still report
+    # against origin/<default-branch> (read-only), but a real pull would
+    # leave the user in a worse spot. Refuse cleanly.
+    if [ -z "$_pp_current_branch" ]; then
+      printf 'polymath update: HEAD is detached. Check out a branch first:\n' >&2
+      printf '  cd %s && git checkout %s\n' "$PP_ROOT" "$_pp_default_branch" >&2
+      exit 1
+    fi
+
+    # Round-4 R4-3: refuse on dirty working tree BEFORE the fetch. Avoids
+    # spending a network round-trip just to fail at the pull, and avoids
+    # the failure mode where ff-only succeeds but leaves the user's edits
+    # stranded next to surprise upstream changes.
+    if [ -n "$(git -C "$PP_ROOT" status --porcelain 2>/dev/null)" ]; then
+      printf 'polymath update: local working tree has uncommitted changes.\n' >&2
+      printf 'Refusing to pull. Stash or commit your changes first:\n' >&2
+      printf '  cd %s && git status\n' "$PP_ROOT" >&2
+      exit 1
     fi
 
     # Real path — fetch + diff + (maybe) prompt + pull + install
@@ -418,13 +539,16 @@ HELP
       exit 1
     fi
 
-    _pp_update_new=$(git -C "$PP_ROOT" log --oneline "HEAD..origin/$_pp_default_branch" 2>/dev/null)
+    # Capture local HEAD before pull so we can diff after the pull (R4-1).
+    _pp_update_pre_pull_head=$(git -C "$PP_ROOT" rev-parse HEAD 2>/dev/null)
+
+    _pp_update_new=$(git -C "$PP_ROOT" log --oneline "HEAD..$_pp_compare_ref" 2>/dev/null)
     if [ -z "$_pp_update_new" ]; then
       printf 'Already up to date.\n'
       exit 0
     fi
 
-    printf '\nNew commits on origin/%s:\n' "$_pp_default_branch"
+    printf '\nNew commits on %s:\n' "$_pp_compare_ref"
     printf '%s\n' "$_pp_update_new" | sed 's/^/  /'
     printf '\n'
 
@@ -449,20 +573,31 @@ HELP
       esac
     fi
 
-    if ! git -C "$PP_ROOT" pull --ff-only origin "$_pp_default_branch" 2>&1; then
+    if ! git -C "$PP_ROOT" pull --ff-only origin "$_pp_pull_branch" 2>&1; then
       printf '\npolymath update: pull failed.\n' >&2
       printf 'Local branch may have diverged. Inspect with: cd %s && git status\n' "$PP_ROOT" >&2
       exit 1
     fi
 
-    # Review fix F4: install.sh has multiple interactive `read` calls. Under
-    # --yes (advertised as non-interactive) it would hang in CI / piped-stdin
-    # contexts. Skip the installer in that mode and print clear guidance so
-    # the user can re-run manually if dependencies actually changed.
+    # Review fix F4 + Round-4 R4-1: install.sh has multiple interactive `read`
+    # calls, so --yes must NOT invoke it. But the previous --yes path just
+    # said "re-run manually if needed", which was unhelpful — the user has no
+    # way to know whether the pull actually changed anything installer-
+    # affecting. Now we diff the actual changeset and either confirm the
+    # install is still idempotent, or warn loudly with the file list and
+    # the exact command to re-run.
     if [ "$_pp_update_yes" = "1" ]; then
-      printf '\n[--yes] Pull complete. Skipping interactive installer re-run.\n'
-      printf '[--yes] If new commits touched bin/install.sh, re-run manually:\n'
-      printf '          bash %s/bin/install.sh\n' "$PP_ROOT"
+      installer_changed=$(git -C "$PP_ROOT" diff --name-only "$_pp_update_pre_pull_head" HEAD 2>/dev/null \
+        | grep -E '^(bin/install\.sh|hooks/|config/default\.env)' || true)
+      if [ -z "$installer_changed" ]; then
+        printf '\n[--yes] Pull complete. No installer-affecting files changed; install was idempotent.\n'
+      else
+        printf '\n[--yes] Pull complete. WARNING: installer-affecting files changed:\n' >&2
+        printf '%s\n' "$installer_changed" | sed 's/^/  /' >&2
+        printf '\n[--yes] Re-run interactively to update hooks/config/dependencies:\n' >&2
+        printf '          bash %s/bin/install.sh\n' "$PP_ROOT" >&2
+        # Don't exit nonzero — the pull itself succeeded. Just warn loudly.
+      fi
     else
       printf '\nRe-running installer (idempotent — preserves your settings.json + user.env)...\n'
       bash "$PP_ROOT/bin/install.sh"

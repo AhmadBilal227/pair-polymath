@@ -144,6 +144,26 @@ case "$cmd" in
     printf '  External LLM:    %s\n' "${PP_EXTERNAL_LLM:-1}"
     printf '  Escalation:      %s\n' "${PP_ENABLE_ESCALATION:-1}"
 
+    # Privacy log (P3.3) — surface its existence + recency so users can find it.
+    # Uses the same stat-flavor detection as the rest of the script so the
+    # mtime read is portable across GNU/BSD/BusyBox.
+    _pp_privacy_log="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/last-cycle-payload.json"
+    if [ -f "$_pp_privacy_log" ]; then
+      _pp_pl_mtime=0
+      case "$_PP_STAT_FLAVOR" in
+        gnu) _pp_pl_mtime=$(stat -c %Y "$_pp_privacy_log" 2>/dev/null || echo 0) ;;
+        bsd) _pp_pl_mtime=$(stat -f %m "$_pp_privacy_log" 2>/dev/null || echo 0) ;;
+      esac
+      _pp_pl_age_s=$(( $(date +%s) - _pp_pl_mtime ))
+      if [ "$_pp_pl_age_s" -lt 0 ]; then _pp_pl_age_s=0; fi
+      if [ "$_pp_pl_age_s" -lt 3600 ]; then
+        _pp_pl_age="${_pp_pl_age_s}s ago"
+      else
+        _pp_pl_age="$((_pp_pl_age_s/60))min ago"
+      fi
+      printf '  Privacy log:     %s (%s)\n' "$_pp_privacy_log" "$_pp_pl_age"
+    fi
+
     printf '\n'
     ;;
 

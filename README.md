@@ -195,6 +195,14 @@ What we actively defend against leaking:
 What we do NOT defend against (be aware):
 - **Secrets you typed or pasted into your transcript.** They live in the transcript and the last 5 KB of it is in scope. If you pasted an API key into Claude as part of a debug session, it's at risk. Clear sensitive transcripts before activating the advisor, or use `polymath disable` for those sessions.
 
+**Verify it yourself.** Every cycle writes a snapshot of the outgoing payload (byte sizes + first 500 chars of each piece) to `~/.claude/cache/last-cycle-payload.json`. Single overwriting file, no history.
+
+```bash
+cat ~/.claude/cache/last-cycle-payload.json | jq .
+```
+
+You'll see: timestamp, session id, which models will be called, which file the planner picked, byte counts for the transcript tail and grounded facts, and the first 500 chars of each. If anything in there looks like a secret, that's the moment to investigate (and `polymath disable` until you've cleared your transcript). `polymath status` surfaces the path + age of the most recent snapshot.
+
 To opt out of LLM cycles entirely while keeping the statusline:
 
 ```bash

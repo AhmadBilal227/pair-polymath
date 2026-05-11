@@ -281,3 +281,103 @@ metrics_flush_cycle() {
   rm -f "$entry_tmp" "$PP_METRICS_TMP" 2>/dev/null
   return 0
 }
+
+# === Privacy log (P3.3) =====================================================
+# pp_write_privacy_log SESSION TRANSCRIPT_TAIL GROUNDED PLANNER_FILE \
+#                      LENS_COUNT ANALYST_MODEL CRITIQUE_MODEL
+#
+# Writes a single overwriting JSON file at $PP_CACHE_DIR/last-cycle-payload.json
+# showing what THIS cycle is about to send to OpenAI. Lets users verify the
+# README "what leaves your machine" claim with their own eyes.
+#
+# NOT an archive — overwritten every cycle. NOT the response — only the
+# OUTGOING payload preview. Atomic tmp+mv so a concurrent reader never sees
+# half-written JSON.
+#
+# Empty/missing inputs are tolerated (defensive): we still emit a valid JSON
+# file with 0-byte sizes and empty previews. Callers don't need to guard.
+pp_write_privacy_log() {
+  local session="${1:-default}"
+  local transcript_tail="${2:-}"
+  local grounded="${3:-}"
+  local planner_file="${4:-<none>}"
+  local lens_count="${5:-0}"
+  local analyst_model="${6:-}"
+  local critique_model="${7:-}"
+
+  # Cache dir resolution: honor PP_CACHE_DIR > CLAUDE_DIR/cache > HOME/.claude/cache.
+  # Must match `polymath status`'s reader resolution exactly (GPT R2 MEDIUM-3).
+  local cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-${HOME}/.claude}/cache}"
+  mkdir -p "$cache_dir" 2>/dev/null || return 1
+  # Cache dir is owner-only. The file inside may include transcript previews
+  # that contain user-pasted secrets — default umask 022 would publish them
+  # world-readable. Enforce 0700 on the dir + 0600 on the file (GPT R2 HIGH-1).
+  chmod 700 "$cache_dir" 2>/dev/null || true
+  local out="${cache_dir}/last-cycle-payload.json"
+
+  # First-500-char previews. Bash substring expansion is safe on empty.
+  local transcript_preview="${transcript_tail:0:500}"
+  local grounded_preview="${grounded:0:500}"
+  # Byte counts via wc -c (not ${#var} — that counts CHARS, undercounts in
+  # multibyte locales). LC_ALL=C forces byte-oriented counting (GPT R2 MED-4).
+  local transcript_bytes grounded_bytes
+  transcript_bytes=$(printf '%s' "$transcript_tail" | LC_ALL=C wc -c | tr -d ' ')
+  grounded_bytes=$(printf '%s' "$grounded" | LC_ALL=C wc -c | tr -d ' ')
+
+  # Normalize lens_count to integer; jq --argjson is strict and a non-numeric
+  # string would fail the whole write.
+  case "$lens_count" in
+    ''|*[!0-9]*) lens_count=0 ;;
+  esac
+
+  local ts
+  ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+  # Unique tmp path per writer — fixed "${out}.tmp" was racy across concurrent
+  # statusline cycles. mktemp gives each writer its own file before atomic
+  # rename onto the canonical path (GPT R2 HIGH-2).
+  local _pp_priv_tmp
+  _pp_priv_tmp=$(mktemp "${out}.XXXXXX" 2>/dev/null) || return 1
+
+  jq -n \
+    --arg ts "$ts" \
+    --arg session "$session" \
+    --arg planner_file "${planner_file:-<none>}" \
+    --arg analyst_model "${analyst_model:-}" \
+    --arg critique_model "${critique_model:-}" \
+    --argjson lens_count "$lens_count" \
+    --argjson transcript_bytes "$transcript_bytes" \
+    --arg transcript_preview "$transcript_preview" \
+    --argjson grounded_bytes "$grounded_bytes" \
+    --arg grounded_preview "$grounded_preview" \
+    '{
+      ts: $ts,
+      session: $session,
+      cycle_summary: {
+        lens_count: $lens_count,
+        analyst_model: $analyst_model,
+        critique_model: $critique_model,
+        planner_picked_file: $planner_file
+      },
+      payload_sizes_bytes: {
+        transcript_tail: $transcript_bytes,
+        grounded_facts: $grounded_bytes
+      },
+      payload_previews: {
+        transcript_first_500_chars: $transcript_preview,
+        grounded_first_500_chars: $grounded_preview
+      },
+      note: "This file shows what THIS machine sent to OpenAI in the most recent cycle. Overwritten each cycle (no history). See docs/security.md for the full threat model."
+    }' > "$_pp_priv_tmp" 2>/dev/null || {
+      rm -f "$_pp_priv_tmp" 2>/dev/null
+      return 1
+    }
+
+  [ -s "$_pp_priv_tmp" ] || { rm -f "$_pp_priv_tmp" 2>/dev/null; return 1; }
+  # Restrict file mode BEFORE rename so concurrent readers can't catch a brief
+  # world-readable window (defense in depth on top of dir chmod above).
+  chmod 600 "$_pp_priv_tmp" 2>/dev/null || true
+  mv "$_pp_priv_tmp" "$out" 2>/dev/null || { rm -f "$_pp_priv_tmp" 2>/dev/null; return 1; }
+  chmod 600 "$out" 2>/dev/null || true
+  return 0
+}

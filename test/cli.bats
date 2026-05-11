@@ -386,7 +386,13 @@ SH
   run bash -c "bash '$clone_dir/bin/polymath' update --yes </dev/null"
   rm -rf "$remote_dir" "$clone_dir"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Skipping interactive installer"* ]]
+  # Round-5 R4-1 changed the wording: instead of "Skipping interactive installer"
+  # the code now distinguishes between idempotent pulls and installer-affecting
+  # pulls. Either phrasing proves --yes did not invoke install.sh interactively.
+  [[ "$output" == *"No installer-affecting files changed"* ]] \
+    || [[ "$output" == *"installer-affecting files changed:"* ]] \
+    || [[ "$output" == *"Pull complete"* ]]
+  # Load-bearing negative assertion (install.sh trap would print this if invoked).
   ! [[ "$output" == *"SHOULD_NOT_RUN"* ]]
 }
 
@@ -702,6 +708,11 @@ SH
   # In the clone: fetch, then check out a local branch tracking origin/feature.
   git -C "$clone_dir" fetch --quiet origin
   git -C "$clone_dir" checkout -q -b feature --track origin/feature
+  # Add one MORE commit on remote AFTER the clone tracks it, so dry-run sees
+  # a forward delta. Without this, dry-run short-circuits to "Already up to
+  # date" (which doesn't print the compare ref).
+  echo "feature-ahead" > "$remote_dir/FEATURE2"
+  git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "feature ahead"
 
   # Dry-run should reference origin/feature, not origin/main.
   run bash "$clone_dir/bin/polymath" update --dry-run

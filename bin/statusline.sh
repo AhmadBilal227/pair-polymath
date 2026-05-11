@@ -647,6 +647,25 @@ $activity_tail
 GROUND
       )
 
+      # === Privacy log (P3.3) ===
+      # Writes what we would send to OpenAI this cycle so users can verify the
+      # README's "what leaves your machine" claim. Single overwriting file
+      # at $PP_CACHE_DIR/last-cycle-payload.json — atomic tmp+mv inside the
+      # helper. Runs AFTER grounded facts are assembled and BEFORE the analyst
+      # fan-out so the snapshot matches what the analysts actually receive.
+      # We use candidate_file (the planner's literal pick) rather than
+      # file_real so the user sees whatever the planner returned, including
+      # the "NONE" sentinel when containment rejected the path.
+      pp_write_privacy_log \
+        "$session_id" \
+        "$activity_tail" \
+        "$grounded" \
+        "${candidate_file:-<none>}" \
+        "${PP_LENS_COUNT:-0}" \
+        "${PP_MODEL:-}" \
+        "${PP_MODEL_CRITIQUE:-}" \
+        2>/dev/null || true
+
       if [ -n "$grounded" ] && command -v llm >/dev/null 2>&1; then
         # === PARALLEL N-AGENT FAN-OUT ===
         # Run all loaded lenses in parallel subshells. Each writes to its own cache.

@@ -11,7 +11,10 @@ This doc is the operational companion — what you, the user, can verify yoursel
 ## Quick checks
 
 ```bash
-# What did the last cycle send to the model?
+# What did the last cycle WOULD send to the model? (P3.3 privacy log)
+cat ~/.claude/cache/last-cycle-payload.json | jq .
+
+# What did the last cycle actually produce?
 polymath logs -n 1                              # most recent observation per lens
 
 # What's my recent spend?
@@ -24,7 +27,11 @@ ls -ld ~/.claude/cache ~/.claude/pair-polymath 2>/dev/null
 polymath doctor
 ```
 
-A per-cycle privacy log (`last-cycle-payload.json`) lands in v0.2 P3.3 — see [v0.2-plan.md](v0.2-plan.md).
+The privacy log is a single overwriting JSON snapshot of the outgoing
+payload — timestamp, session id, models, planner-picked file, byte counts,
+and the first 500 chars of the transcript tail + grounded facts. Overwritten
+each cycle (no history). `polymath status` also reports the path + age of the
+most recent snapshot when one exists.
 
 ## What's hardened
 

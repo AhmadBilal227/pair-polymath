@@ -281,3 +281,85 @@ metrics_flush_cycle() {
   rm -f "$entry_tmp" "$PP_METRICS_TMP" 2>/dev/null
   return 0
 }
+
+# === Privacy log (P3.3) =====================================================
+# pp_write_privacy_log SESSION TRANSCRIPT_TAIL GROUNDED PLANNER_FILE \
+#                      LENS_COUNT ANALYST_MODEL CRITIQUE_MODEL
+#
+# Writes a single overwriting JSON file at $PP_CACHE_DIR/last-cycle-payload.json
+# showing what THIS cycle is about to send to OpenAI. Lets users verify the
+# README "what leaves your machine" claim with their own eyes.
+#
+# NOT an archive — overwritten every cycle. NOT the response — only the
+# OUTGOING payload preview. Atomic tmp+mv so a concurrent reader never sees
+# half-written JSON.
+#
+# Empty/missing inputs are tolerated (defensive): we still emit a valid JSON
+# file with 0-byte sizes and empty previews. Callers don't need to guard.
+pp_write_privacy_log() {
+  local session="${1:-default}"
+  local transcript_tail="${2:-}"
+  local grounded="${3:-}"
+  local planner_file="${4:-<none>}"
+  local lens_count="${5:-0}"
+  local analyst_model="${6:-}"
+  local critique_model="${7:-}"
+
+  local cache_dir="${PP_CACHE_DIR:-${HOME}/.claude/cache}"
+  mkdir -p "$cache_dir" 2>/dev/null || return 1
+  local out="${cache_dir}/last-cycle-payload.json"
+  local tmp="${out}.tmp"
+
+  # First-500-char previews. Bash substring expansion is safe on empty.
+  local transcript_preview="${transcript_tail:0:500}"
+  local grounded_preview="${grounded:0:500}"
+  local transcript_bytes="${#transcript_tail}"
+  local grounded_bytes="${#grounded}"
+
+  # Normalize lens_count to integer; jq --argjson is strict and a non-numeric
+  # string would fail the whole write.
+  case "$lens_count" in
+    ''|*[!0-9]*) lens_count=0 ;;
+  esac
+
+  local ts
+  ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+  jq -n \
+    --arg ts "$ts" \
+    --arg session "$session" \
+    --arg planner_file "${planner_file:-<none>}" \
+    --arg analyst_model "${analyst_model:-}" \
+    --arg critique_model "${critique_model:-}" \
+    --argjson lens_count "$lens_count" \
+    --argjson transcript_bytes "$transcript_bytes" \
+    --arg transcript_preview "$transcript_preview" \
+    --argjson grounded_bytes "$grounded_bytes" \
+    --arg grounded_preview "$grounded_preview" \
+    '{
+      ts: $ts,
+      session: $session,
+      cycle_summary: {
+        lens_count: $lens_count,
+        analyst_model: $analyst_model,
+        critique_model: $critique_model,
+        planner_picked_file: $planner_file
+      },
+      payload_sizes_bytes: {
+        transcript_tail: $transcript_bytes,
+        grounded_facts: $grounded_bytes
+      },
+      payload_previews: {
+        transcript_first_500_chars: $transcript_preview,
+        grounded_first_500_chars: $grounded_preview
+      },
+      note: "This file shows what THIS machine sent to OpenAI in the most recent cycle. Overwritten each cycle (no history). See docs/security.md for the full threat model."
+    }' > "$tmp" 2>/dev/null || {
+      rm -f "$tmp" 2>/dev/null
+      return 1
+    }
+
+  [ -s "$tmp" ] || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv "$tmp" "$out" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}

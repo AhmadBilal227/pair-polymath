@@ -47,3 +47,18 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$(budget_get)" -eq 23 ]
 }
+
+# Catches the split-lock race (inc vs reserve on different mutexes) that GPT
+# code review identified after the first M2-lean cut.
+@test "mixed: 50 inc + 50 reserve_5 concurrently never lose updates" {
+  export PP_MAX_DAILY_CALLS=10000
+  echo 0 > "$PP_BUDGET_FILE"
+  local pids=()
+  for _ in $(seq 1 50); do (budget_inc) & pids+=($!); done
+  for _ in $(seq 1 50); do (budget_reserve 5) & pids+=($!); done
+  for pid in "${pids[@]}"; do wait "$pid"; done
+  local final
+  final=$(budget_get)
+  # 50 inc × 1 = 50, 50 reserve × 5 = 250, total = 300. No losses, no double-counts.
+  [ "$final" -eq 300 ]
+}

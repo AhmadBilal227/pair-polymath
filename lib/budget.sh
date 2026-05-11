@@ -1,51 +1,54 @@
 #!/usr/bin/env bash
-# Pair Polymath — budget tracking. Atomic via mkdir locks.
+# Pair Polymath — budget tracking. Atomic via a SINGLE shared mkdir lock.
 # Sourced by bin/statusline.sh. Requires PP_CACHE_DIR + PP_MAX_DAILY_CALLS in env.
+#
+# All mutations of PP_BUDGET_FILE serialize through ${PP_BUDGET_FILE}.lock.
+# The prior split-lock design (.inc.lock vs .reserve.lock) allowed inc and
+# reserve to race on the same file and lose updates.
 
-# Daily budget file rolls over by date
 PP_BUDGET_FILE="${PP_CACHE_DIR}/pp-budget-$(date +%Y%m%d).txt"
+PP_BUDGET_LOCK="${PP_BUDGET_FILE}.lock"
 
-# budget_inc: increment counter by 1, atomic
-# Returns 0 on success, 1 on lock-acquisition failure (>50 attempts)
-budget_inc() {
-  local lock="${PP_BUDGET_FILE}.inc.lock"
+_pp_budget_acquire() {
   local attempts=0
-  # Bounded busy-wait (50 attempts × 20ms = 1s max)
-  while ! mkdir "$lock" 2>/dev/null; do
+  while ! mkdir "$PP_BUDGET_LOCK" 2>/dev/null; do
     attempts=$((attempts + 1))
     [ "$attempts" -gt 50 ] && return 1
     sleep 0.02 2>/dev/null || sleep 1
   done
-  local cur
-  cur=$(cat "$PP_BUDGET_FILE" 2>/dev/null || echo 0)
-  echo $((cur + 1)) > "$PP_BUDGET_FILE"
-  rmdir "$lock" 2>/dev/null
   return 0
 }
 
-# budget_reserve N: atomically reserve N calls if total would stay <= PP_MAX_DAILY_CALLS
-# Returns 0 if reservation succeeded, 1 if would exceed cap, 2 on lock failure
+_pp_budget_release() {
+  rmdir "$PP_BUDGET_LOCK" 2>/dev/null
+}
+
+# budget_inc: +1 under shared lock. Returns 0 on success, 1 on lock timeout.
+budget_inc() {
+  _pp_budget_acquire || return 1
+  local cur
+  cur=$(cat "$PP_BUDGET_FILE" 2>/dev/null || echo 0)
+  echo $((cur + 1)) > "$PP_BUDGET_FILE"
+  _pp_budget_release
+  return 0
+}
+
+# budget_reserve N: +N if total stays <= PP_MAX_DAILY_CALLS, else refuse.
+# Returns 0 reserved, 1 would-exceed-cap, 2 lock timeout.
 budget_reserve() {
   local n="${1:?budget_reserve requires a count}"
-  local lock="${PP_BUDGET_FILE}.reserve.lock"
-  local attempts=0
-  while ! mkdir "$lock" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    [ "$attempts" -gt 50 ] && return 2
-    sleep 0.02 2>/dev/null || sleep 1
-  done
+  _pp_budget_acquire || return 2
   local cur
   cur=$(cat "$PP_BUDGET_FILE" 2>/dev/null || echo 0)
   if [ $((cur + n)) -le "${PP_MAX_DAILY_CALLS:-3500}" ]; then
     echo $((cur + n)) > "$PP_BUDGET_FILE"
-    rmdir "$lock" 2>/dev/null
+    _pp_budget_release
     return 0
   fi
-  rmdir "$lock" 2>/dev/null
+  _pp_budget_release
   return 1
 }
 
-# budget_get: read current count
 budget_get() {
   cat "$PP_BUDGET_FILE" 2>/dev/null || echo 0
 }

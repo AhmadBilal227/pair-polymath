@@ -109,10 +109,12 @@ session_id="${F[12]:-default}"
 limit_7d="${F[13]:--1}"
 limit_7d_reset="${F[14]:-0}"
 
-# Canonicalize session_id: fall back to env if JSON had nothing usable.
-# Runtime assert non-empty — should never trip given the default above.
+# Canonicalize + sanitize session_id. Strip anything that could escape paths,
+# inject newlines, or otherwise corrupt lock/cache filenames built from it.
+# Cap length so a hostile/long ID can't blow out filesystem limits.
 session_id="${session_id:-${SESSION_ID:-default}}"
-[ -z "$session_id" ] && { echo "" ; exit 0 ; }
+session_id=$(printf '%s' "$session_id" | tr -cd 'a-zA-Z0-9._-' | cut -c1-64)
+[ -z "$session_id" ] && session_id="default"
 
 # --- Git branch + dirty marker ---
 branch=""
@@ -397,26 +399,25 @@ parallel_age=$(($(date +%s) - last_parallel))
 
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
     && [ "$is_active" -eq 1 ] \
+    && [ "${PP_EXTERNAL_LLM:-1}" = "1" ] \
     && [ "$parallel_age" -gt "$PP_PARALLEL_INTERVAL_S" ]; then
   mon_lock_age=$(($(date +%s) - $(stat -f %m "$PP_LOCK" 2>/dev/null || echo 0)))
-  calls_today=$(budget_get)
-  # Need worst-case 23 call-budget headroom for one parallel run
-  if { [ ! -f "$PP_LOCK" ] || [ "$mon_lock_age" -gt 300 ]; } \
-      && [ "$((calls_today + 23))" -le "$PP_MAX_DAILY_CALLS" ]; then
-    touch "$PP_LOCK"
+  # Atomic acquire of cycle lock: mkdir succeeds for exactly one caller.
+  # If a stale lock dir (>5 min) blocks us, force-take it once.
+  acquired=0
+  if mkdir "$PP_LOCK" 2>/dev/null; then
+    acquired=1
+  elif [ "$mon_lock_age" -gt 300 ]; then
+    rm -rf "$PP_LOCK" 2>/dev/null
+    mkdir "$PP_LOCK" 2>/dev/null && acquired=1
+  fi
+  if [ "$acquired" = "1" ]; then
     echo "$(date +%s)" > "$PP_LAST_PARALLEL"
     (
-      # FIX (review C2+C5): single trap covering ALL locks. Don't let later trap-EXIT calls
-      # in this subshell override this. Includes per-lens inv/retry/inc locks via glob cleanup.
+      # Single trap covering the cycle lock (now a dir) + the unified budget lock.
       trap '
-        rm -f "$PP_LOCK" 2>/dev/null
-        rmdir "${PP_BUDGET_FILE}.reserve.lock" 2>/dev/null
-        rmdir "${PP_BUDGET_FILE}.crit.lock" 2>/dev/null
-        rmdir "${PP_BUDGET_FILE}.inc.lock" 2>/dev/null
-        for _li in 0 1 2 3 4 5 6; do
-          rmdir "${PP_BUDGET_FILE}.inv.lock.${_li}" 2>/dev/null
-          rmdir "${PP_BUDGET_FILE}.retry.lock.${_li}" 2>/dev/null
-        done
+        rmdir "$PP_LOCK" 2>/dev/null || rm -rf "$PP_LOCK" 2>/dev/null
+        rmdir "${PP_BUDGET_FILE}.lock" 2>/dev/null
       ' EXIT INT TERM HUP
 
       # === Pre-flight: gather grounded facts (shared by all 5 agents) ===
@@ -651,7 +652,7 @@ GROUND
           lens_streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${lens_idx}-streak.txt"
           lens_streak=$(cat "$lens_streak_file" 2>/dev/null || echo 0)
           is_escalated=0
-          [ "$lens_streak" -ge 3 ] && is_escalated=1
+          [ "$lens_streak" -ge 3 ] && [ "${PP_ENABLE_ESCALATION:-1}" = "1" ] && is_escalated=1
 
           # Rotate the "deep" slot (gpt-5.5) AND the "wildcard" slot (broad allowance)
           # Both rotate every cycle through 5 positions. Offset wildcard so they don't
@@ -676,9 +677,7 @@ GROUND
             if [ "$is_escalated" -eq 1 ]; then
               inv_sys="You are pre-investigating for the ${lens_group} lens focused on ${lens_focus}. Given the grounded facts below, identify (a) ONE additional file path from CWD/git status whose contents would be most revealing for this lens, OR (b) ONE grep pattern that would surface evidence specific to this lens. Output exactly two lines: FILE: <path or NONE>  and  GREP: <pattern or NONE>. No preamble."
               inv_output=$(printf "%s" "$grounded" | run_llm 25 -m gpt-5-mini -s "$inv_sys" 2>/dev/null)
-
-              # Atomic budget increment via shared lock (FIX review C6)
-              budget_inc
+              # Note: counted under worst-case-23 reservation at cycle start.
 
               if [ -n "$inv_output" ]; then
                 inv_file=$(echo "$inv_output" | grep '^FILE:' | head -1 | sed 's/^FILE:[[:space:]]*//')
@@ -761,9 +760,7 @@ ${grounded:0:3000}
 OBSERVATIONS TO JUDGE:
 $critique_input"
           critique_output=$(printf "%s" "$critique_data" | run_llm 30 -m "$PP_MODEL_CRITIQUE" -s "$critique_sys" 2>/dev/null)
-
-          # Atomic budget increment via shared lock (FIX review C6)
-          budget_inc
+          # Note: counted under worst-case-23 reservation at cycle start.
 
           # Apply verdicts + 1-retry auto-correction loop + streak tracking for escalation
           if [ -n "$critique_output" ]; then
@@ -799,9 +796,7 @@ $critique_input"
                   retry_sys="You are the ${rlens_group} lens. Your previous observation was DROPPED by the critique pass with reason: ${drop_reason}. Try a DIFFERENT angle, file, or pattern. Same constraints: pick a HAT from ${rlens_hats}, focus on ${rlens_focus}, output exactly HAT: hook|||body (hook 40-70 chars, body 80-180 chars ending in a verb). Only cite paths/symbols visible in the grounded facts. If you still cannot find a valid different observation, output SILENT."
 
                   retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
-
-                  # Atomic budget increment via shared lock (FIX review C6)
-                  budget_inc
+                  # Note: counted under worst-case-23 reservation at cycle start.
 
                   # Validate and accept the retry (loosened body min to 40 for retries)
                   if [ -n "$retry_result" ] && [ "$retry_result" != "SILENT" ] \
@@ -824,7 +819,7 @@ $critique_input"
         tail -100 "$HIST_FILE_PROJECT" > "${HIST_FILE_PROJECT}.tmp" 2>/dev/null && mv "${HIST_FILE_PROJECT}.tmp" "$HIST_FILE_PROJECT"
       fi  # grounded && llm available
       fi  # can_run — gates BOTH planner and analyst fan-out
-      rm -f "$PP_LOCK"
+      rmdir "$PP_LOCK" 2>/dev/null || rm -rf "$PP_LOCK" 2>/dev/null
     ) >/dev/null 2>&1 &
   fi
 fi

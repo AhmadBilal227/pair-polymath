@@ -8,10 +8,25 @@ setup() {
   PP_TEST_HOME="$(mktemp -d)"
   export HOME="$PP_TEST_HOME"
   export CLAUDE_DIR="$HOME/.claude"
-  # The installer prefers brew; on macOS dev boxes brew exists. On CI Ubuntu
-  # it won't, but these tests should run on either platform without invoking
-  # sudo or installing real packages — we use --yes --no-sudo throughout and
-  # rely on jq/llm being present (CI installs them upfront).
+
+  # Some CI environments (the standalone bats workflow) install jq but NOT
+  # llm. The installer's check_or_install would then attempt a real
+  # `pip3 install --user llm` which is slow + flaky. We shim llm with a
+  # no-op so the dep-check passes immediately and tests stay hermetic.
+  if ! command -v llm >/dev/null 2>&1; then
+    PP_TEST_SHIM_DIR="$HOME/_shimbin"
+    mkdir -p "$PP_TEST_SHIM_DIR"
+    cat > "$PP_TEST_SHIM_DIR/llm" <<'LLM'
+#!/usr/bin/env bash
+# Test shim for llm — accepts any subcommand, succeeds, emits no keys.
+case "${1:-}" in
+  keys) [ "${2:-}" = "list" ] && exit 0 ;;
+esac
+exit 0
+LLM
+    chmod +x "$PP_TEST_SHIM_DIR/llm"
+    export PATH="$PP_TEST_SHIM_DIR:$PATH"
+  fi
 }
 
 teardown() {

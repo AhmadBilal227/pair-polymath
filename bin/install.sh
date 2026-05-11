@@ -279,10 +279,16 @@ elif command -v apt-get >/dev/null 2>&1; then
   # versions no longer present on mirrors. Without update, the install
   # 404s on the cached version.
   PKG_INSTALL_JQ="sudo apt-get update && sudo apt-get install -y jq"
-else
+elif ! command -v jq >/dev/null 2>&1; then
+  # No package manager AND no jq — there's nothing we can do.
   err "Could not find brew or apt-get — install jq manually then re-run."
   audit_log "dep-install" "jq" 1 "no package manager available"
   exit 1
+else
+  # No package manager but jq is already present. We won't need to install
+  # anything; leave PKG_INSTALL_JQ unset (check_or_install will short-circuit
+  # on the `command -v` check before consulting it).
+  PKG_INSTALL_JQ=""
 fi
 
 PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"

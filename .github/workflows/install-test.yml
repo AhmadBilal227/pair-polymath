@@ -24,16 +24,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show baseline (no jq, no llm expected pre-install)
+      - name: Force a clean baseline (review fix H1+M1)
+        # ubuntu-latest ships with jq pre-installed; if we leave it in place,
+        # the installer skips its jq prompt and the piped answers shift by one,
+        # causing the OpenAI-key-prompt slot to consume the wrong line. Remove
+        # jq so the installer always sees the "jq absent" path.
+        # We also intentionally do NOT pre-warm apt-get update — the installer's
+        # own apt-get install needs to handle that itself, otherwise we'd hide
+        # a real installer bug.
         run: |
           set -euo pipefail
+          # Apt may not need privilege to remove, but use sudo just in case
+          sudo apt-get remove -y jq >/dev/null 2>&1 || true
           echo "bash: $(bash --version | head -1)"
           echo "jq pre-install: $(command -v jq || echo absent)"
           echo "llm pre-install: $(command -v llm || echo absent)"
           test ! -e "$HOME/.claude" || (echo "$HOME/.claude unexpectedly exists" && exit 1)
-
-      - name: Install bats (test harness only — not exercised by installer)
-        run: sudo apt-get update && sudo apt-get install -y bats
 
       - name: Run installer non-interactively
         # The installer prompts in this order on a clean Ubuntu:
@@ -68,11 +74,11 @@ jobs:
           test -d "$HOME/.claude/pair-polymath/cache"
           test -d "$HOME/.claude/pair-polymath/config"
           test -f "$HOME/.claude/pair-polymath/config/user.env"
-          # 0700 enforced by installer (chmod 700 || true). On filesystems
-          # that drop the chmod (rare), we still expect at least no group/other
-          # write bits — accept tighter modes too.
+          # 0700 enforced by installer (chmod 700 || true). We only accept 700:
+          # 750/550 expose the dir to group, which defeats the secret-cache
+          # rationale for chmod 700 in the first place (review fix M2).
           mode=$(stat -c '%a' "$HOME/.claude/pair-polymath")
-          case "$mode" in 700|0700|750|550|500) : ;; *) echo "unexpected mode $mode"; exit 1 ;; esac
+          case "$mode" in 700|0700) : ;; *) echo "unexpected mode $mode (want 700)"; exit 1 ;; esac
 
       - name: Run polymath doctor (non-network)
         # Doctor will report:
@@ -89,10 +95,17 @@ jobs:
           echo "$out" | grep -q '6/6 built-in present'
           echo "$out" | grep -q 'Summary:'
           # Verify strict-path-match found OUR paths (not a substring decoy)
-          echo "$out" | grep -E 'statusLine wired.*(→|\\$PP_ROOT)' >/dev/null \
+          echo "$out" | grep -E 'statusLine wired.*(→|PP_ROOT)' >/dev/null \
             || (echo "doctor did not detect our statusLine" && exit 1)
-          echo "$out" | grep 'hooks wired.*UserPromptSubmit \+ PostToolUse' >/dev/null \
+          # Use -F (fixed string) — basic grep treats \+ as a repetition operator,
+          # not a literal plus (review fix H2).
+          echo "$out" | grep -F 'UserPromptSubmit + PostToolUse' >/dev/null \
             || (echo "doctor did not detect our hooks" && exit 1)
+
+      - name: Install bats (test harness only — installs AFTER installer runs
+          so that installer's own apt-get update is the one under test; review
+          fix M1)
+        run: sudo apt-get update && sudo apt-get install -y bats
 
       - name: Run bats suite on Ubuntu
         # The macOS dev loop runs bash 3.2; CI runs bash 5.x. Catches features

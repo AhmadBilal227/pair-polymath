@@ -229,31 +229,33 @@ teardown() {
 # === F3: path-component (dirname) denylist ===
 
 @test "secret-file: rejects files inside secret-named directories" {
+  # Round-3 G2: dir-component walk is RELATIVE-PATH only now. Absolute
+  # paths get basename-only check to avoid /private/var false-positives.
   for p in "secrets/config.json" "private/db.yml" ".ssh/known_hosts" ".aws/config" ".credentials/token" ".keys/api" ".secrets/foo"; do
-    run pp_is_secret_file "/proj/$p"
+    run pp_is_secret_file "$p"
     [ "$status" -eq 0 ]
   done
 }
 
 @test "secret-file: dirname check is case-insensitive too" {
-  run pp_is_secret_file "/proj/SECRETS/config.json"
+  run pp_is_secret_file "SECRETS/config.json"
   [ "$status" -eq 0 ]
-  run pp_is_secret_file "/proj/.SSH/known_hosts"
+  run pp_is_secret_file ".SSH/known_hosts"
   [ "$status" -eq 0 ]
 }
 
 @test "secret-file: dirname check does NOT trigger on innocuous paths" {
   for p in "src/main.py" "lib/grounding.sh" "test/foo.bats" "docs/README.md" "app/components/Button.tsx"; do
-    run pp_is_secret_file "/proj/$p"
+    run pp_is_secret_file "$p"
     [ "$status" -ne 0 ]
   done
 }
 
 @test "secret-file: PP_SECRET_DIR_PATTERNS_EXTRA adds dirname patterns additively" {
-  PP_SECRET_DIR_PATTERNS_EXTRA="vault" run pp_is_secret_file "/proj/vault/key.txt"
+  PP_SECRET_DIR_PATTERNS_EXTRA="vault" run pp_is_secret_file "vault/key.txt"
   [ "$status" -eq 0 ]
   # Defaults still apply
-  PP_SECRET_DIR_PATTERNS_EXTRA="vault" run pp_is_secret_file "/proj/secrets/x.txt"
+  PP_SECRET_DIR_PATTERNS_EXTRA="vault" run pp_is_secret_file "secrets/x.txt"
   [ "$status" -eq 0 ]
 }
 
@@ -319,11 +321,13 @@ teardown() {
 @test "secret-file: glob expansion immunity also covers dirname patterns" {
   # Create a dir named "secrets" in cwd. If dirname patterns leaked, mixing
   # with the literal file pattern check could produce surprise matches.
+  # Note: Round-3 G2 contract means we must pass a RELATIVE path to exercise
+  # the dirname walk — absolute paths use basename-only.
   (
     cd "$PP_TEST_BASE/sub"
     mkdir -p secrets
     : > secrets/foo
-    pp_is_secret_file "/proj/private/file.txt"
+    pp_is_secret_file "private/file.txt"
   )
   [ "$?" -eq 0 ]
 }
@@ -339,8 +343,9 @@ teardown() {
 
 @test "secret-file: PP_SECRET_FILE_PATTERNS='' still allows dirname check to fire" {
   # File inside secrets/ should STILL be rejected via dir-pattern check even
-  # when basename patterns are explicitly disabled.
-  PP_SECRET_FILE_PATTERNS="" run pp_is_secret_file "/proj/secrets/config.json"
+  # when basename patterns are explicitly disabled. Use a relative path so
+  # the dir-walk runs (Round-3 G2 contract: absolute → basename only).
+  PP_SECRET_FILE_PATTERNS="" run pp_is_secret_file "secrets/config.json"
   [ "$status" -eq 0 ]
 }
 
@@ -352,6 +357,103 @@ teardown() {
 @test "secret-file: PP_SECRET_DIR_PATTERNS='' (explicit empty) disables dirname check" {
   # With dir check disabled but basename check still on, an innocuous file
   # inside secrets/ should now pass.
-  PP_SECRET_DIR_PATTERNS="" run pp_is_secret_file "/proj/secrets/config.json"
+  PP_SECRET_DIR_PATTERNS="" run pp_is_secret_file "secrets/config.json"
   [ "$status" -ne 0 ]
+}
+
+# === Round-3 N1: pp_is_secret_file preserves caller's `set -f` state ===
+
+@test "pp_is_secret_file: preserves caller set -f state (was on)" {
+  set -f
+  pp_is_secret_file ".env" || true
+  case "$-" in
+    *f*) set +f ;;
+    *)   set +f; echo "set -f leaked off!" >&2; return 1 ;;
+  esac
+}
+
+@test "pp_is_secret_file: preserves caller set -f state (was off)" {
+  set +f
+  pp_is_secret_file ".env" || true
+  case "$-" in
+    *f*) set +f; echo "set -f leaked on!" >&2; return 1 ;;
+    *)   : ;;
+  esac
+}
+
+# === Round-3 G1: cwd-as-secret-dir bypass guard ===
+
+@test "contain: rejects ALL files when base is itself a secret dir (.ssh)" {
+  mkdir -p "$PP_TEST_BASE/.ssh"
+  echo "host github" > "$PP_TEST_BASE/.ssh/config"
+  echo "key" > "$PP_TEST_BASE/.ssh/known_hosts"
+  run pp_contain_path "$PP_TEST_BASE/.ssh" "config"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  run pp_contain_path "$PP_TEST_BASE/.ssh" "known_hosts"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "contain: rejects ALL files when base is itself a secret dir (secrets)" {
+  mkdir -p "$PP_TEST_BASE/secrets"
+  echo "x" > "$PP_TEST_BASE/secrets/data.json"
+  run pp_contain_path "$PP_TEST_BASE/secrets" "data.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "pp_is_secret_dir_component: matches default dir patterns" {
+  run pp_is_secret_dir_component ".ssh"
+  [ "$status" -eq 0 ]
+  run pp_is_secret_dir_component "secrets"
+  [ "$status" -eq 0 ]
+  run pp_is_secret_dir_component "src"
+  [ "$status" -ne 0 ]
+}
+
+# === Round-3 G2: absolute paths skip dir-component walk ===
+
+@test "secret-file: absolute path with /private component does NOT trigger dir-walk false-positive" {
+  # On macOS, mktemp returns /var/... which realpath resolves to
+  # /private/var/...; "private" is in dir defaults. Round-3 G2 says
+  # absolute-path inputs use basename-only — so /private/var/foo/test.txt
+  # must NOT be flagged as secret.
+  run pp_is_secret_file "/private/var/folders/xx/foo/test.txt"
+  [ "$status" -ne 0 ]
+}
+
+@test "secret-file: absolute path still flags secret BASENAME" {
+  # Basename check still fires for absolute inputs.
+  run pp_is_secret_file "/private/var/foo/.env"
+  [ "$status" -eq 0 ]
+}
+
+# === Round-3 G3: empty PP_SECRET_FILE_PATTERNS also disables _EXTRA ===
+
+@test "secret-file: PP_SECRET_FILE_PATTERNS='' also ignores _EXTRA (true off switch)" {
+  # User set basename patterns to '' (explicit disable). _EXTRA must NOT
+  # silently re-enable any matching — otherwise the off-switch is leaky.
+  PP_SECRET_FILE_PATTERNS="" \
+    PP_SECRET_FILE_PATTERNS_EXTRA="*.env" \
+    run pp_is_secret_file ".env"
+  [ "$status" -ne 0 ]
+}
+
+@test "secret-file: PP_SECRET_DIR_PATTERNS='' also ignores _EXTRA (true off switch)" {
+  PP_SECRET_DIR_PATTERNS="" \
+    PP_SECRET_DIR_PATTERNS_EXTRA="secrets" \
+    run pp_is_secret_file "secrets/innocent.txt"
+  [ "$status" -ne 0 ]
+}
+
+# === Round-3 G4: user EXTRA patterns are lowercased before match ===
+
+@test "secret-file: uppercase _EXTRA glob still matches lowercase basename" {
+  PP_SECRET_FILE_PATTERNS_EXTRA="*.PEM" run pp_is_secret_file "server.pem"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: uppercase _EXTRA dirname still matches lowercase component" {
+  PP_SECRET_DIR_PATTERNS_EXTRA="VAULT" run pp_is_secret_file "vault/key.txt"
+  [ "$status" -eq 0 ]
 }

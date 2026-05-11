@@ -16,8 +16,9 @@ Flags:
   --non-interactive     Alias for --yes --no-sudo. Useful for CI.
   --help, -h            This message.
 
-Audit log (every run, not just on failure):
-  $CLAUDE_DIR/pair-polymath/install.log  (JSONL)
+Audit log:
+  $CLAUDE_DIR/pair-polymath/install.log  (JSONL, one line per significant
+  action; NOT written under --dry-run since dry-run makes no FS changes)
 
 Exit codes:
   0   Success (real install or --dry-run completed)

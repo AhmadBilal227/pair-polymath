@@ -39,8 +39,9 @@ Flags:
   --non-interactive     Alias for --yes --no-sudo. Useful for CI.
   --help, -h            This message.
 
-Audit log (every run, not just on failure):
-  $CLAUDE_DIR/pair-polymath/install.log  (JSONL)
+Audit log:
+  $CLAUDE_DIR/pair-polymath/install.log  (JSONL, one line per significant
+  action; NOT written under --dry-run since dry-run makes no FS changes)
 
 Exit codes:
   0   Success (real install or --dry-run completed)
@@ -154,33 +155,16 @@ if [ "$PP_NO_SUDO" = "1" ]; then
   printf '  Sudo:        refused (--no-sudo)\n'
 fi
 
-audit_log "install-start" "bin/install.sh $*" 0 ""
-
-if [ ! -d "$CLAUDE_DIR" ]; then
-  warn "Claude Code dir not found at $CLAUDE_DIR"
-  prompt "Create it? [Y/n]"
-  read_ans
-  case "${ans:-Y}" in
-    [Yy]*|"")
-      if [ "$PP_DRY_RUN" = "1" ]; then
-        printf '  [DRY-RUN] mkdir -p %s\n' "$CLAUDE_DIR"
-        audit_log "mkdir-claude-dir" "mkdir -p $CLAUDE_DIR" 0 "dry-run"
-      else
-        _pp_run "mkdir-claude-dir" mkdir -p "$CLAUDE_DIR"
-      fi
-      ;;
-    *) err "Aborting — no Claude Code dir."; audit_log "abort" "user declined claude-dir create" 1 ""; exit 1 ;;
-  esac
-fi
-
-# === Bare-install detection (P2.3) ===
-# If a pre-plugin bare install exists at $CLAUDE_DIR/statusline-command.sh,
-# print manual-migration steps and bump a request-counter file. We do NOT
-# auto-migrate: that's a v0.3 decision gated on >=3 such requests over 14 days.
+# === Bare-install detection (P2.3) — DETECTION ONLY, read-only ===
+# Review fix HIGH-1: detect the bare-install marker BEFORE the consent
+# prompt (read-only, no FS writes). The counter bump and audit-log entry
+# are deferred until AFTER consent so a declining user leaves $CLAUDE_DIR
+# absent and we write nothing to disk.
 BARE_STATUSLINE="$CLAUDE_DIR/statusline-command.sh"
 MIGRATION_COUNTER="$CLAUDE_DIR/pair-polymath/cache/migration-requests.txt"
-
+PP_BARE_INSTALL_DETECTED=0
 if [ -f "$BARE_STATUSLINE" ]; then
+  PP_BARE_INSTALL_DETECTED=1
   warn "Detected existing bare-install setup at $BARE_STATUSLINE"
   cat <<MIGRATE
 
@@ -198,13 +182,57 @@ if [ -f "$BARE_STATUSLINE" ]; then
   warrants (currently tracked: this installer bumps a counter at
   $MIGRATION_COUNTER and the v0.3 trigger is >=3 hits / 14 days).
 MIGRATE
+fi
 
-  # Bump the request counter (skip under --dry-run).
+# === Claude-dir consent prompt (review fix HIGH-1) ===
+# Previously audit_log("install-start") ran above this block, and audit_log's
+# mkdir -p "$CLAUDE_DIR/pair-polymath/" silently created $CLAUDE_DIR itself —
+# making this prompt a lie. Now: no FS writes happen before this point. If
+# the user declines we exit 0 (their choice, not a failure) and write
+# nothing to disk.
+if [ ! -d "$CLAUDE_DIR" ]; then
+  warn "Claude Code dir not found at $CLAUDE_DIR"
+  prompt "Create it? [Y/n]"
+  read_ans
+  case "${ans:-Y}" in
+    [Yy]*|"")
+      if [ "$PP_DRY_RUN" = "1" ]; then
+        printf '  [DRY-RUN] mkdir -p %s\n' "$CLAUDE_DIR"
+        # Audit log not written under --dry-run; nothing to log here either.
+      else
+        # Direct mkdir (not _pp_run, since audit-log machinery isn't yet active
+        # — we cannot write a log entry that lives inside the dir we're about
+        # to create until AFTER it exists).
+        mkdir -p "$CLAUDE_DIR" || {
+          err "Could not create $CLAUDE_DIR"
+          exit 1
+        }
+      fi
+      ;;
+    *)
+      # User declined — friendly abort. No audit log (no $CLAUDE_DIR to
+      # write it to by user choice). Exit 0: declining is a valid choice,
+      # not a setup failure.
+      printf '  Aborting — no Claude Code dir created (user choice).\n'
+      printf '  To install later: re-run this script and accept the prompt.\n'
+      exit 0
+      ;;
+  esac
+fi
+
+# === NOW that $CLAUDE_DIR exists (or dry-run is in effect), emit the first audit log entry ===
+# audit_log() is a no-op under --dry-run, so this is also safe in dry-run mode.
+audit_log "install-start" "bin/install.sh $*" 0 ""
+
+# === Bare-install counter bump (review fix HIGH-1, MEDIUM-5) ===
+# Now that consent is confirmed and $CLAUDE_DIR exists, bump the counter.
+if [ "$PP_BARE_INSTALL_DETECTED" = "1" ]; then
   if [ "$PP_DRY_RUN" = "1" ]; then
     printf '  [DRY-RUN] Would bump migration-requests counter at %s\n' "$MIGRATION_COUNTER"
-    audit_log "bare-install-detected" "$BARE_STATUSLINE" 0 "dry-run (counter not bumped)"
+    # No audit-log entry under --dry-run (HIGH-3 / contract).
   else
-    mkdir -p "$(dirname "$MIGRATION_COUNTER")" 2>/dev/null || true
+    counter_dir="$(dirname "$MIGRATION_COUNTER")"
+    mkdir -p "$counter_dir" 2>/dev/null || true
     _pp_count=0
     if [ -f "$MIGRATION_COUNTER" ]; then
       _pp_count=$(cat "$MIGRATION_COUNTER" 2>/dev/null || echo 0)
@@ -213,7 +241,20 @@ MIGRATE
         ''|*[!0-9]*) _pp_count=0 ;;
       esac
     fi
-    printf '%d\n' "$((_pp_count + 1))" > "$MIGRATION_COUNTER" 2>/dev/null || true
+    # Review fix MEDIUM-5: atomic write via mktemp-in-same-dir + mv. Two
+    # concurrent installers can still both read the same old value (TOCTOU
+    # at the read step — would need flock to fully eliminate), but the WRITE
+    # is atomic so we never half-write the file.
+    counter_tmp=""
+    if counter_tmp=$(mktemp "${MIGRATION_COUNTER}.XXXXXX" 2>/dev/null); then
+      printf '%d\n' "$((_pp_count + 1))" > "$counter_tmp"
+      if ! mv "$counter_tmp" "$MIGRATION_COUNTER" 2>/dev/null; then
+        rm -f "$counter_tmp"
+        warn "counter mv failed; counter not bumped"
+      fi
+    else
+      warn "mktemp failed; counter not bumped"
+    fi
     audit_log "bare-install-detected" "$BARE_STATUSLINE" 0 "counter bumped to $((_pp_count + 1))"
   fi
 
@@ -242,6 +283,19 @@ check_or_install() {
     return 0
   fi
   warn "$cmd not found"
+
+  # Review fix MEDIUM-1: empty install_cmd means we had no package manager to
+  # build one with. Under --dry-run we treat this as informational; otherwise
+  # the no-package-manager branch above would already have exited 1.
+  if [ -z "$install_cmd" ]; then
+    if [ "$PP_DRY_RUN" = "1" ]; then
+      printf '  [DRY-RUN] Would require manual install of %s (no package manager detected).\n' "$cmd"
+      return 0
+    fi
+    err "$cmd is required but no package manager is available — install it manually then re-run."
+    audit_log "dep-install" "$cmd" 1 "no package manager"
+    return 1
+  fi
 
   # --no-sudo: refuse before prompting if the install command involves sudo
   # anywhere (leading or embedded after `&&`).
@@ -279,16 +333,24 @@ elif command -v apt-get >/dev/null 2>&1; then
   # versions no longer present on mirrors. Without update, the install
   # 404s on the cached version.
   PKG_INSTALL_JQ="sudo apt-get update && sudo apt-get install -y jq"
-elif ! command -v jq >/dev/null 2>&1; then
-  # No package manager AND no jq — there's nothing we can do.
-  err "Could not find brew or apt-get — install jq manually then re-run."
-  audit_log "dep-install" "jq" 1 "no package manager available"
-  exit 1
-else
+elif command -v jq >/dev/null 2>&1; then
   # No package manager but jq is already present. We won't need to install
   # anything; leave PKG_INSTALL_JQ unset (check_or_install will short-circuit
   # on the `command -v` check before consulting it).
   PKG_INSTALL_JQ=""
+else
+  # No package manager AND no jq.
+  # Review fix MEDIUM-1: under --dry-run, this is informational, not fatal.
+  # check_or_install treats empty install_cmd as "manual action required"
+  # and prints a [DRY-RUN] line instead of exiting.
+  if [ "$PP_DRY_RUN" = "1" ]; then
+    warn "No package manager detected (brew/apt-get). Dry-run continues without dep-install plan."
+    PKG_INSTALL_JQ=""
+  else
+    err "Could not find brew or apt-get — install jq manually then re-run."
+    audit_log "dep-install" "jq" 1 "no package manager available"
+    exit 1
+  fi
 fi
 
 PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
@@ -329,13 +391,18 @@ else
   stty echo 2>/dev/null || true
   printf '\n'
   if [ -n "$openai_key" ]; then
-    if printf '%s\n' "$openai_key" | llm keys set openai 2>/dev/null; then
-      ok "openai key stored"
-      audit_log "openai-key-set" "llm keys set openai" 0 ""
-    else
-      err "failed to store openai key"
-      audit_log "openai-key-set" "llm keys set openai" 1 "command failed"
+    # Review fix MEDIUM-2: previously a failed `llm keys set openai` only
+    # logged + warned, then the installer continued to print "✓ Pair Polymath
+    # installed." That's a lie when the key never landed. Now: abort, with a
+    # clear remediation step.
+    if ! printf '%s\n' "$openai_key" | llm keys set openai 2>/dev/null; then
+      err "failed to store openai key (llm keys set openai returned non-zero)"
+      err "fix this then re-run: llm keys set openai"
+      audit_log "openai-key-set" "llm keys set openai" 1 "failure"
+      exit 1
     fi
+    ok "openai key stored"
+    audit_log "openai-key-set" "llm keys set openai" 0 ""
   else
     warn "Skipping key setup. Configure later: llm keys set openai"
     audit_log "openai-key-set" "skipped (empty input)" 0 ""

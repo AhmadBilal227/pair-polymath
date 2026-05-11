@@ -340,3 +340,78 @@ APT
   [ "$ups_count" = "1" ]
   [ "$ptu_count" = "1" ]
 }
+
+# ============================================================
+# Consent flow (review fix HIGH-1)
+# ============================================================
+
+@test "install: declining 'create claude dir?' leaves \$CLAUDE_DIR absent" {
+  # Pre-condition: no $CLAUDE_DIR (setup() doesn't create it).
+  [ ! -d "$CLAUDE_DIR" ]
+  # Pipe 'n' to the consent prompt. Cannot use --yes here (that auto-accepts).
+  run bash -c "printf 'n\n' | bash '$PP_ROOT/bin/install.sh' --no-sudo"
+  # User choice, not failure → exit 0.
+  [ "$status" -eq 0 ]
+  # Most important: the dir was NOT silently created by audit_log's mkdir -p.
+  # This was the HIGH-1 bug — audit_log ran BEFORE the prompt and created the dir.
+  [ ! -d "$CLAUDE_DIR" ]
+  # And specifically no audit log was written (no $CLAUDE_DIR to write it to).
+  [ ! -f "$CLAUDE_DIR/pair-polymath/install.log" ]
+  # Friendly abort message.
+  [[ "$output" == *"Aborting"* ]]
+  [[ "$output" == *"user choice"* ]]
+}
+
+# ============================================================
+# HOME-unset guard (review fix HIGH-2)
+# ============================================================
+
+@test "audit_log: silently bails when CLAUDE_DIR and HOME both unset" {
+  # Under `env -i`, audit_log() previously would compute
+  # PP_AUDIT_LOG=/.claude/pair-polymath/install.log and attempt mkdir -p
+  # /.claude/ (which on a root shell would actually create /.claude/).
+  # Now: bail silently when BOTH are unset/empty.
+  run bash -c "
+    set -e
+    # Force a clean env, source the lib, call audit_log, expect no FS writes
+    # and a clean return.
+    env -i bash -c '
+      . \"$PP_ROOT/lib/audit-log.sh\"
+      audit_log test-action \"some-cmd\" 0 \"\"
+      echo OK
+    '
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+  # Nothing under /.claude (only sane assertion we can make without root).
+  [ ! -f "/.claude/pair-polymath/install.log" ]
+}
+
+# ============================================================
+# Control-char escape in JSON fallback (review fix B1 / debugger)
+# ============================================================
+
+@test "audit_log: fallback path strips control chars from stderr_tail (no jq)" {
+  # Force the no-jq fallback by hiding jq from PATH, then call audit_log
+  # with a stderr payload containing a tab + CR + bell. Resulting log line
+  # must still parse as JSON.
+  mkdir -p "$CLAUDE_DIR/pair-polymath"
+  fakebin="$HOME/no_jq_bin"
+  mkdir -p "$fakebin"
+  # Symlink the coreutils audit-log needs except jq.
+  for tool in bash sh cat date dirname sed tail tr mkdir rm printf; do
+    src=$(command -v "$tool" 2>/dev/null) || continue
+    ln -sf "$src" "$fakebin/$tool"
+  done
+  # Tab-containing stderr; also CR and bell. Pass via env so the script's
+  # PATH excludes the real jq location.
+  PATH="$fakebin" bash -c "
+    . '$PP_ROOT/lib/audit-log.sh'
+    payload=\$(printf 'before\tafter\rmore\abad')
+    audit_log smoke-test 'some-cmd' 0 \"\$payload\"
+  "
+  log="$CLAUDE_DIR/pair-polymath/install.log"
+  [ -f "$log" ]
+  # The line must be valid JSON parseable by the REAL jq (which we have on PATH here).
+  jq -e . < "$log" >/dev/null || { echo "log line not parseable as JSON"; cat "$log"; return 1; }
+}

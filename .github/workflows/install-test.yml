@@ -57,10 +57,14 @@ jobs:
             echo "$line" | jq -e . >/dev/null
           done < "$log"
           # Key actions present.
-          jq -er '.action' < "$log" | grep -q '^install-start$'
-          jq -er '.action' < "$log" | grep -q '^install-complete$'
-          jq -er '.action' < "$log" | grep -q '^settings-merge$'
-          jq -er '.action' < "$log" | grep -q '^smoke-test$'
+          # Review fix MEDIUM-3: jq | grep is pipefail-sensitive — grep -q
+          # closes the pipe on first match, SIGPIPE'ing jq which would then
+          # be reported as a failure under `set -o pipefail`. jq -e 'select'
+          # exits 0 if any input line matches.
+          jq -e 'select(.action == "install-start")'    < "$log" >/dev/null
+          jq -e 'select(.action == "install-complete")' < "$log" >/dev/null
+          jq -e 'select(.action == "settings-merge")'   < "$log" >/dev/null
+          jq -e 'select(.action == "smoke-test")'       < "$log" >/dev/null
 
       - name: Validate ~/.claude/settings.json structure
         run: |
@@ -158,12 +162,20 @@ jobs:
           fi
 
       - name: Dry-run produces no FS changes
+        # Review fix MEDIUM-4: snapshot ALL paths the installer might touch
+        # — not just $HOME/.claude. pip3 --user lands files under $HOME/.local
+        # and $HOME/.local/share, and llm CLI may also place config under
+        # $HOME/.config. Any unexpected file under those paths is a real bug.
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.claude"   # baseline dir; dry-run shouldn't add anything
-          home_before=$(find "$HOME/.claude" -mindepth 1 2>/dev/null | sort)
+          snapshot() {
+            find "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config" \
+              -mindepth 1 2>/dev/null | sort
+          }
+          home_before=$(snapshot)
           bash ./bin/install.sh --dry-run --yes > /tmp/dry-run.log 2>&1
-          home_after=$(find "$HOME/.claude" -mindepth 1 2>/dev/null | sort)
+          home_after=$(snapshot)
           if [ "$home_before" != "$home_after" ]; then
             echo "FS changed!"
             diff <(echo "$home_before") <(echo "$home_after")

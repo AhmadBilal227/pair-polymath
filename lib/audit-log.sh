@@ -18,6 +18,13 @@ audit_log() {
   if [ "${PP_DRY_RUN:-0}" = "1" ]; then
     return 0
   fi
+  # Review fix HIGH-2: if BOTH CLAUDE_DIR and HOME are unset/empty (e.g. under
+  # `env -i`), `$PP_AUDIT_LOG` evaluates to `/.claude/pair-polymath/install.log`
+  # on a root shell (and creates `/.claude/`) or `.claude/...` in cwd otherwise.
+  # Bail silently rather than scribble at the FS root.
+  if [ -z "${CLAUDE_DIR:-}" ] && [ -z "${HOME:-}" ]; then
+    return 0
+  fi
   local audit_dir
   audit_dir="$(dirname "$PP_AUDIT_LOG")"
   mkdir -p "$audit_dir" 2>/dev/null || return 0  # never fail an install over the log
@@ -39,10 +46,17 @@ audit_log() {
   fi
   if [ -z "$entry" ]; then
     # Fallback when jq isn't available yet (very early in install) OR jq failed.
-    # Minimal escaping for embedded backslashes / double-quotes / newlines.
+    # Review fix B1 (debugger): strip ALL control chars (U+0000-U+001F) before
+    # the JSON escape chain. Bare tabs/CRs/etc. in stderr payloads otherwise
+    # break parsers. We lose some debug context but keep the log parseable.
+    # We allow nothing through; \n already collapsed via tr, others stripped.
     local esc_cmd esc_stderr
-    esc_cmd=$(printf '%s' "$command" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    esc_stderr=$(printf '%s' "$stderr_tail" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+    esc_cmd=$(printf '%s' "$command" \
+      | tr -d '\000-\037' \
+      | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_stderr=$(printf '%s' "$stderr_tail" \
+      | tr -d '\000-\037' \
+      | sed 's/\\/\\\\/g; s/"/\\"/g')
     entry=$(printf '{"ts":"%s","action":"%s","command":"%s","exit_code":%s,"stderr_tail":"%s"}' \
       "$ts" "$action" "$esc_cmd" "$exit_code" "$esc_stderr")
   fi

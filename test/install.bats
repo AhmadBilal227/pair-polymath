@@ -470,7 +470,7 @@ _pp_eval() {
   return "$rc"
 }
 
-_pp_eval 'probe' 'echo INSTALL_FAILURE_DIAGNOSTIC >&2; exit 1' || true
+_pp_eval 'probe' 'echo INSTALL_FAILURE_DIAGNOSTIC >&2; false' || true
 PROBE
   chmod +x "$probe_script"
 

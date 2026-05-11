@@ -258,16 +258,17 @@ Dependencies: `jq`, `llm` (≥0.20). Optional: `gh` for richer git grounding, `g
 
 ---
 
-## What's coming in v0.2
+## What's coming in v0.3
 
-Deferred from this lean alpha (full list in [CHANGELOG.md](CHANGELOG.md)):
-- `polymath doctor` / `cost` / `disable` / `enable` / `logs` subcommands
-- `--dry-run` install + audit log
-- Per-call USD telemetry written to `metrics.jsonl`
-- Full `docs/` tree (architecture diagram, prompt-tuning guide, troubleshooting)
+Shipped in v0.2 (see [CHANGELOG.md](CHANGELOG.md)): subcommands `cost`, `disable`, `enable`, `logs`, `update`, `self-test` (`doctor` shipped in v0.1.0-alpha); USD telemetry → `metrics.jsonl`; verifiable privacy log; `--dry-run` / `--yes` / `--no-sudo` installer + audit log; full `docs/` tree; branch-protected β workflow.
+
+Still deferred to v0.3:
+- `NO_COLOR` / `--no-color` across all printers (issue #11)
+- Externalized per-model price table (issue #12)
 - `migrate-from-bare.sh` for users with an existing `~/.claude/`-based install
-- Claude Code marketplace `plugin.json` (submission deferred until issue triage validates stability)
+- Claude Code marketplace `plugin.json` (submission deferred until external-user feedback validates stability)
 - MCP integrations for Notion / Slack / Gmail context
+- Multi-provider support (Anthropic / local) via `llm` plugins
 
 ---
 

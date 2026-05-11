@@ -5,6 +5,11 @@ setup() {
   export PP_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
   PP_TEST_HOME="$(mktemp -d)"
   export HOME="$PP_TEST_HOME"
+  # Test fixtures use synthetic names (name, undefined_var, a, b, val) that
+  # aren't on the production allowlist. Set the allowlist to include them so
+  # the substitution-mechanics tests still work. The R1 security test below
+  # has its own scope-narrowed allowlist.
+  export PP_PROMPT_VAR_ALLOWLIST="name undefined_var a b val drop_reason"
   # shellcheck disable=SC1091
   . "${PP_ROOT}/lib/prompt-loader.sh"
 }
@@ -82,4 +87,28 @@ teardown() {
   val="42" run pp_render_prompt strayrbrace
   [ "$status" -eq 0 ]
   [[ "$output" == *"return 42;"* ]]
+}
+
+# Ralph core R1 ai-engineer M8: a template referencing a name NOT on the
+# allowlist must render empty for that placeholder — even if the env var is
+# set. Defends against user-contributed prompt templates / lens
+# system_prompt_addition fields that name a secret directly.
+@test "loader: placeholder NOT in allowlist renders empty (R1 ai-engineer M8)" {
+  mkdir -p "$HOME/.claude/pair-polymath/prompts"
+  echo 'leak: ${OPENAI_API_KEY}' > "$HOME/.claude/pair-polymath/prompts/leakprobe.md"
+  export OPENAI_API_KEY="sk-NEVER-LEAK-THIS-67890"
+  # Scope allowlist to NOT include OPENAI_API_KEY
+  PP_PROMPT_VAR_ALLOWLIST="name val" run pp_render_prompt leakprobe
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"sk-NEVER-LEAK-THIS"* ]]
+  [[ "$output" == "leak: " ]]
+  unset OPENAI_API_KEY
+}
+
+@test "loader: placeholder ON allowlist substitutes normally" {
+  mkdir -p "$HOME/.claude/pair-polymath/prompts"
+  echo 'value: ${name}' > "$HOME/.claude/pair-polymath/prompts/normalprobe.md"
+  PP_PROMPT_VAR_ALLOWLIST="name" name="Hello" run pp_render_prompt normalprobe
+  [ "$status" -eq 0 ]
+  [ "$output" = "value: Hello" ]
 }

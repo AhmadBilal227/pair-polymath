@@ -6,8 +6,20 @@
 # $HOME/.claude/pair-polymath/prompts/. User file wins if both exist.
 #
 # Substitution: ${var_name} placeholders are replaced with the value of the
-# matching shell variable in the caller's environment. Unknown vars become
-# empty strings (no fatal).
+# matching shell variable in the caller's environment, BUT only for names
+# on the allowlist (PP_PROMPT_VAR_ALLOWLIST). Disallowed names render as
+# empty string. Unknown vars also become empty strings (no fatal).
+
+# Allowlist of substitutable placeholder names. Anything outside this set
+# renders empty — this prevents a user-contributed prompt template (or a
+# typo in a built-in) from referencing arbitrary env vars by name (e.g.
+# ${OPENAI_API_KEY}). The indirect-lookup ${!_pp_key-} would resolve them
+# otherwise; the single-pass-substitution guard only protects against
+# re-scanning of LLM-returned VALUES, not against the ORIGINAL template
+# directly naming a secret. (Ralph core round 1 — ai-engineer M8.)
+# Default allowlist — overrideable via env (e.g. by tests). End-users with a
+# customized template can extend this from config/default.env or user.env.
+PP_PROMPT_VAR_ALLOWLIST="${PP_PROMPT_VAR_ALLOWLIST:-lens_group lens_focus lens_hats relevance_directive grounded prev_observations recent_user_messages activity_tail file_contents git_status git_log git_diff_stat git_recent_files gh_prs gh_ci candidate_file inv_grep drop_reason rlens_group rlens_hats rlens_focus project_ctx recent_commits stories arxiv_titles cwd cwd_ls test_state recent_tools PP_LENS_COUNT}"
 #
 # SECURITY (review fix H1): substitution is SINGLE-PASS over the set of
 # placeholders found in the ORIGINAL template. Replacement values that
@@ -61,11 +73,21 @@ pp_render_prompt() {
   # SINGLE-PASS substitution: walk the original-placeholder set, do one
   # template-wide replacement per name. The replacement value is treated as
   # an opaque literal — we never rescan, so secrets disguised as ${X} stay
-  # inert.
+  # inert. Allowlist-gated: any name not in PP_PROMPT_VAR_ALLOWLIST becomes
+  # an empty string (defense against the ORIGINAL template naming a secret).
   local _pp_key _pp_value
   for _pp_key in $_pp_names; do
-    # Indirect lookup (bash 3.2-safe via ${!var})
-    _pp_value="${!_pp_key-}"
+    # Allowlist check — disallowed names render empty
+    case " $PP_PROMPT_VAR_ALLOWLIST " in
+      *" $_pp_key "*)
+        # Indirect lookup (bash 3.2-safe via ${!var})
+        _pp_value="${!_pp_key-}"
+        ;;
+      *)
+        _pp_value=""
+        printf 'pp_render_prompt: placeholder ${%s} not in allowlist (rendered empty)\n' "$_pp_key" >&2
+        ;;
+    esac
     _pp_template="${_pp_template//\$\{$_pp_key\}/$_pp_value}"
   done
 

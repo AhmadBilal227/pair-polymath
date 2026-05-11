@@ -42,10 +42,12 @@ See SECURITY.md's "Hardening highlights" section. Key points:
 ## File modes
 
 ```bash
-ls -ld ~/.claude/pair-polymath           # installer chmod's to 700
-ls -ld ~/.claude/cache                   # NOT managed by installer; tighten manually
-                                          # if your transcript may contain secrets:
-                                          #   chmod -R go-rwx ~/.claude/cache
+# Created by the installer with mode 700 (owner-only):
+ls -ld ~/.claude/pair-polymath           # always 700 — installer chmod's both fresh and existing
+ls -ld ~/.claude/cache                   # 700 when installer created it fresh; existing dirs are NOT chmod'd
+
+# If your cache predates the installer or was created by another tool, tighten manually:
+chmod -R go-rwx ~/.claude/cache
 ```
 
-The installer sets `~/.claude/pair-polymath` to mode 700 on first creation. The shared `~/.claude/cache/` directory (where per-cycle observations and budget tracker live) is created with your umask — typically 755 — and is NOT touched on re-runs to avoid clobbering user-managed permissions. If a multi-user machine concerns you, tighten manually with the `chmod -R go-rwx` above.
+The installer never chmod's a directory that already existed before it ran — to avoid clobbering permissions the user or another tool deliberately set. If you want strict 700 enforcement on every install run, file a feature request.

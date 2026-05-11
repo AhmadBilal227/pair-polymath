@@ -158,6 +158,17 @@ The cycle has a defined call budget. Here's the math:
 
 Dollar figures assume default models (`gpt-5-mini` per lens, `gpt-5` for critique) and ~2k input tokens per call. Your prompts and grounded facts can make this larger; the planner-picked file is capped at the first 3 KB and the transcript tail at 5 KB.
 
+**See your actual estimated spend:**
+
+```bash
+polymath cost              # last 7 days, table by day
+polymath cost --since 30d  # last month
+polymath cost --by-lens    # breakdown by call type (planner/analyst/critique/inv/retry)
+polymath cost --json       # raw JSONL for piping to jq
+```
+
+Numbers are estimates: each cycle's call counts × static avg-token assumptions × per-million pricing (all knobs in [`lib/metrics.sh`](lib/metrics.sh), overridable in `user.env`). Real spend can drift 20–50% on outlier cycles with very large grounded blobs or very short responses. v0.3 will add real per-call `--usage` parsing for higher fidelity.
+
 The 30-minute idle threshold (`PP_IDLE_THRESHOLD_S=1800`, configurable) means leaving a Claude Code window open overnight doesn't burn budget. Cycles also skip if `PP_EXTERNAL_LLM=0`.
 
 Models (override in `user.env`):

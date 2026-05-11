@@ -865,3 +865,254 @@ SH
   [ "$status" -eq 0 ]
   [[ "$output" == *"body-one"* ]]
 }
+
+# ----- polymath cost (P3.2) -----------------------------------------------
+
+_pp_cost_seed_metrics() {
+  # Helper: seed $PP_CACHE_DIR/metrics.jsonl with a few entries covering
+  # both recent (today) and older (~45 days ago) timestamps. Uses portable
+  # date arithmetic (BSD/macOS first, GNU fallback).
+  local now today_iso older_iso
+  if date -u '+%Y-%m-%dT%H:%M:%SZ' >/dev/null 2>&1; then
+    today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  fi
+  if date -u -v -45d '+%Y-%m-%dT%H:%M:%SZ' >/dev/null 2>&1; then
+    older_iso=$(date -u -v -45d '+%Y-%m-%dT%H:%M:%SZ')
+  else
+    older_iso=$(date -u -d "-45 days" '+%Y-%m-%dT%H:%M:%SZ')
+  fi
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"abc","calls":9,"usd_est":0.012345,"by_type":{"planner":1,"analyst":7,"critique":1}}
+{"ts":"$today_iso","session":"abc","calls":10,"usd_est":0.020100,"by_type":{"planner":1,"analyst":7,"critique":1,"retry":1}}
+{"ts":"$older_iso","session":"old","calls":9,"usd_est":0.011000,"by_type":{"planner":1,"analyst":7,"critique":1}}
+EOF
+}
+
+@test "polymath cost: empty metrics → 'no metrics yet' exit 0" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  run bash "$PP_ROOT/bin/polymath" cost
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no metrics yet"* ]]
+}
+
+@test "polymath cost: populated metrics → table with date / cycles / calls / USD" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_cost_seed_metrics
+  run bash "$PP_ROOT/bin/polymath" cost
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Date"* ]]
+  [[ "$output" == *"Cycles"* ]]
+  [[ "$output" == *"Calls"* ]]
+  [[ "$output" == *"USD (est)"* ]]
+  [[ "$output" == *"Total"* ]]
+  # 45-day-old entry must NOT be in default 7d window
+  [[ "$output" != *"$(date -u -v -45d '+%Y-%m-%d' 2>/dev/null || date -u -d '-45 days' '+%Y-%m-%d')"* ]]
+}
+
+@test "polymath cost --by-lens: breakdown by call type" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_cost_seed_metrics
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Cost by call type"* ]]
+  [[ "$output" == *"analyst:"* ]]
+  [[ "$output" == *"planner:"* ]]
+  [[ "$output" == *"critique:"* ]]
+}
+
+@test "polymath cost --json: emits JSONL filtered by cutoff" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_cost_seed_metrics
+  run bash "$PP_ROOT/bin/polymath" cost --json
+  [ "$status" -eq 0 ]
+  # 2 today entries, 1 old entry; default 7d window → 2 lines
+  local line_count
+  line_count=$(printf '%s\n' "$output" | grep -c '^{')
+  [ "$line_count" -eq 2 ]
+  # Each printed line parses as JSON
+  printf '%s\n' "$output" | while IFS= read -r ln; do
+    printf '%s' "$ln" | jq -e '.' >/dev/null || exit 1
+  done
+}
+
+@test "polymath cost --since 60d: broader window includes older entries" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_cost_seed_metrics
+  run bash "$PP_ROOT/bin/polymath" cost --since 60d
+  [ "$status" -eq 0 ]
+  # 45-day-old entry should now appear in the table
+  local older_date
+  older_date=$(date -u -v -45d '+%Y-%m-%d' 2>/dev/null || date -u -d '-45 days' '+%Y-%m-%d')
+  [[ "$output" == *"$older_date"* ]]
+}
+
+@test "polymath cost --since abc: exit 2 with clear error" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_cost_seed_metrics
+  run bash "$PP_ROOT/bin/polymath" cost --since abc 2>&1
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--since"* ]]
+}
+
+@test "polymath cost --since 7: missing 'd' suffix exit 2" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_cost_seed_metrics
+  run bash "$PP_ROOT/bin/polymath" cost --since 7 2>&1
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"like 7d"* ]]
+}
+
+@test "polymath cost: unknown flag exits 2" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_cost_seed_metrics
+  run bash "$PP_ROOT/bin/polymath" cost --bogus 2>&1
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown flag"* ]]
+}
+
+@test "polymath cost --help: prints help + exits 0" {
+  run bash "$PP_ROOT/bin/polymath" cost --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"polymath cost"* ]]
+  [[ "$output" == *"--since"* ]]
+  [[ "$output" == *"--by-lens"* ]]
+  [[ "$output" == *"--json"* ]]
+}
+
+@test "polymath help: cost listed in usage, no longer in 'v0.2 will add'" {
+  run bash "$PP_ROOT/bin/polymath" help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"polymath cost"* ]]
+  # "v0.2 will add" line should no longer mention 'cost'
+  [[ "$output" != *"will add: cost"* ]]
+}
+
+# ----- Round-2 review fixes --------------------------------------------------
+
+@test "R2-H2: polymath cost --by-lens sums call counts across sessions (not last-write-wins)" {
+  # Three sessions, each with 5 planner calls. Total must be 15 — pre-fix
+  # this returned 5 because jq `add` on objects is key-collision merge.
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":5,"usd_est":0.0015,"by_type":{"planner":5},"by_type_usd":{"planner":0.0015}}
+{"ts":"$today_iso","session":"b","calls":5,"usd_est":0.0015,"by_type":{"planner":5},"by_type_usd":{"planner":0.0015}}
+{"ts":"$today_iso","session":"c","calls":5,"usd_est":0.0015,"by_type":{"planner":5},"by_type_usd":{"planner":0.0015}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  # Must report 15 planner calls — NOT 5
+  [[ "$output" == *"planner: 15 calls"* ]]
+  # USD breakdown should be present and approximately $0.0045
+  [[ "$output" == *"\$0.0045"* ]]
+}
+
+@test "R2-H2: polymath cost --by-lens shows USD per call type" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":3,"usd_est":0.0103,"by_type":{"planner":1,"analyst":1,"critique":1},"by_type_usd":{"planner":0.0003,"analyst":0.00091,"critique":0.00937}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  # Each line must include "$" + decimal — the output is "  type: N calls / $0.xxxx"
+  [[ "$output" == *"calls / \$"* ]]
+}
+
+@test "R2-H2: by-lens still works on legacy entries without by_type_usd field" {
+  # Older JSONL produced before the round-2 fix lacks by_type_usd; jq
+  # should default to 0 USD via the // fallback, not error out.
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"legacy","calls":2,"usd_est":0.001,"by_type":{"planner":2}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planner: 2 calls"* ]]
+  # Missing by_type_usd → falls back to $0
+  [[ "$output" == *"\$0"* ]]
+}
+
+@test "R2-M2: polymath cost table shows 4-decimal USD (sub-cent visible)" {
+  # Single-call cycles cost ~$0.0003. Pre-fix the *100/round/100 query
+  # rounded these to $0, so the table looked broken. New formatting uses
+  # 4 decimals. Column padding may insert spaces between '$' and the
+  # value, so we match the 0.0003 substring (not the $-prefix).
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"tiny","calls":1,"usd_est":0.0003,"by_type":{"planner":1},"by_type_usd":{"planner":0.0003}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost
+  [ "$status" -eq 0 ]
+  # Sub-cent value must be visible — not rounded to $0
+  [[ "$output" == *"0.0003"* ]]
+  # And the table must NOT show $0 as the only USD value (pre-fix bug)
+  [[ "$output" != *"\$        0 "* ]]
+}
+
+@test "R3-PR10-6: polymath cost surfaces unknown-model warnings (default table)" {
+  # When metrics-warnings.log exists and is non-empty, the table view
+  # should append a yellow warning block listing the first few unknown
+  # models with the path to the log file.
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":1,"usd_est":0,"by_type":{"planner":1},"by_type_usd":{"planner":0}}
+EOF
+  printf '%s\tunknown model gpt-4o-mini — billing as $0; configure via user.env\n' \
+    "$today_iso" > "$PP_CACHE_DIR/metrics-warnings.log"
+  run bash "$PP_ROOT/bin/polymath" cost
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Unknown models seen"* ]]
+  [[ "$output" == *"gpt-4o-mini"* ]]
+}
+
+@test "R3-PR10-6: polymath cost --by-lens surfaces unknown-model warnings" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":1,"usd_est":0,"by_type":{"planner":1},"by_type_usd":{"planner":0}}
+EOF
+  printf '%s\tunknown model claude-3.5-sonnet — billing as $0; configure via user.env\n' \
+    "$today_iso" > "$PP_CACHE_DIR/metrics-warnings.log"
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Unknown models seen"* ]]
+  [[ "$output" == *"claude-3.5-sonnet"* ]]
+}

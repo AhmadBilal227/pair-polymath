@@ -51,12 +51,12 @@ These affect ONLY the estimated USD in `polymath cost`. They have NO effect on a
 
 | Var | Default | Controls |
 |---|---|---|
-| `PP_PRICE_GPT_5_MINI_IN` | `0.25` | $ per 1M input tokens, gpt-5-mini |
-| `PP_PRICE_GPT_5_MINI_OUT` | `2.00` | $ per 1M output tokens, gpt-5-mini |
-| `PP_PRICE_GPT_5_IN` | `1.25` | $ per 1M input tokens, gpt-5 |
-| `PP_PRICE_GPT_5_OUT` | `10.00` | $ per 1M output tokens, gpt-5 |
-| `PP_PRICE_GPT_5_5_IN` | `2.50` | $ per 1M input tokens, gpt-5.5 |
-| `PP_PRICE_GPT_5_5_OUT` | `15.00` | $ per 1M output tokens, gpt-5.5 |
+| `PP_PRICE_GPT_5_MINI_IN_PER_M` | `0.25` | $ per 1M input tokens, gpt-5-mini |
+| `PP_PRICE_GPT_5_MINI_OUT_PER_M` | `2.00` | $ per 1M output tokens, gpt-5-mini |
+| `PP_PRICE_GPT_5_IN_PER_M` | `1.25` | $ per 1M input tokens, gpt-5 |
+| `PP_PRICE_GPT_5_OUT_PER_M` | `10.00` | $ per 1M output tokens, gpt-5 |
+| `PP_PRICE_GPT_5_5_IN_PER_M` | `2.50` | $ per 1M input tokens, gpt-5.5 |
+| `PP_PRICE_GPT_5_5_OUT_PER_M` | `15.00` | $ per 1M output tokens, gpt-5.5 |
 
 Avg-token vars (used by `polymath cost` when the API didn't report exact token counts):
 

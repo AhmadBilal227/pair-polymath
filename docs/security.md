@@ -11,14 +11,20 @@ This doc is the operational companion — what you, the user, can verify yoursel
 ## Quick checks
 
 ```bash
-# Show what would be sent in the next cycle (overwritten each cycle, not archived)
-cat ~/.claude/pair-polymath/cache/last-cycle-payload.json | jq .
+# What did the last cycle send to the model?
+polymath logs -n 1                              # most recent observation per lens
 
-# Show what file the planner picked last (and was containment-checked)
-polymath logs --lens ENGINEERING -n 1 | head -3
+# What's my recent spend?
+polymath cost --since 7d
+
+# What's my cache dir? Verify it's not world-readable.
+ls -ld ~/.claude/cache ~/.claude/pair-polymath 2>/dev/null
+
+# Strict 'doctor' to confirm wiring
+polymath doctor
 ```
 
-(The privacy log lands in P3.3; until then, the `last-cycle-payload.json` file may not exist yet.)
+A per-cycle privacy log (`last-cycle-payload.json`) lands in v0.2 P3.3 — see [v0.2-plan.md](v0.2-plan.md).
 
 ## What's hardened
 
@@ -36,12 +42,10 @@ See SECURITY.md's "Hardening highlights" section. Key points:
 ## File modes
 
 ```bash
-ls -la ~/.claude/pair-polymath/
-# Expected: drwx------ (mode 700)
+ls -ld ~/.claude/pair-polymath           # installer chmod's to 700
+ls -ld ~/.claude/cache                   # NOT managed by installer; tighten manually
+                                          # if your transcript may contain secrets:
+                                          #   chmod -R go-rwx ~/.claude/cache
 ```
 
-If the dir is group/world-readable, tighten:
-
-```bash
-chmod -R go-rwx ~/.claude/pair-polymath/
-```
+The installer sets `~/.claude/pair-polymath` to mode 700 on first creation. The shared `~/.claude/cache/` directory (where per-cycle observations and budget tracker live) is created with your umask — typically 755 — and is NOT touched on re-runs to avoid clobbering user-managed permissions. If a multi-user machine concerns you, tighten manually with the `chmod -R go-rwx` above.

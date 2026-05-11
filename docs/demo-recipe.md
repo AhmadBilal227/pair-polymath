@@ -28,8 +28,10 @@ pip install --user asciinema
    bash bin/polymath status
    bash bin/polymath doctor
    bash bin/polymath logs -n 3
-   bash bin/polymath cost
+   bash bin/polymath cost     # requires v0.2 — currently in PR #10. Omit if not yet merged.
    ```
+
+   If `polymath cost` isn't on your branch yet, drop that line and stick to `status` / `doctor` / `logs`.
 
 5. Exit with `Ctrl-D`.
 

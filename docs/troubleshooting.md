@@ -40,6 +40,16 @@ Get one from [platform.openai.com/api-keys](https://platform.openai.com/api-keys
 
 Run `./bin/install.sh` from this checkout. The installer atomically merges in the statusLine + 2 hooks with a timestamped backup of any existing file.
 
+## `✗ cache dir writable`
+
+The cache dir (`$PP_CACHE_DIR`, defaulting to `~/.claude/cache`) exists but is not writable by the current user. Common causes:
+
+- **Permissions tightened too far.** `chmod u+w ~/.claude/cache` (or `chmod 700` if you previously locked it down for another user).
+- **Disk full.** Check with `df -h ~/.claude/`. Free space and retry.
+- **Wrong owner.** If a prior install ran as root via `sudo`, the cache may be root-owned: `sudo chown -R "$USER" ~/.claude/cache`.
+
+If you've moved the cache via `PP_CACHE_DIR` in `user.env`, verify the new path exists and is writable.
+
 ## `⚠ statusLine wired — points to a different script`
 
 You have a statusLine pointing at another tool (ccusage, etc.). The installer asked before replacing and you said no. To switch later: re-run `./bin/install.sh` and answer Y.
@@ -86,5 +96,16 @@ Known: `--yes` skips the installer re-run by design (install.sh has interactive 
 - File must be valid JSON: `jq empty ~/.claude/pair-polymath/lenses/your-lens.json`.
 - `id` field must be unique; matching a built-in id makes your file REPLACE the built-in (intentional override).
 - Hard cap `PP_LENS_MAX=16` — beyond that, extras are silently dropped.
+
+## `✗ network probe failed` (--network only)
+
+This check runs only with `polymath doctor --network`. It fires a single `gpt-5-mini` call (~$0.0001) asking the model to reply with `ok`. If you see a red result:
+
+- **`Authentication`-style error** — OpenAI key missing or revoked. Re-run `llm keys set openai`. Confirm with `llm keys list | grep openai`.
+- **`Connection`/timeout/DNS error** — your network blocks `api.openai.com`, you're offline, or a corporate proxy is intercepting. Try `curl -sS https://api.openai.com/v1/models` (with your key) to isolate.
+- **`model_not_found`** — your OpenAI account doesn't have access to `gpt-5-mini`. Either request access in your OpenAI dashboard, or set `PP_MODEL` in `user.env` to a model you can call.
+- **OpenAI 5xx / outage** — check [status.openai.com](https://status.openai.com). Pair Polymath retries cycle-level failures; doctor probes don't.
+
+The probe has a 15s timeout (`timeout` / `gtimeout`) so it won't stall doctor on a network black-hole.
 
 If still stuck, open an issue with `polymath doctor` output attached.

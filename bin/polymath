@@ -63,6 +63,31 @@ case "$cmd" in
     pp_doctor_run "$@"
     ;;
 
+  disable)
+    # Toggle PP_EXTERNAL_LLM=0 in user.env (atomic tmp+mv). Idempotent.
+    user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
+    mkdir -p "$(dirname "$user_env")" 2>/dev/null || true
+    [ -f "$user_env" ] || : > "$user_env"
+    tmp=$(mktemp) || { printf 'polymath: mktemp failed\n' >&2; exit 1; }
+    # Strip any existing PP_EXTERNAL_LLM=… line, then append the disable line.
+    grep -v '^PP_EXTERNAL_LLM=' "$user_env" > "$tmp"
+    printf 'PP_EXTERNAL_LLM=0\n' >> "$tmp"
+    mv "$tmp" "$user_env"
+    printf 'LLM cycle disabled. Status-only mode active; new cycles take effect within 5 min.\n'
+    ;;
+
+  enable)
+    # Toggle PP_EXTERNAL_LLM=1 (the default). Atomic tmp+mv. Idempotent.
+    user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
+    mkdir -p "$(dirname "$user_env")" 2>/dev/null || true
+    [ -f "$user_env" ] || : > "$user_env"
+    tmp=$(mktemp) || { printf 'polymath: mktemp failed\n' >&2; exit 1; }
+    grep -v '^PP_EXTERNAL_LLM=' "$user_env" > "$tmp"
+    printf 'PP_EXTERNAL_LLM=1\n' >> "$tmp"
+    mv "$tmp" "$user_env"
+    printf 'LLM cycle enabled. New cycles take effect within 5 min.\n'
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
@@ -70,10 +95,12 @@ polymath — Pair Polymath CLI
 Usage:
   polymath status      Show today's calls, lens registry, config flags
   polymath doctor      Run health checks (--network for live OpenAI probe)
+  polymath enable      Enable the LLM lens cycle (set PP_EXTERNAL_LLM=1)
+  polymath disable     Disable the LLM cycle / status-only mode (PP_EXTERNAL_LLM=0)
   polymath version     Print version
   polymath help        This message
 
-v0.2 will add: cost, disable, enable, logs
+v0.2 will add: cost, logs
 EOF
     ;;
 

@@ -2,7 +2,7 @@
 
 > Seven specialist lens agents that read your recent Claude Code session and inject one-line observations back into Claude's context. Plus a rotating digest of popularity-ranked Hacker News + recent arXiv `cs.AI` / `cs.HC` titles on your statusline.
 
-**Status:** `v0.1.0-pre` — alpha. Core mechanics work for the author on macOS; APIs (config keys, lens schema, prompt placeholders) may still shift before `v1.0`. Expect rough edges. The public `v0.1.0-alpha` tag lands after one week of dogfooding without surprises.
+**Status:** `v0.1.0-alpha` — first tagged release. Core mechanics work for the author on macOS; bats green on Ubuntu CI; APIs (config keys, lens schema, prompt placeholders) may still shift before `v1.0`. Expect rough edges. Issues + PRs welcome.
 
 ---
 
@@ -29,7 +29,7 @@ When you submit a prompt to Claude Code, a `UserPromptSubmit` hook injects the s
 ## Install
 
 ```bash
-git clone https://github.com/<user>/pair-polymath
+git clone https://github.com/AhmadBilal227/pair-polymath
 cd pair-polymath
 ./bin/install.sh
 ```

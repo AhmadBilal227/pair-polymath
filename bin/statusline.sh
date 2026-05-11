@@ -14,6 +14,15 @@
 # actually need it (inline `LC_ALL=C awk ...`) and leave the surrounding shell
 # in the user's locale so `tr`, `date`, and emoji output stay correct.
 
+# Portable mtime helper. `stat -f %m FILE` is BSD/macOS only; GNU stat
+# interprets -f as "filesystem info, ignore format" and dumps multi-line
+# garbage that breaks the surrounding arithmetic. Try GNU `-c %Y` first
+# then fall back to BSD `-f %m`. Returns the epoch mtime, or empty string
+# if neither works. Caller is expected to default with ${var:-0}.
+pp_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
 # Pair Polymath — load config + libs
 _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -267,7 +276,7 @@ if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
     # box shared one cache file at /tmp/cc-pr-.cache (Ralph round 2 BUG 2).
     cache_key=$(echo "$repo_root" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -d' ' -f1)
     cache_file="/tmp/cc-pr-${cache_key}.cache"
-    if [ ! -f "$cache_file" ] || [ $(($(date +%s) - $(stat -f %m "$cache_file" 2>/dev/null || echo 0))) -gt 600 ]; then
+    if [ ! -f "$cache_file" ] || [ $(($(date +%s) - $(pp_mtime "$cache_file" || echo 0))) -gt 600 ]; then
       ( cd "$repo_root" && gh pr list --json number 2>/dev/null | jq -r 'length' > "$cache_file" 2>/dev/null ) &
     fi
     if [ -f "$cache_file" ]; then
@@ -322,7 +331,7 @@ TIP_CACHE="${HOME}/.claude/cache/cc-tips.txt"
 TIP_LOCK="/tmp/cc-tips-fetch.lock"
 mkdir -p "${HOME}/.claude/cache" 2>/dev/null
 
-cache_age=$(($(date +%s) - $(stat -f %m "$TIP_CACHE" 2>/dev/null || echo 0)))
+cache_age=$(($(date +%s) - $(pp_mtime "$TIP_CACHE" || echo 0)))
 if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
   # Atomic lock primitive (Ralph R2 H3). The previous
   # `[ ! -f "$LOCK" ] && touch "$LOCK"` was a check-then-touch TOCTOU race —
@@ -331,7 +340,7 @@ if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
   # POSIX filesystems; the matching pattern is already used in lib/budget.sh.
   # Stale takeover after 180s (orphaned crash recovery).
   TIP_LOCK_DIR="${TIP_LOCK}.d"
-  lock_age=$(($(date +%s) - $(stat -f %m "$TIP_LOCK_DIR" 2>/dev/null || echo 0)))
+  lock_age=$(($(date +%s) - $(pp_mtime "$TIP_LOCK_DIR" || echo 0)))
   if [ "$lock_age" -gt 180 ]; then
     rmdir "$TIP_LOCK_DIR" 2>/dev/null
   fi
@@ -421,7 +430,7 @@ transcript_path=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
 # Display cycle still shows last cached observations.
 session_idle_s=0
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-  session_idle_s=$(($(date +%s) - $(stat -f %m "$transcript_path" 2>/dev/null || echo $(date +%s))))
+  session_idle_s=$(($(date +%s) - $(pp_mtime "$transcript_path" || echo $(date +%s))))
 fi
 is_active=1
 [ "$session_idle_s" -gt "${PP_IDLE_THRESHOLD_S:-1800}" ] && is_active=0
@@ -445,7 +454,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
     && [ "$is_active" -eq 1 ] \
     && [ "${PP_EXTERNAL_LLM:-1}" = "1" ] \
     && [ "$parallel_age" -gt "$PP_PARALLEL_INTERVAL_S" ]; then
-  mon_lock_age=$(($(date +%s) - $(stat -f %m "$PP_LOCK" 2>/dev/null || echo 0)))
+  mon_lock_age=$(($(date +%s) - $(pp_mtime "$PP_LOCK" || echo 0)))
   # Atomic acquire of cycle lock: mkdir succeeds for exactly one caller.
   # If a stale lock dir (>5 min) blocks us, force-take it once.
   acquired=0
@@ -500,7 +509,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       test_state=""
       test_cache_file="${HOME}/.claude/cache/cc-test-${session_id}.cache"
       if [ -f "$test_cache_file" ]; then
-        test_age=$(($(date +%s) - $(stat -f %m "$test_cache_file" 2>/dev/null || echo 0)))
+        test_age=$(($(date +%s) - $(pp_mtime "$test_cache_file" || echo 0)))
         if [ "$test_age" -lt 1800 ]; then
           test_state=$(cat "$test_cache_file" 2>/dev/null | head -c 1800)
         fi
@@ -537,7 +546,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
 
           # PR list — fire-and-forget refresh, read latest cached
           pr_cache="${HOME}/.claude/cache/cc-pr-detail-${repo_key}.cache"
-          pr_age=$(($(date +%s) - $(stat -f %m "$pr_cache" 2>/dev/null || echo 0)))
+          pr_age=$(($(date +%s) - $(pp_mtime "$pr_cache" || echo 0)))
           if [ ! -f "$pr_cache" ] || [ "$pr_age" -gt 600 ]; then
             # FIX (advisor #3): atomic write — tmp file + mv
             ( cd "$repo_root" && gh pr list --limit 10 --json number,title,state,isDraft,statusCheckRollup 2>/dev/null \
@@ -548,7 +557,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
 
           # CI run list — fire-and-forget refresh, 5min TTL
           ci_cache="${HOME}/.claude/cache/cc-ci-${repo_key}.cache"
-          ci_age=$(($(date +%s) - $(stat -f %m "$ci_cache" 2>/dev/null || echo 0)))
+          ci_age=$(($(date +%s) - $(pp_mtime "$ci_cache" || echo 0)))
           if [ ! -f "$ci_cache" ] || [ "$ci_age" -gt 300 ]; then
             # FIX (advisor #3): atomic write — tmp file + mv
             ( cd "$repo_root" && gh run list --limit 5 --json status,conclusion,workflowName,createdAt 2>/dev/null \

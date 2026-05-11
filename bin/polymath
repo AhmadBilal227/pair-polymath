@@ -56,16 +56,24 @@ case "$cmd" in
     printf '\n'
     ;;
 
+  doctor)
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/doctor.sh"
+    pp_doctor_run "$@"
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
 
 Usage:
   polymath status      Show today's calls, lens registry, config flags
+  polymath doctor      Run health checks (--network for live OpenAI probe)
   polymath version     Print version
   polymath help        This message
 
-v0.2 will add: doctor, cost, disable, enable, logs
+v0.2 will add: cost, disable, enable, logs
 EOF
     ;;
 

@@ -1,0 +1,26 @@
+bin/install.sh — Pair Polymath installer
+
+Usage:
+  ./bin/install.sh [flags]
+
+Flags:
+  --dry-run             Print every action with [DRY-RUN] prefix.
+                        Make NO filesystem changes. Useful for CI / paranoid users.
+  --yes, -y             Skip all interactive prompts. Take defaults:
+                        - jq/llm install: yes
+                        - existing statusLine conflict: keep theirs
+                        - OpenAI key prompt: skip (configure later with llm keys set openai)
+  --no-sudo             Refuse to invoke sudo. Useful for unprivileged or
+                        rootless environments. If a dep install needs sudo,
+                        print the exact command + exit 1.
+  --non-interactive     Alias for --yes --no-sudo. Useful for CI.
+  --help, -h            This message.
+
+Audit log (every run, not just on failure):
+  $CLAUDE_DIR/pair-polymath/install.log  (JSONL)
+
+Exit codes:
+  0   Success (real install or --dry-run completed)
+  1   Setup failure (missing deps after attempts, smoke-test failed, sudo
+      refused under --no-sudo, etc.)
+  2   Bad flag / usage

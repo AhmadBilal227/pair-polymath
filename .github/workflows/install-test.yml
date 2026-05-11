@@ -26,35 +26,41 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Force a clean baseline (review fix H1+M1)
-        # ubuntu-latest ships with jq pre-installed; if we leave it in place,
-        # the installer skips its jq prompt and the piped answers shift by one,
-        # causing the OpenAI-key-prompt slot to consume the wrong line. Remove
-        # jq so the installer always sees the "jq absent" path.
-        # We also intentionally do NOT pre-warm apt-get update — the installer's
-        # own apt-get install needs to handle that itself, otherwise we'd hide
-        # a real installer bug.
+        # ubuntu-latest ships with jq pre-installed; remove it so the installer
+        # always sees the "jq absent" path and exercises its own apt-get logic.
+        # We intentionally do NOT pre-warm apt-get update — the installer's
+        # own apt-get install needs to handle that itself.
         run: |
           set -euo pipefail
-          # Apt may not need privilege to remove, but use sudo just in case
           sudo apt-get remove -y jq >/dev/null 2>&1 || true
           echo "bash: $(bash --version | head -1)"
           echo "jq pre-install: $(command -v jq || echo absent)"
           echo "llm pre-install: $(command -v llm || echo absent)"
           test ! -e "$HOME/.claude" || (echo "$HOME/.claude unexpectedly exists" && exit 1)
 
-      - name: Run installer non-interactively
-        # The installer prompts in this order on a clean Ubuntu:
-        #   1. Claude dir doesn't exist → "Create it? [Y/n]"    → Y
-        #   2. jq not found            → "Install via 'sudo apt-get install -y jq'? [Y/n]" → Y
-        #   3. llm not found           → "Install via 'pip3 install --user llm>=0.20,<1.0'? [Y/n]" → Y
-        #   4. OpenAI key prompt       → (blank line = skip)
-        # `printf` feeds answers on stdin; the installer's `stty -echo || true`
-        # makes the no-echo branch a no-op in non-TTY CI.
+      - name: Run installer non-interactively (P2.3 --yes)
+        # P2.3 added --yes; we no longer need to feed answers via stdin.
         run: |
           set -euo pipefail
-          printf 'Y\nY\nY\n\n' | bash ./bin/install.sh
+          bash ./bin/install.sh --yes
           # Make pip3 --user binary visible to subsequent steps
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Audit log written + valid JSONL (P2.3)
+        run: |
+          set -euo pipefail
+          log="$HOME/.claude/pair-polymath/install.log"
+          test -f "$log"
+          # Every line is valid JSON.
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "$line" | jq -e . >/dev/null
+          done < "$log"
+          # Key actions present.
+          jq -er '.action' < "$log" | grep -q '^install-start$'
+          jq -er '.action' < "$log" | grep -q '^install-complete$'
+          jq -er '.action' < "$log" | grep -q '^settings-merge$'
+          jq -er '.action' < "$log" | grep -q '^smoke-test$'
 
       - name: Validate ~/.claude/settings.json structure
         run: |
@@ -75,17 +81,13 @@ jobs:
           test -d "$HOME/.claude/pair-polymath/cache"
           test -d "$HOME/.claude/pair-polymath/config"
           test -f "$HOME/.claude/pair-polymath/config/user.env"
-          # 0700 enforced by installer (chmod 700 || true). We only accept 700:
-          # 750/550 expose the dir to group, which defeats the secret-cache
-          # rationale for chmod 700 in the first place (review fix M2).
+          # 0700 enforced by installer (chmod 700 || true). We only accept 700.
           mode=$(stat -c '%a' "$HOME/.claude/pair-polymath")
           case "$mode" in 700|0700) : ;; *) echo "unexpected mode $mode (want 700)"; exit 1 ;; esac
 
       - name: Run polymath doctor (non-network)
-        # Doctor will report:
-        #   - openai key MISSING → red (we skipped the prompt intentionally)
-        # which means the overall status is BROKEN, exit 1. That's expected for
-        # CI without secrets. We assert it ran + emitted the expected sections.
+        # Doctor will report openai key MISSING → red (we skipped the prompt
+        # intentionally under --yes). That's expected for CI without secrets.
         run: |
           set -uo pipefail
           out=$(bash ./bin/polymath doctor 2>&1) || true
@@ -95,11 +97,8 @@ jobs:
           echo "$out" | grep -q 'lenses'
           echo "$out" | grep -q '6/6 built-in present'
           echo "$out" | grep -q 'Summary:'
-          # Verify strict-path-match found OUR paths (not a substring decoy)
           echo "$out" | grep -E 'statusLine wired.*(→|PP_ROOT)' >/dev/null \
             || (echo "doctor did not detect our statusLine" && exit 1)
-          # Use -F (fixed string) — basic grep treats \+ as a repetition operator,
-          # not a literal plus (review fix H2).
           echo "$out" | grep -F 'UserPromptSubmit + PostToolUse' >/dev/null \
             || (echo "doctor did not detect our hooks" && exit 1)
 
@@ -118,7 +117,6 @@ jobs:
           set -euo pipefail
           cat test/fixtures/stdin-sample.json | bash bin/statusline.sh > /tmp/sl.out 2> /tmp/sl.err
           test -s /tmp/sl.out
-          # Exit 0 implicit (set -e); also check no stderr noise
           if [ -s /tmp/sl.err ]; then
             echo "unexpected stderr:"
             cat /tmp/sl.err
@@ -130,9 +128,46 @@ jobs:
           set -euo pipefail
           # 'n' to the "remove user dir + cache?" prompt — keep cache/config
           printf 'n\n' | bash ./bin/uninstall.sh
-          # Our statusLine + hooks should be gone
           jq -e '.statusLine == null' "$HOME/.claude/settings.json" >/dev/null
           jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(test("inject-monitor-insight")) | not' "$HOME/.claude/settings.json" >/dev/null
           jq -e '[.hooks.PostToolUse[]?.hooks[]?.command]      | any(test("cache-test-result"))      | not' "$HOME/.claude/settings.json" >/dev/null
-          # User dir should still be there since we answered 'n'
           test -d "$HOME/.claude/pair-polymath"
+
+  # Second job: --dry-run produces ZERO filesystem changes. Asserted by
+  # diffing find output before/after. Also asserts [DRY-RUN] markers in output.
+  install-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Ensure jq present for the dry-run path to reach completion
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y jq
+          # llm isn't strictly needed in dry-run (no real `llm keys list` runs),
+          # but the installer's `command -v llm` check happens before
+          # dep-install for the present case. Stub it via PATH if absent so the
+          # dry-run completes the OpenAI-key check without false trips.
+          if ! command -v llm >/dev/null 2>&1; then
+            # Minimal stub: just need `command -v llm` to succeed in dry-run.
+            mkdir -p "$HOME/.local/bin"
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/llm"
+            chmod +x "$HOME/.local/bin/llm"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Dry-run produces no FS changes
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.claude"   # baseline dir; dry-run shouldn't add anything
+          home_before=$(find "$HOME/.claude" -mindepth 1 2>/dev/null | sort)
+          bash ./bin/install.sh --dry-run --yes > /tmp/dry-run.log 2>&1
+          home_after=$(find "$HOME/.claude" -mindepth 1 2>/dev/null | sort)
+          if [ "$home_before" != "$home_after" ]; then
+            echo "FS changed!"
+            diff <(echo "$home_before") <(echo "$home_after")
+            exit 1
+          fi
+          grep -q '\[DRY-RUN\]' /tmp/dry-run.log
+          grep -q 'dry-run complete' /tmp/dry-run.log

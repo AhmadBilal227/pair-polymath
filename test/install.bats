@@ -439,34 +439,34 @@ APT
   # now the captured stderr-tail prints to the terminal AND the audit-log path
   # is shown so the user knows where to look.
   #
-  # Setup: dry-run-ish probe via the install helpers directly. We source the
-  # script's helper functions, then call _pp_eval with a command that fails
-  # with known stderr. The output must contain the failing stderr text.
+  # bats' `run` handles stderr-merge differently across versions (older bats
+  # on macOS bash 3.2 captures merged; newer bats on Ubuntu doesn't merge by
+  # default). Same cross-platform fragility we hit in PR #19 test 245. Use a
+  # tmp file as the explicit capture channel so the assertion is portable.
   local probe_home="$(mktemp -d)"
-  PP_DRY_RUN=0 PP_VERBOSE=0 PP_YES=0 PP_NO_SUDO=0 \
-    HOME="$probe_home" CLAUDE_DIR="$probe_home/.claude" \
-    PP_AUDIT_LOG="$probe_home/.claude/pair-polymath/install.log" \
-    run bash -c "
-      mkdir -p '$probe_home/.claude/pair-polymath'
-      . '$PP_ROOT/lib/audit-log.sh'
-      # Inline the _pp_eval implementation (subset) to verify the new
-      # stderr-surface behavior end-to-end.
-      _pp_eval() {
-        local action=\"\$1\"; local cmd_str=\"\$2\"
-        local stderr_tmp=\$(mktemp)
-        local rc=0
-        eval \"\$cmd_str\" 2> \"\$stderr_tmp\" || rc=\$?
-        local stderr_tail=''
-        [ -s \"\$stderr_tmp\" ] && stderr_tail=\$(tail -c 500 \"\$stderr_tmp\")
-        if [ \"\$rc\" -ne 0 ] && [ -n \"\$stderr_tail\" ]; then
-          printf 'STDERR_VISIBLE: %s\n' \"\$stderr_tail\" >&2
-        fi
-        rm -f \"\$stderr_tmp\"
-        return \"\$rc\"
-      }
-      _pp_eval 'probe' 'echo INSTALL_FAILURE_DIAGNOSTIC >&2; exit 1' 2>&1 || true
-    "
-  [[ "$output" == *"STDERR_VISIBLE:"* ]]
-  [[ "$output" == *"INSTALL_FAILURE_DIAGNOSTIC"* ]]
+  local capture="$probe_home/captured.out"
+  bash -c "
+    mkdir -p '$probe_home/.claude/pair-polymath'
+    . '$PP_ROOT/lib/audit-log.sh'
+    PP_AUDIT_LOG='$probe_home/.claude/pair-polymath/install.log'
+    # Inline the _pp_eval implementation (subset) to verify the new
+    # stderr-surface behavior end-to-end.
+    _pp_eval() {
+      local action=\"\$1\"; local cmd_str=\"\$2\"
+      local stderr_tmp=\$(mktemp)
+      local rc=0
+      eval \"\$cmd_str\" 2> \"\$stderr_tmp\" || rc=\$?
+      local stderr_tail=''
+      [ -s \"\$stderr_tmp\" ] && stderr_tail=\$(tail -c 500 \"\$stderr_tmp\")
+      if [ \"\$rc\" -ne 0 ] && [ -n \"\$stderr_tail\" ]; then
+        printf 'STDERR_VISIBLE: %s\n' \"\$stderr_tail\" >&2
+      fi
+      rm -f \"\$stderr_tmp\"
+      return \"\$rc\"
+    }
+    _pp_eval 'probe' 'echo INSTALL_FAILURE_DIAGNOSTIC >&2; exit 1' || true
+  " >"$capture" 2>&1
+  grep -q "STDERR_VISIBLE:" "$capture"
+  grep -q "INSTALL_FAILURE_DIAGNOSTIC" "$capture"
   rm -rf "$probe_home"
 }

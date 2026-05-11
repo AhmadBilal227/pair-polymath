@@ -152,3 +152,55 @@ teardown() {
   # And it should NOT print a "Privacy log:" line if the file isn't there
   [[ "$output" != *"Privacy log:"* ]]
 }
+
+# === R2 GPT review fixes =====================================================
+
+@test "R2 HIGH-1: privacy log file is mode 0600 (owner-only)" {
+  pp_write_privacy_log "sess1" "tail" "grounded" "f.ts" 7 "gpt-5-mini" "gpt-5"
+  [ -f "$PP_PRIVACY_LOG" ]
+  # Portable mode check: BSD stat (-f %Mp%Lp) vs GNU stat (-c %a).
+  local mode
+  if mode=$(stat -f '%Lp' "$PP_PRIVACY_LOG" 2>/dev/null); then :
+  else mode=$(stat -c '%a' "$PP_PRIVACY_LOG" 2>/dev/null); fi
+  [ "$mode" = "600" ]
+}
+
+@test "R2 HIGH-1: cache dir is mode 0700 (owner-only)" {
+  pp_write_privacy_log "sess1" "tail" "grounded" "f.ts" 7 "gpt-5-mini" "gpt-5"
+  local mode
+  if mode=$(stat -f '%Lp' "$PP_CACHE_DIR" 2>/dev/null); then :
+  else mode=$(stat -c '%a' "$PP_CACHE_DIR" 2>/dev/null); fi
+  [ "$mode" = "700" ]
+}
+
+@test "R2 MED-4: byte counts are byte-accurate for multibyte UTF-8" {
+  # 'café' = 5 bytes (é = 2 bytes), 4 chars. Old ${#var} returned 4.
+  pp_write_privacy_log "sess1" "café" "café" "f.ts" 7 "gpt-5-mini" "gpt-5"
+  run jq -r '.payload_sizes_bytes.transcript_tail' < "$PP_PRIVACY_LOG"
+  [ "$output" = "5" ]
+  run jq -r '.payload_sizes_bytes.grounded_facts' < "$PP_PRIVACY_LOG"
+  [ "$output" = "5" ]
+}
+
+@test "R2 HIGH-2: concurrent writers do not corrupt the file (mktemp)" {
+  # Two background writers racing on the same canonical path. With the old
+  # fixed-tmp implementation, one writer's mv would clobber the other's
+  # half-written tmp. With mktemp + atomic mv, the loser's tmp is unique and
+  # is simply overwritten by the winner — never partial. Test: after both
+  # finish, output is valid JSON.
+  pp_write_privacy_log "sessA" "tailA" "groundedA" "fA.ts" 3 "gpt-5-mini" "gpt-5" &
+  pp_write_privacy_log "sessB" "tailB" "groundedB" "fB.ts" 5 "gpt-5-mini" "gpt-5" &
+  wait
+  [ -f "$PP_PRIVACY_LOG" ]
+  run jq -e . < "$PP_PRIVACY_LOG"
+  [ "$status" -eq 0 ]
+}
+
+@test "R2 MED-3: CLAUDE_DIR override directs writer into the same path the reader uses" {
+  # When PP_CACHE_DIR unset but CLAUDE_DIR set, writer and reader must agree.
+  unset PP_CACHE_DIR
+  export CLAUDE_DIR="$PP_TEST_HOME/.claude"
+  mkdir -p "$CLAUDE_DIR"
+  pp_write_privacy_log "sess1" "tail" "grounded" "f.ts" 7 "gpt-5-mini" "gpt-5"
+  [ -f "$CLAUDE_DIR/cache/last-cycle-payload.json" ]
+}

@@ -305,16 +305,24 @@ pp_write_privacy_log() {
   local analyst_model="${6:-}"
   local critique_model="${7:-}"
 
-  local cache_dir="${PP_CACHE_DIR:-${HOME}/.claude/cache}"
+  # Cache dir resolution: honor PP_CACHE_DIR > CLAUDE_DIR/cache > HOME/.claude/cache.
+  # Must match `polymath status`'s reader resolution exactly (GPT R2 MEDIUM-3).
+  local cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-${HOME}/.claude}/cache}"
   mkdir -p "$cache_dir" 2>/dev/null || return 1
+  # Cache dir is owner-only. The file inside may include transcript previews
+  # that contain user-pasted secrets — default umask 022 would publish them
+  # world-readable. Enforce 0700 on the dir + 0600 on the file (GPT R2 HIGH-1).
+  chmod 700 "$cache_dir" 2>/dev/null || true
   local out="${cache_dir}/last-cycle-payload.json"
-  local tmp="${out}.tmp"
 
   # First-500-char previews. Bash substring expansion is safe on empty.
   local transcript_preview="${transcript_tail:0:500}"
   local grounded_preview="${grounded:0:500}"
-  local transcript_bytes="${#transcript_tail}"
-  local grounded_bytes="${#grounded}"
+  # Byte counts via wc -c (not ${#var} — that counts CHARS, undercounts in
+  # multibyte locales). LC_ALL=C forces byte-oriented counting (GPT R2 MED-4).
+  local transcript_bytes grounded_bytes
+  transcript_bytes=$(printf '%s' "$transcript_tail" | LC_ALL=C wc -c | tr -d ' ')
+  grounded_bytes=$(printf '%s' "$grounded" | LC_ALL=C wc -c | tr -d ' ')
 
   # Normalize lens_count to integer; jq --argjson is strict and a non-numeric
   # string would fail the whole write.
@@ -324,6 +332,12 @@ pp_write_privacy_log() {
 
   local ts
   ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+  # Unique tmp path per writer — fixed "${out}.tmp" was racy across concurrent
+  # statusline cycles. mktemp gives each writer its own file before atomic
+  # rename onto the canonical path (GPT R2 HIGH-2).
+  local _pp_priv_tmp
+  _pp_priv_tmp=$(mktemp "${out}.XXXXXX" 2>/dev/null) || return 1
 
   jq -n \
     --arg ts "$ts" \
@@ -354,12 +368,16 @@ pp_write_privacy_log() {
         grounded_first_500_chars: $grounded_preview
       },
       note: "This file shows what THIS machine sent to OpenAI in the most recent cycle. Overwritten each cycle (no history). See docs/security.md for the full threat model."
-    }' > "$tmp" 2>/dev/null || {
-      rm -f "$tmp" 2>/dev/null
+    }' > "$_pp_priv_tmp" 2>/dev/null || {
+      rm -f "$_pp_priv_tmp" 2>/dev/null
       return 1
     }
 
-  [ -s "$tmp" ] || { rm -f "$tmp" 2>/dev/null; return 1; }
-  mv "$tmp" "$out" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  [ -s "$_pp_priv_tmp" ] || { rm -f "$_pp_priv_tmp" 2>/dev/null; return 1; }
+  # Restrict file mode BEFORE rename so concurrent readers can't catch a brief
+  # world-readable window (defense in depth on top of dir chmod above).
+  chmod 600 "$_pp_priv_tmp" 2>/dev/null || true
+  mv "$_pp_priv_tmp" "$out" 2>/dev/null || { rm -f "$_pp_priv_tmp" 2>/dev/null; return 1; }
+  chmod 600 "$out" 2>/dev/null || true
   return 0
 }

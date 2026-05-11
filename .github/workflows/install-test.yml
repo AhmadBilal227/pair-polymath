@@ -166,20 +166,101 @@ jobs:
         # — not just $HOME/.claude. pip3 --user lands files under $HOME/.local
         # and $HOME/.local/share, and llm CLI may also place config under
         # $HOME/.config. Any unexpected file under those paths is a real bug.
+        #
+        # Issue #14 Phase 1: always surface diagnostics. The previous version
+        # swallowed /tmp/dry-run.log on failure so we couldn't see WHICH of the
+        # three assertions tripped or what the installer actually printed.
+        #
+        # Issue #14 Phase 2 root cause: GitHub's default `run:` shell is
+        # `bash --noprofile --norc -eo pipefail {0}`. On the fresh Ubuntu
+        # runner, $HOME/.local/bin, $HOME/.local/share, and $HOME/.config may
+        # not exist — `find` then exits non-zero, and `... | sort` with
+        # -o pipefail propagates that, so `home_before=$(snapshot)` aborts
+        # under -e BEFORE any echo runs. macOS (where the runner user owns
+        # those paths from prior tooling) never tripped this. Fix: ensure
+        # the paths exist before snapshotting, and don't let stderr-suppressed
+        # find failures break the pipeline.
         run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.claude"   # baseline dir; dry-run shouldn't add anything
+          # NOTE (review fix LOW-3): we use `set -uo pipefail` here without
+          # `-e`. Trade-off: the diagnostic phase that sets up the baseline
+          # snapshot (mkdir / find) should not abort the whole step on a
+          # transient non-zero — we want the dry-run assertions below to run
+          # regardless and report what actually went wrong. The assertions
+          # themselves check `install_rc` and `$fail` explicitly so we don't
+          # lose failure signal. Worth revisiting if setup ever silently
+          # masks a real bug.
+          set -uo pipefail
+          # Review fix MEDIUM-1: only pre-create the path the installer is
+          # expected to touch ($HOME/.claude). If we pre-created
+          # $HOME/.local/bin / share / .config before the snapshot, any new
+          # dir the installer mkdir'd under those would be missed (baseline
+          # and post-install snapshot would both contain the empty dir, diff
+          # would be silent). Leaving them absent forces honest detection.
+          mkdir -p "$HOME/.claude"
           snapshot() {
-            find "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config" \
-              -mindepth 1 2>/dev/null | sort
+            # `find -L` follows symlinks. Each path is conditional: tested
+            # -e first so missing roots produce zero output without `find`
+            # exiting non-zero. This keeps the snapshot honest about what's
+            # actually on disk (vs. silently pre-creating roots which would
+            # hide installer-created subtrees).
+            for root in "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config"; do
+              [ -e "$root" ] && find "$root" -mindepth 1 2>/dev/null
+            done | sort
           }
           home_before=$(snapshot)
+          echo "=== home_before (first 30 lines) ==="
+          echo "$home_before" | head -30
+          # Review fix LOW-2: `echo "$var" | wc -l` reports 1 for empty
+          # because echo adds a trailing newline. printf '%s' gives the true
+          # count.
+          echo "=== home_before line count: $(printf '%s' "$home_before" | wc -l) ==="
+
+          set +e
           bash ./bin/install.sh --dry-run --yes > /tmp/dry-run.log 2>&1
+          install_rc=$?
+          set -e
+
           home_after=$(snapshot)
+
+          echo ""
+          echo "=== install.sh exit code: $install_rc ==="
+
+          echo ""
+          echo "=== /tmp/dry-run.log (full) ==="
+          cat /tmp/dry-run.log
+          echo "=== end of /tmp/dry-run.log ==="
+
+          fail=0
+
           if [ "$home_before" != "$home_after" ]; then
-            echo "FS changed!"
-            diff <(echo "$home_before") <(echo "$home_after")
+            echo ""
+            echo "=== ASSERTION FAILED: FS CHANGED under --dry-run ==="
+            echo "--- diff (before -> after) ---"
+            diff <(echo "$home_before") <(echo "$home_after") || true
+            fail=1
+          fi
+
+          if ! grep -q '\[DRY-RUN\]' /tmp/dry-run.log; then
+            echo ""
+            echo "=== ASSERTION FAILED: missing [DRY-RUN] marker in output ==="
+            fail=1
+          fi
+
+          if ! grep -q 'dry-run complete' /tmp/dry-run.log; then
+            echo ""
+            echo "=== ASSERTION FAILED: missing 'dry-run complete' marker in output ==="
+            fail=1
+          fi
+
+          if [ "$install_rc" -ne 0 ]; then
+            echo ""
+            echo "=== ASSERTION FAILED: install.sh exited $install_rc (expected 0) ==="
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
             exit 1
           fi
-          grep -q '\[DRY-RUN\]' /tmp/dry-run.log
-          grep -q 'dry-run complete' /tmp/dry-run.log
+
+          echo ""
+          echo "=== All dry-run assertions passed ==="

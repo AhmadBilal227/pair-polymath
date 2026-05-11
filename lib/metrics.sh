@@ -5,6 +5,13 @@
 # multiply by static avg-token assumptions and per-million prices.
 #
 # v0.3 will swap this for real per-call usage parsing via `llm --usage`.
+#
+# Locale-independent numeric formatting (review fix R2-H1): bash's awk + jq
+# pipeline breaks under locales with comma as decimal separator (de_DE,
+# fr_FR, sv_SE, etc.) because awk's `printf "%.6f"` honors LC_NUMERIC and
+# produces "0,000910" which jq then rejects as invalid JSON, silently
+# dropping the entire metrics row. We pin LC_ALL=C around every awk call
+# that does numeric formatting.
 
 # === Prices per 1M tokens (input | output) ===
 # Edit in user.env to match your org's billing. Defaults reflect public
@@ -33,7 +40,21 @@ PP_CACHE_DIR="${PP_CACHE_DIR:-${HOME}/.claude/cache}"
 PP_METRICS_FILE="${PP_CACHE_DIR}/metrics.jsonl"
 PP_METRICS_TMP_PREFIX="${PP_CACHE_DIR}/metrics-tmp"
 
-# metrics_init SESSION_ID — set up a per-cycle tmp file
+# _pp_awk — wrapper that pins locale to C so awk's printf formats numbers
+# with `.` decimals regardless of the user's LC_NUMERIC / LC_ALL settings
+# (review fix R2-H1). Use this for any awk invocation that emits numeric
+# output meant to be parsed downstream by jq, bash arithmetic, etc.
+_pp_awk() {
+  LC_ALL=C awk "$@"
+}
+
+# metrics_init SESSION_ID — set up a per-cycle tmp file.
+#
+# Recovery semantics (review fix R2-M1): if a previous cycle crashed
+# mid-run (SIGTERM, kill, OOM) and left a non-empty tmp file behind, flush
+# it FIRST before truncating. Otherwise we'd silently throw away the
+# pending cycle's cost data. metrics_flush_cycle is idempotent on missing
+# tmp so this never doubles up.
 metrics_init() {
   local sid="${1:-default}"
   # Sanitize sid the same way statusline does (alphanumeric + ._-)
@@ -41,6 +62,11 @@ metrics_init() {
   [ -z "$sid" ] && sid="default"
   mkdir -p "$PP_CACHE_DIR" 2>/dev/null || true
   PP_METRICS_TMP="${PP_METRICS_TMP_PREFIX}-${sid}.txt"
+  # Recover from a crashed prior cycle by flushing its pending data
+  # before we start a new cycle on the same session id.
+  if [ -s "$PP_METRICS_TMP" ]; then
+    metrics_flush_cycle "$sid"
+  fi
   : > "$PP_METRICS_TMP"
 }
 
@@ -60,6 +86,16 @@ metrics_increment_call() {
 
 # _metrics_usd_for_call CALL_TYPE MODEL → prints USD (6-decimal float)
 # Returns 0 USD for unknown call types (so they don't blow up the rollup).
+#
+# Locale (review fix R2-H1): uses _pp_awk so the output always uses `.` as
+# decimal separator regardless of $LC_NUMERIC / $LC_ALL.
+#
+# Unknown models (review fix R2-H3): models that don't match a pricing
+# pattern (gpt-4o, claude-*, local-llm, typos) used to silently price at
+# $0. Now we emit a one-time stderr warning per (session × model) via a
+# tracker file in $PP_CACHE_DIR. The JSONL entry is still produced (usd
+# component for those calls is 0), so the user sees they ran calls but
+# weren't billed for them, and can add prices to user.env.
 _metrics_usd_for_call() {
   local call_type="$1" model="$2"
   local in_per_m out_per_m tok_in tok_out
@@ -78,14 +114,33 @@ _metrics_usd_for_call() {
     *gpt-5-mini*) in_per_m="$PP_PRICE_GPT_5_MINI_IN_PER_M";  out_per_m="$PP_PRICE_GPT_5_MINI_OUT_PER_M" ;;
     *gpt-5.5*)    in_per_m="$PP_PRICE_GPT_5_5_IN_PER_M";     out_per_m="$PP_PRICE_GPT_5_5_OUT_PER_M" ;;
     *gpt-5*)      in_per_m="$PP_PRICE_GPT_5_IN_PER_M";       out_per_m="$PP_PRICE_GPT_5_OUT_PER_M" ;;
-    *)            in_per_m=0; out_per_m=0 ;;
+    *)
+      # Rate-limit the warning to once per (session × model) so we don't
+      # spam stderr if the same unknown model is called dozens of times
+      # per cycle. The marker file is wiped when PP_CACHE_DIR is.
+      local safe_model warn_marker
+      safe_model=$(printf '%s' "$model" | tr -cd 'a-zA-Z0-9._-' | cut -c1-64)
+      warn_marker="${PP_CACHE_DIR}/.metrics-unknown-${safe_model}.warned"
+      if [ -n "$model" ] && [ ! -f "$warn_marker" ]; then
+        printf 'lib/metrics.sh: unknown model "%s" — billing as $0. Set PP_PRICE_* in user.env to track.\n' "$model" >&2
+        : > "$warn_marker" 2>/dev/null || true
+      fi
+      in_per_m=0; out_per_m=0
+      ;;
   esac
-  awk -v ti="$tok_in" -v to="$tok_out" -v ip="$in_per_m" -v op="$out_per_m" \
+  _pp_awk -v ti="$tok_in" -v to="$tok_out" -v ip="$in_per_m" -v op="$out_per_m" \
     'BEGIN { printf "%.6f", (ti / 1000000.0) * ip + (to / 1000000.0) * op }'
 }
 
 # metrics_flush_cycle SESSION_ID — roll up tmp into a single JSONL entry
 # Idempotent: missing/empty tmp file → no-op (returns 0).
+#
+# JSONL schema (review fix R2-H2):
+#   {ts, session, calls, usd_est, by_type, by_type_usd}
+# `by_type_usd` is new in round-2: it stores summed USD per call type so
+# `polymath cost --by-lens` can report real cost breakdown instead of just
+# raw call counts. Older entries lacking the field display as 0 USD via
+# the // fallback in the CLI.
 metrics_flush_cycle() {
   local sid="${1:-default}"
   [ -z "${PP_METRICS_TMP:-}" ] && return 0
@@ -96,13 +151,16 @@ metrics_flush_cycle() {
 
   mkdir -p "$(dirname "$PP_METRICS_FILE")" 2>/dev/null || true
 
-  # Compute total USD by summing per-row USD values. awk float math.
+  # Compute total USD by summing per-row USD values. Pin LC_ALL=C so
+  # awk's printf emits `.` decimals regardless of system locale
+  # (review fix R2-H1) — otherwise the resulting string fails jq parsing
+  # under locales like de_DE.UTF-8 and the whole row is silently dropped.
   local total_usd
   total_usd=$(while IFS=$'\t' read -r call_type model; do
     [ -z "$call_type" ] && continue
     _metrics_usd_for_call "$call_type" "$model"
     printf '\n'
-  done < "$PP_METRICS_TMP" | awk '{ s += $1 } END { printf "%.6f", (s + 0) }')
+  done < "$PP_METRICS_TMP" | _pp_awk '{ s += $1 } END { printf "%.6f", (s + 0) }')
 
   local calls
   calls=$(wc -l < "$PP_METRICS_TMP" | tr -d ' ')
@@ -114,6 +172,26 @@ metrics_flush_cycle() {
     | awk '{print $2"\t"$1}' \
     | jq -Rn '[inputs | split("\t") | {(.[0]): (.[1] | tonumber)}] | add // {}' 2>/dev/null)
   [ -z "$by_type" ] && by_type='{}'
+
+  # By-type USD (review fix R2-H2): sum USD per call type. Iterate each
+  # row, look up its USD via the same pricing helper, and accumulate into
+  # an associative-array-like TSV that jq turns into a JSON object. This
+  # lets `polymath cost --by-lens` show real per-type spend instead of
+  # interpreting jq `add` as numeric sum (it isn't — see PR #10 R2 review).
+  local by_type_usd_tsv
+  by_type_usd_tsv=$(
+    while IFS=$'\t' read -r call_type model; do
+      [ -z "$call_type" ] && continue
+      printf '%s\t%s\n' "$call_type" "$(_metrics_usd_for_call "$call_type" "$model")"
+    done < "$PP_METRICS_TMP" \
+    | _pp_awk -F'\t' '{ s[$1] += $2 } END { for (k in s) printf "%s\t%.6f\n", k, s[k] }'
+  )
+  local by_type_usd
+  if [ -n "$by_type_usd_tsv" ]; then
+    by_type_usd=$(printf '%s\n' "$by_type_usd_tsv" \
+      | jq -Rn '[inputs | split("\t") | {(.[0]): (.[1] | tonumber)}] | add // {}' 2>/dev/null)
+  fi
+  [ -z "$by_type_usd" ] && by_type_usd='{}'
 
   local ts
   ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -131,7 +209,8 @@ metrics_flush_cycle() {
     --argjson calls "$calls" \
     --argjson usd "$total_usd" \
     --argjson by_type "$by_type" \
-    '{ts:$ts, session:$sid, calls:$calls, usd_est:$usd, by_type:$by_type}' \
+    --argjson by_type_usd "$by_type_usd" \
+    '{ts:$ts, session:$sid, calls:$calls, usd_est:$usd, by_type:$by_type, by_type_usd:$by_type_usd}' \
     > "$entry_tmp" 2>/dev/null
 
   if [ -s "$entry_tmp" ]; then

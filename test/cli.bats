@@ -1002,3 +1002,80 @@ EOF
   # "v0.2 will add" line should no longer mention 'cost'
   [[ "$output" != *"will add: cost"* ]]
 }
+
+# ----- Round-2 review fixes --------------------------------------------------
+
+@test "R2-H2: polymath cost --by-lens sums call counts across sessions (not last-write-wins)" {
+  # Three sessions, each with 5 planner calls. Total must be 15 — pre-fix
+  # this returned 5 because jq `add` on objects is key-collision merge.
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":5,"usd_est":0.0015,"by_type":{"planner":5},"by_type_usd":{"planner":0.0015}}
+{"ts":"$today_iso","session":"b","calls":5,"usd_est":0.0015,"by_type":{"planner":5},"by_type_usd":{"planner":0.0015}}
+{"ts":"$today_iso","session":"c","calls":5,"usd_est":0.0015,"by_type":{"planner":5},"by_type_usd":{"planner":0.0015}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  # Must report 15 planner calls — NOT 5
+  [[ "$output" == *"planner: 15 calls"* ]]
+  # USD breakdown should be present and approximately $0.0045
+  [[ "$output" == *"\$0.0045"* ]]
+}
+
+@test "R2-H2: polymath cost --by-lens shows USD per call type" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":3,"usd_est":0.0103,"by_type":{"planner":1,"analyst":1,"critique":1},"by_type_usd":{"planner":0.0003,"analyst":0.00091,"critique":0.00937}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  # Each line must include "$" + decimal — the output is "  type: N calls / $0.xxxx"
+  [[ "$output" == *"calls / \$"* ]]
+}
+
+@test "R2-H2: by-lens still works on legacy entries without by_type_usd field" {
+  # Older JSONL produced before the round-2 fix lacks by_type_usd; jq
+  # should default to 0 USD via the // fallback, not error out.
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"legacy","calls":2,"usd_est":0.001,"by_type":{"planner":2}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planner: 2 calls"* ]]
+  # Missing by_type_usd → falls back to $0
+  [[ "$output" == *"\$0"* ]]
+}
+
+@test "R2-M2: polymath cost table shows 4-decimal USD (sub-cent visible)" {
+  # Single-call cycles cost ~$0.0003. Pre-fix the *100/round/100 query
+  # rounded these to $0, so the table looked broken. New formatting uses
+  # 4 decimals. Column padding may insert spaces between '$' and the
+  # value, so we match the 0.0003 substring (not the $-prefix).
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"tiny","calls":1,"usd_est":0.0003,"by_type":{"planner":1},"by_type_usd":{"planner":0.0003}}
+EOF
+  run bash "$PP_ROOT/bin/polymath" cost
+  [ "$status" -eq 0 ]
+  # Sub-cent value must be visible — not rounded to $0
+  [[ "$output" == *"0.0003"* ]]
+  # And the table must NOT show $0 as the only USD value (pre-fix bug)
+  [[ "$output" != *"\$        0 "* ]]
+}

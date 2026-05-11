@@ -675,22 +675,41 @@ HELP
 
     if [ "$_pp_cost_by_lens" = "1" ]; then
       printf '\nCost by call type (last %s):\n' "$_pp_cost_since"
+      # Review fix R2-H2: previous code did `map(.by_type) | add` which in jq
+      # performs key-collision merge (last-write-wins) on objects, NOT numeric
+      # summation. Across multiple sessions with overlapping call-type keys
+      # (always the case) only the LAST session's counts survived, silently
+      # undercounting in proportion to history length. Replace with
+      # flatten-group-sum and also surface the per-type USD totals from the
+      # new `by_type_usd` field (added in lib/metrics.sh round-2).
       _pp_cost_bytype=$(jq -s --arg cutoff "$_pp_cost_cutoff" '
-        map(select(.ts >= $cutoff))
-        | map(.by_type) | add // {}
-        | to_entries | sort_by(-.value)
+        def sum_by_key:
+          [.[] // {} | to_entries[]]
+          | group_by(.key)
+          | map({key: .[0].key, value: (map(.value) | add)})
+          | from_entries;
+        map(select(.ts >= $cutoff)) as $rows
+        | ($rows | map(.by_type // {}) | sum_by_key) as $counts
+        | ($rows | map(.by_type_usd // {}) | sum_by_key) as $usds
+        | [ $counts | to_entries[] | {key: .key, calls: .value, usd: ($usds[.key] // 0)} ]
+        | sort_by(-.calls)
       ' "$_pp_metrics_file" 2>/dev/null)
       if [ -z "$_pp_cost_bytype" ] || [ "$_pp_cost_bytype" = "[]" ]; then
         printf '  (no data in window)\n\n'
         exit 0
       fi
+      # 4-decimal USD display (review fix R2-M2): sub-cent sessions otherwise
+      # render as $0.00 and look like the feature is broken.
       printf '%s' "$_pp_cost_bytype" \
-        | jq -r '.[] | "  " + .key + ": " + (.value | tostring) + " calls"'
+        | jq -r '.[] | "  " + .key + ": " + (.calls | tostring) + " calls / $" + ((.usd * 10000 | round) / 10000 | tostring)'
       printf '\n'
       exit 0
     fi
 
     # Default: table by day with date / cycles / calls / USD columns.
+    # Review fix R2-M2: USD now formatted to 4 decimals (round/10000) so
+    # single-call sub-cent test sessions don't display as $0.00 and look
+    # like the metric is broken.
     _pp_cost_rows=$(jq -rs --arg cutoff "$_pp_cost_cutoff" '
       map(select(.ts >= $cutoff))
       | group_by(.ts[0:10])
@@ -702,7 +721,7 @@ HELP
         })
       | sort_by(.date)
       | .[]
-      | [.date, (.cycles|tostring), (.calls|tostring), (.usd|.*100|round/100|tostring)]
+      | [.date, (.cycles|tostring), (.calls|tostring), (.usd*10000|round/10000|tostring)]
       | @tsv
     ' "$_pp_metrics_file" 2>/dev/null)
 
@@ -714,16 +733,16 @@ HELP
     _pp_cost_totals=$(jq -rs --arg cutoff "$_pp_cost_cutoff" '
       map(select(.ts >= $cutoff))
       | {cycles: length, calls: (map(.calls) | add // 0), usd: (map(.usd_est) | add // 0)}
-      | [(.cycles|tostring), (.calls|tostring), (.usd|.*100|round/100|tostring)]
+      | [(.cycles|tostring), (.calls|tostring), (.usd*10000|round/10000|tostring)]
       | @tsv
     ' "$_pp_metrics_file" 2>/dev/null)
 
     printf '\n'
     printf '%-12s  %7s  %7s  %10s\n' 'Date' 'Cycles' 'Calls' 'USD (est)'
     printf -- '─────────────────────────────────────────\n'
-    printf '%s\n' "$_pp_cost_rows" | awk -F'\t' '{printf "%-12s  %7s  %7s  $%9s\n", $1, $2, $3, $4}'
+    printf '%s\n' "$_pp_cost_rows" | awk -F'\t' '{printf "%-12s  %7s  %7s  $%8s\n", $1, $2, $3, $4}'
     printf -- '─────────────────────────────────────────\n'
-    printf '%s\n' "$_pp_cost_totals" | awk -F'\t' '{printf "%-12s  %7s  %7s  $%9s\n", "Total", $1, $2, $3}'
+    printf '%s\n' "$_pp_cost_totals" | awk -F'\t' '{printf "%-12s  %7s  %7s  $%8s\n", "Total", $1, $2, $3}'
     printf '\n'
     ;;
 

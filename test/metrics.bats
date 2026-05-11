@@ -99,8 +99,30 @@ teardown() {
 @test "_metrics_usd_for_call: unknown model returns 0 USD" {
   metrics_init "s1"
   local usd
-  usd=$(_metrics_usd_for_call analyst claude-4)
+  # 2>/dev/null because round-2 H3 fix emits a stderr warning for unknown
+  # models — we still want the function to return $0 so the rollup keeps
+  # working, and the warning surfaces to the user via terminal stderr.
+  usd=$(_metrics_usd_for_call analyst claude-4 2>/dev/null)
   awk -v u="$usd" 'BEGIN { exit !(u == 0) }'
+}
+
+@test "R2-H3: unknown model emits one-line stderr warning (first call only)" {
+  metrics_init "s1"
+  # Capture stderr; suppress stdout (the USD value).
+  local err1 err2
+  err1=$(_metrics_usd_for_call analyst gpt-4o-mini 2>&1 >/dev/null)
+  err2=$(_metrics_usd_for_call analyst gpt-4o-mini 2>&1 >/dev/null)
+  [[ "$err1" == *"unknown model"* ]]
+  [[ "$err1" == *"gpt-4o-mini"* ]]
+  # Second call must NOT re-warn (rate-limited via tracker marker)
+  [ -z "$err2" ]
+}
+
+@test "R2-H3: known model does NOT emit stderr warning" {
+  metrics_init "s1"
+  local err
+  err=$(_metrics_usd_for_call analyst gpt-5-mini 2>&1 >/dev/null)
+  [ -z "$err" ]
 }
 
 @test "metrics_flush_cycle: produces one valid JSONL entry" {
@@ -118,7 +140,7 @@ teardown() {
   jq -e '.' < "$PP_METRICS_FILE" >/dev/null
 }
 
-@test "metrics_flush_cycle: JSONL has ts, session, calls, usd_est, by_type" {
+@test "metrics_flush_cycle: JSONL has ts, session, calls, usd_est, by_type, by_type_usd" {
   metrics_init "s1"
   metrics_increment_call planner gpt-5-mini
   metrics_increment_call analyst gpt-5-mini
@@ -138,6 +160,67 @@ teardown() {
   [ "$output" = "1" ]
   run jq -r '.by_type.analyst' < "$PP_METRICS_FILE"
   [ "$output" = "1" ]
+  # Round-2: by_type_usd new field with per-call-type USD totals.
+  run jq -r '.by_type_usd | type' < "$PP_METRICS_FILE"
+  [ "$output" = "object" ]
+  run jq -r '.by_type_usd.planner | type' < "$PP_METRICS_FILE"
+  [ "$output" = "number" ]
+  # planner cost > 0 and < 0.001 (it's 0.0003 — see usd_for_call test)
+  run jq -r '.by_type_usd.planner' < "$PP_METRICS_FILE"
+  awk -v u="$output" 'BEGIN { exit !(u > 0 && u < 0.001) }'
+}
+
+@test "R2-H1: flush under non-C numeric locale still produces valid JSONL" {
+  metrics_init "s1"
+  metrics_increment_call planner gpt-5-mini
+  metrics_increment_call analyst gpt-5-mini
+  # de_DE.UTF-8 typically isn't installed in CI, so use the numeric-only
+  # form which awk honors via LC_NUMERIC. Bash inherits LC_NUMERIC to the
+  # subprocess. If this env locale doesn't exist, awk silently falls back
+  # to C and the test still passes (which is fine — we're verifying the
+  # fix doesn't BREAK the C path either).
+  LC_NUMERIC=de_DE.UTF-8 metrics_flush_cycle "s1"
+  [ -f "$PP_METRICS_FILE" ]
+  # The MUST condition: the line parses as JSON. Pre-fix, jq would reject
+  # "0,000910" as invalid and the entry would be dropped (empty file).
+  run jq -e '.' < "$PP_METRICS_FILE"
+  [ "$status" -eq 0 ]
+  # usd_est must be a number, not a string
+  run jq -r '.usd_est | type' < "$PP_METRICS_FILE"
+  [ "$output" = "number" ]
+}
+
+@test "R2-H1: by_type_usd values are numeric under non-C locale" {
+  metrics_init "s1"
+  metrics_increment_call analyst gpt-5-mini
+  metrics_increment_call critique gpt-5
+  LC_NUMERIC=fr_FR.UTF-8 metrics_flush_cycle "s1"
+  run jq -r '.by_type_usd.analyst | type' < "$PP_METRICS_FILE"
+  [ "$output" = "number" ]
+  run jq -r '.by_type_usd.critique | type' < "$PP_METRICS_FILE"
+  [ "$output" = "number" ]
+}
+
+@test "R2-M1: metrics_init recovers leftover tmp from crashed prior cycle" {
+  # Simulate a prior cycle that put rows into the tmp file and was killed
+  # before flushing. metrics_init on the same session id should flush
+  # what's there BEFORE starting fresh — otherwise that cycle's cost is
+  # silently lost.
+  metrics_init "s1"
+  metrics_increment_call analyst gpt-5-mini
+  # DON'T flush — simulate SIGTERM. We're now leaving 1 row in the tmp.
+  local pre_count=0
+  [ -f "$PP_METRICS_FILE" ] && pre_count=$(wc -l < "$PP_METRICS_FILE" | tr -d ' ')
+
+  # New cycle on same session id should auto-recover.
+  metrics_init "s1"
+  metrics_increment_call planner gpt-5-mini
+  metrics_flush_cycle "s1"
+
+  # Expect 2 JSONL rows: the recovered (analyst) and the new (planner).
+  local post_count
+  post_count=$(wc -l < "$PP_METRICS_FILE" | tr -d ' ')
+  [ "$post_count" -eq $((pre_count + 2)) ]
 }
 
 @test "metrics_flush_cycle: empty tmp file → no JSONL entry (no-op)" {

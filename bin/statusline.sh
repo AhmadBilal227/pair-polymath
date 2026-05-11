@@ -415,8 +415,14 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
   if [ "$acquired" = "1" ]; then
     echo "$(date +%s)" > "$PP_LAST_PARALLEL"
     (
-      # Single trap covering the cycle lock (now a dir) + the unified budget lock.
+      # Single trap covering metrics flush + the cycle lock (now a dir) +
+      # the unified budget lock. Order matters: flush metrics BEFORE
+      # releasing the cycle lock so a SIGTERM can't orphan the tmp file
+      # OR lose the cost data (review fix R2-M1). metrics_flush_cycle is
+      # idempotent on missing tmp, so a clean exit running through here
+      # AND through the explicit call at end-of-subshell is safe.
       trap '
+        metrics_flush_cycle "$session_id" 2>/dev/null
         rmdir "$PP_LOCK" 2>/dev/null || rm -rf "$PP_LOCK" 2>/dev/null
         rmdir "${PP_BUDGET_FILE}.lock" 2>/dev/null
       ' EXIT INT TERM HUP
@@ -825,11 +831,8 @@ $critique_input"
       fi  # grounded && llm available
       fi  # can_run — gates BOTH planner and analyst fan-out
 
-      # Roll up the per-cycle call log into one metrics.jsonl entry.
-      # No-op if metrics_init wasn't called or no calls were made.
-      metrics_flush_cycle "$session_id"
-
-      rmdir "$PP_LOCK" 2>/dev/null || rm -rf "$PP_LOCK" 2>/dev/null
+      # Cycle cleanup (metrics flush + lock release) handled by the EXIT
+      # trap above so SIGTERM mid-cycle can't lose data (review fix R2-M1).
     ) >/dev/null 2>&1 &
   fi
 fi

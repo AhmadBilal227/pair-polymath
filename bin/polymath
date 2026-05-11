@@ -812,10 +812,17 @@ HELP
       printf '\033[31m✗\033[0m self-test: llm CLI not on PATH\n' >&2
       exit 1
     fi
+    # R2 MED-3: env-var-configured users (OPENAI_API_KEY exported) are valid
+    # too. Only WARN if the key list doesn't show openai — let the real call
+    # validate. Previously this was a hard exit that rejected valid configs.
     if ! llm keys list 2>/dev/null | grep -q '^openai$'; then
-      printf '\033[31m✗\033[0m self-test: openai key not configured (run: llm keys set openai)\n' >&2
-      exit 1
+      printf '\033[33m⚠\033[0m self-test: openai not in `llm keys list`; trusting env-var or plugin to provide credentials. The real call will validate.\n' >&2
     fi
+
+    # Track whether any verification step failed. We complete the entire
+    # probe (so users see all signals) and then exit non-zero at the end.
+    # R2 HIGH-1: sentinel mismatch must NOT be silently swallowed.
+    _pp_st_failed=0
 
     # Record budget before
     _pp_st_budget_before=$(budget_get)
@@ -836,17 +843,21 @@ HELP
 
     printf '\033[1mself-test\033[0m: probing OpenAI via run_llm...\n'
 
-    # Single cheap call: ask for a known sentinel
-    _pp_st_out=$(printf 'Respond with EXACTLY the word: PAIRPOLYMATH_OK' | _pp_st_run_llm 15 -m gpt-5-mini "You are a probe responder. Output exactly the requested word, no more." 2>/dev/null)
+    # Single cheap call: ask for a known sentinel. System prompt via -s flag
+    # (R2 MED-4) — clearer + matches statusline.sh's wrapper conventions
+    # than relying on llm's positional-after-stdin merge heuristic.
+    _pp_st_out=$(printf 'Respond with EXACTLY the word: PAIRPOLYMATH_OK' | _pp_st_run_llm 15 -m gpt-5-mini -s "You are a probe responder. Output exactly the requested word, no more." 2>/dev/null)
     _pp_st_rc=$?
-
-    # Increment budget AFTER the call (same as statusline.sh wraps real calls)
-    budget_inc || true
 
     if [ "$_pp_st_rc" -ne 0 ]; then
       printf '\033[31m✗\033[0m self-test: llm call failed (rc=%s). Check network + key.\n' "$_pp_st_rc" >&2
+      # R2 HIGH-2: increment budget ONLY if the call succeeded. Failed calls
+      # (network/auth/timeout) must not corrupt the daily counter.
       exit 1
     fi
+
+    # Increment budget AFTER successful call (matches statusline.sh)
+    budget_inc || true
 
     # Verify the response
     _pp_st_trimmed=$(printf '%s' "$_pp_st_out" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
@@ -855,9 +866,13 @@ HELP
         printf '\033[32m✓\033[0m self-test: response matched sentinel\n'
         ;;
       *)
-        printf '\033[33m⚠\033[0m self-test: response did NOT match sentinel "PAIRPOLYMATH_OK"\n'
+        # R2 HIGH-1: previously this only warned and the script continued
+        # to print "All passed" + exit 0. A self-test that doesn't actually
+        # verify is worse than no test. Track the failure and exit non-zero.
+        printf '\033[31m✗\033[0m self-test: response did NOT match sentinel "PAIRPOLYMATH_OK"\n'
         printf '          got: %s\n' "${_pp_st_out:0:200}"
-        printf '          (model may be misconfigured or overly verbose; key + network ARE working)\n'
+        printf '          (key + network reachable, but model output unexpected)\n'
+        _pp_st_failed=1
         ;;
     esac
 
@@ -868,9 +883,13 @@ HELP
       printf '\033[32m✓\033[0m self-test: budget incremented by %s\n' "$_pp_st_delta"
     else
       printf '\033[31m✗\033[0m self-test: budget did NOT increment (before=%s, after=%s)\n' "$_pp_st_budget_before" "$_pp_st_budget_after"
-      exit 1
+      _pp_st_failed=1
     fi
 
+    if [ "$_pp_st_failed" = "1" ]; then
+      printf '\n\033[31mself-test: one or more checks failed.\033[0m\n' >&2
+      exit 1
+    fi
     printf '\n\033[32mAll self-test checks passed.\033[0m\n'
     ;;
 

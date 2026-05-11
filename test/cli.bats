@@ -1147,6 +1147,55 @@ EOF
   [[ "$output" == *"llm CLI not on PATH"* ]]
 }
 
+@test "R2 HIGH-1: self-test exits NON-zero when sentinel mismatches" {
+  # Shim `llm` to (a) report openai in `keys list` so we get past the soft
+  # warn, and (b) return an OFF-sentinel response. The old code would WARN
+  # and exit 0; the R2 fix must exit 1.
+  local shim_dir
+  shim_dir="$(mktemp -d)"
+  cat > "$shim_dir/llm" <<'SHIM'
+#!/usr/bin/env bash
+case "$1" in
+  keys)
+    [ "$2" = "list" ] && { printf 'openai\n'; exit 0; }
+    ;;
+esac
+# Default: respond with WRONG sentinel — verifies R2 HIGH-1 fix
+printf 'NOT_THE_RIGHT_WORD\n'
+SHIM
+  chmod +x "$shim_dir/llm"
+  PATH="$shim_dir:/usr/bin:/bin" run bash -c "bash '$PP_ROOT/bin/polymath' self-test --yes </dev/null"
+  rm -rf "$shim_dir"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"did NOT match sentinel"* ]]
+  [[ "$output" == *"one or more checks failed"* ]]
+}
+
+@test "R2 MED-3: self-test does NOT hard-exit if openai missing from keys list (warn only)" {
+  # Shim `llm` so `keys list` is EMPTY but the call itself succeeds with
+  # the right sentinel. Old code: exit 1 at preflight. R2: warn + continue.
+  local shim_dir
+  shim_dir="$(mktemp -d)"
+  cat > "$shim_dir/llm" <<'SHIM'
+#!/usr/bin/env bash
+case "$1" in
+  keys)
+    [ "$2" = "list" ] && { exit 0; }   # empty list
+    ;;
+esac
+printf 'PAIRPOLYMATH_OK\n'
+SHIM
+  chmod +x "$shim_dir/llm"
+  PATH="$shim_dir:/usr/bin:/bin" run bash -c "bash '$PP_ROOT/bin/polymath' self-test --yes </dev/null"
+  rm -rf "$shim_dir"
+  # Should warn but proceed; budget check may or may not pass depending on
+  # HOME isolation, so we only assert: did NOT exit at preflight, and the
+  # warning text DID appear.
+  [[ "$output" == *"not in"* ]] || [[ "$output" == *"trusting env-var"* ]]
+  # And did not bail at the preflight (some downstream output should show)
+  [[ "$output" == *"probing OpenAI"* ]]
+}
+
 @test "polymath help: lists self-test as available" {
   run bash "$PP_ROOT/bin/polymath" help
   [ "$status" -eq 0 ]

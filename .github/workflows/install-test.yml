@@ -166,20 +166,68 @@ jobs:
         # — not just $HOME/.claude. pip3 --user lands files under $HOME/.local
         # and $HOME/.local/share, and llm CLI may also place config under
         # $HOME/.config. Any unexpected file under those paths is a real bug.
+        #
+        # Issue #14 Phase 1: always surface diagnostics. The previous version
+        # swallowed /tmp/dry-run.log on failure so we couldn't see WHICH of the
+        # three assertions tripped or what the installer actually printed.
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p "$HOME/.claude"   # baseline dir; dry-run shouldn't add anything
           snapshot() {
             find "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config" \
               -mindepth 1 2>/dev/null | sort
           }
           home_before=$(snapshot)
+          echo "=== home_before (first 30 lines) ==="
+          echo "$home_before" | head -30
+          echo "=== home_before line count: $(echo "$home_before" | wc -l) ==="
+
+          set +e
           bash ./bin/install.sh --dry-run --yes > /tmp/dry-run.log 2>&1
+          install_rc=$?
+          set -e
+
           home_after=$(snapshot)
+
+          echo ""
+          echo "=== install.sh exit code: $install_rc ==="
+
+          echo ""
+          echo "=== /tmp/dry-run.log (full) ==="
+          cat /tmp/dry-run.log
+          echo "=== end of /tmp/dry-run.log ==="
+
+          fail=0
+
           if [ "$home_before" != "$home_after" ]; then
-            echo "FS changed!"
-            diff <(echo "$home_before") <(echo "$home_after")
+            echo ""
+            echo "=== ASSERTION FAILED: FS CHANGED under --dry-run ==="
+            echo "--- diff (before -> after) ---"
+            diff <(echo "$home_before") <(echo "$home_after") || true
+            fail=1
+          fi
+
+          if ! grep -q '\[DRY-RUN\]' /tmp/dry-run.log; then
+            echo ""
+            echo "=== ASSERTION FAILED: missing [DRY-RUN] marker in output ==="
+            fail=1
+          fi
+
+          if ! grep -q 'dry-run complete' /tmp/dry-run.log; then
+            echo ""
+            echo "=== ASSERTION FAILED: missing 'dry-run complete' marker in output ==="
+            fail=1
+          fi
+
+          if [ "$install_rc" -ne 0 ]; then
+            echo ""
+            echo "=== ASSERTION FAILED: install.sh exited $install_rc (expected 0) ==="
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
             exit 1
           fi
-          grep -q '\[DRY-RUN\]' /tmp/dry-run.log
-          grep -q 'dry-run complete' /tmp/dry-run.log
+
+          echo ""
+          echo "=== All dry-run assertions passed ==="

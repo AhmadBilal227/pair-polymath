@@ -179,10 +179,10 @@ What we actively defend against leaking:
 - **Recursive `${VAR}` expansion in rendered prompts.** The prompt loader is single-pass over placeholders found in the *original* template. Even if an LLM-generated `drop_reason` value contains the literal text `${OPENAI_API_KEY}`, it will NOT be re-scanned and expanded into the rendered prompt. (Regression-tested in `test/prompt-loader.bats`.) Note: built-in prompts MAY reference `${PP_MODEL}` and similar non-secret vars — that's by design. User overrides should not reference secret-bearing env vars in their templates.
 - **The full conversation history.** Only the last ~5 KB of the transcript ships per cycle.
 - **Files outside your cwd.** `pp_contain_path` enforces realpath prefix match.
+- **Secret-bearing files inside cwd.** `pp_contain_path` rejects basename matches of `.env`, `.env.*`, `*.env`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `credentials*`, `secrets*`, `*.token`, `id_rsa*`, `.netrc`, `.npmrc`, `.pypirc`, and similar even when they're inside cwd. Extend via `PP_SECRET_FILE_PATTERNS_EXTRA` in `user.env`; escape hatch via `PP_SECRET_FILE_PATTERNS` (replaces defaults entirely). Closes [issue #5](https://github.com/AhmadBilal227/pair-polymath/issues/5).
 
 What we do NOT defend against (be aware):
 - **Secrets you typed or pasted into your transcript.** They live in the transcript and the last 5 KB of it is in scope. If you pasted an API key into Claude as part of a debug session, it's at risk. Clear sensitive transcripts before activating the advisor, or use `polymath disable` for those sessions.
-- **Secret-bearing files INSIDE cwd.** The planner can currently pick `.env`, `*.key`, `credentials.json` etc. from cwd as the per-cycle grounding file. Tracking under [issue #5](https://github.com/AhmadBilal227/pair-polymath/issues/5); denylist patterns land in v0.3. Until then: use `.gitignore` and `polymath disable` defensively if your cwd has secrets at the root.
 
 To opt out of LLM cycles entirely while keeping the statusline:
 
@@ -196,7 +196,7 @@ echo 'PP_EXTERNAL_LLM=0' >> ~/.claude/pair-polymath/config/user.env
 
 **Does this slow down Claude Code?** No. The lens cycle runs in a detached background subshell — your statusline refreshes (`refreshInterval: 2`) never wait for an LLM call. Worst case the statusline shows the previous cycle's line 2 while a new one is computing.
 
-**Will this leak my code to OpenAI?** Per cycle: the last ~5 KB of your transcript, `git status` + last 5 commit subjects, and the first ~3 KB of ONE planner-picked file (containment-checked to stay inside cwd). HN + arXiv RSS titles also fetched (public). NEVER sent: full conversation history, files outside your cwd, recursively-expanded `${VAR}` values in prompts. **At risk:** secrets you pasted INTO your transcript, and secret-bearing files INSIDE cwd (e.g. `.env`) until [issue #5](https://github.com/AhmadBilal227/pair-polymath/issues/5) ships denylist patterns. See [Privacy](#privacy) and [SECURITY.md](SECURITY.md).
+**Will this leak my code to OpenAI?** Per cycle: the last ~5 KB of your transcript, `git status` + last 5 commit subjects, and the first ~3 KB of ONE planner-picked file (containment-checked to stay inside cwd, with a basename denylist that rejects `.env`, `*.key`, `credentials*` etc.). HN + arXiv RSS titles also fetched (public). NEVER sent: full conversation history, files outside your cwd, recursively-expanded `${VAR}` values in prompts. **At risk:** secrets you pasted INTO your transcript. See [Privacy](#privacy) and [SECURITY.md](SECURITY.md).
 
 **What if I use Anthropic instead of OpenAI?** Today, both the lens cycle and the tip-digest call OpenAI via the `llm` CLI (`gpt-5-mini` per lens, `gpt-5` for critique, `gpt-5-mini` for tip compression). The `llm` CLI itself supports Anthropic, Google, local models via plugins — multi-provider config lands in v0.3. Until then: set `PP_EXTERNAL_LLM=0` (via `polymath disable`) to skip the OpenAI lens cycle; statusline line 1 continues to render status indicators without any API calls.
 

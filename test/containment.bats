@@ -102,3 +102,94 @@ teardown() {
   run pp_safe_grep_pattern "^budget_inc\\("
   [ "$status" -eq 0 ]
 }
+
+# === pp_is_secret_file + integration with pp_contain_path ===
+
+@test "secret-file: rejects basename matching .env" {
+  run pp_is_secret_file "/some/path/.env"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: rejects .env.local" {
+  run pp_is_secret_file "/some/path/.env.local"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: rejects production.env" {
+  run pp_is_secret_file "/x/production.env"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: rejects .envrc" {
+  run pp_is_secret_file "/x/.envrc"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: rejects *.pem / *.key / *.p12 / *.pfx" {
+  for ext in pem key p12 pfx; do
+    run pp_is_secret_file "/x/server.$ext"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "secret-file: rejects credentials.json / secrets.yml" {
+  run pp_is_secret_file "/x/credentials.json"
+  [ "$status" -eq 0 ]
+  run pp_is_secret_file "/x/secrets.yml"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: rejects id_rsa / id_ed25519 / authinfo / .netrc" {
+  for f in id_rsa id_rsa.pub id_ed25519 authinfo .netrc; do
+    run pp_is_secret_file "/x/$f"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "secret-file: rejects .npmrc / .pypirc" {
+  run pp_is_secret_file "/x/.npmrc"
+  [ "$status" -eq 0 ]
+  run pp_is_secret_file "/x/.pypirc"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: ACCEPTS regular source files" {
+  for f in App.tsx main.py README.md package.json Makefile build.gradle; do
+    run pp_is_secret_file "/x/$f"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "secret-file: PP_SECRET_FILE_PATTERNS_EXTRA adds patterns additively" {
+  PP_SECRET_FILE_PATTERNS_EXTRA="*.myorg-secret" run pp_is_secret_file "/x/foo.myorg-secret"
+  [ "$status" -eq 0 ]
+  # Defaults still apply
+  PP_SECRET_FILE_PATTERNS_EXTRA="*.myorg-secret" run pp_is_secret_file "/x/.env"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: PP_SECRET_FILE_PATTERNS replaces defaults entirely (escape hatch)" {
+  # Set patterns to something that does NOT match .env
+  PP_SECRET_FILE_PATTERNS="*.totallyunrelated" run pp_is_secret_file "/x/.env"
+  [ "$status" -ne 0 ]
+}
+
+@test "contain: now rejects .env even when inside base" {
+  echo "sk-fake" > "$PP_TEST_BASE/sub/.env"
+  run pp_contain_path "$PP_TEST_BASE" "sub/.env"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "contain: now rejects deep credentials.json" {
+  echo '{}' > "$PP_TEST_BASE/sub/nested/credentials.json"
+  run pp_contain_path "$PP_TEST_BASE" "sub/nested/credentials.json"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "contain: still accepts non-secret files inside base" {
+  run pp_contain_path "$PP_TEST_BASE" "sub/file.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "$PP_TEST_BASE"/* ]] || [[ "$output" == "$PP_TEST_BASE_REAL"/* ]]
+}

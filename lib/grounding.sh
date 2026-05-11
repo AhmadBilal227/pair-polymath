@@ -26,7 +26,15 @@ pp_contain_path() {
 
   # cand_real must be base_real itself or a descendant (prefix match with /)
   case "$cand_real" in
-    "$base_real"|"$base_real"/*) printf '%s\n' "$cand_real"; return 0 ;;
+    "$base_real"|"$base_real"/*)
+      # Additional guard: refuse known secret-bearing filenames even when
+      # they're legitimately inside the cwd (review fix for issue #5).
+      if pp_is_secret_file "$cand_real"; then
+        return 1
+      fi
+      printf '%s\n' "$cand_real"
+      return 0
+      ;;
     *) return 1 ;;
   esac
 }
@@ -57,4 +65,30 @@ pp_safe_grep_pattern() {
   stripped=$(printf '%s' "$p" | tr -cd 'A-Za-z0-9')
   [ "${#stripped}" -lt 3 ] && return 1
   return 0
+}
+
+# pp_is_secret_file PATH
+# Returns 0 if PATH's basename matches a known secret-bearing pattern, 1 otherwise.
+# Patterns are GLOBS (case-sensitive), checked against basename only.
+# Defaults cover common credential / private-key file conventions.
+# Extend per-user via PP_SECRET_FILE_PATTERNS_EXTRA in user.env (additive).
+# Replace entirely (escape hatch) via PP_SECRET_FILE_PATTERNS in user.env.
+pp_is_secret_file() {
+  local path="${1:-}"
+  [ -z "$path" ] && return 1
+  local base
+  base="$(basename -- "$path")"
+
+  local defaults=".env .env.* *.env .envrc *.pem *.key *.p12 *.pfx credentials* secrets* *.token *_token *_secret authinfo* .netrc id_rsa* id_dsa* id_ecdsa* id_ed25519* .npmrc .pypirc"
+  local patterns="${PP_SECRET_FILE_PATTERNS:-$defaults}"
+  local extra="${PP_SECRET_FILE_PATTERNS_EXTRA:-}"
+
+  local p
+  for p in $patterns $extra; do
+    # shellcheck disable=SC2254  # intentional glob expansion
+    case "$base" in
+      $p) return 0 ;;
+    esac
+  done
+  return 1
 }

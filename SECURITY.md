@@ -48,6 +48,7 @@ What never leaves:
 - `session_id`: sanitized via `tr -cd 'a-zA-Z0-9._-' | cut -c1-64` before any path use.
 - Lens count: hard-capped at `PP_LENS_MAX=16` (DoS guard against a stuffed user-override dir).
 - Grep validator: rejects leading `-` (option injection), requires ≥3 alphanumeric chars (rejects pattern-of-metachars decoys).
+- Secret-file denylist: `pp_contain_path` rejects `.env`, `*.key`, `credentials*`, `id_rsa*`, `.netrc`, and ~15 other common credential-file basename patterns even when they're inside the user's cwd. Configurable via `PP_SECRET_FILE_PATTERNS_EXTRA` (additive) or `PP_SECRET_FILE_PATTERNS` (replace).
 - Cache files: id-keyed, not numeric-index-keyed (reordering / disabling lenses cannot serve stale observations under a wrong identity).
 - Installer: prompts before replacing an existing statusLine (won't silently clobber ccusage / other tools); merges `settings.json` atomically with timestamped backup; smoke-tests `statusline.sh` before activating.
 - Uninstaller: matches by basename so an install from a moved checkout still cleans up; preserves third-party hooks.

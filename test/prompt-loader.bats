@@ -97,11 +97,15 @@ teardown() {
   mkdir -p "$HOME/.claude/pair-polymath/prompts"
   echo 'leak: ${OPENAI_API_KEY}' > "$HOME/.claude/pair-polymath/prompts/leakprobe.md"
   export OPENAI_API_KEY="sk-NEVER-LEAK-THIS-67890"
-  # Scope allowlist to NOT include OPENAI_API_KEY
+  # Scope allowlist to NOT include OPENAI_API_KEY.
+  # bats' `run` merges stdout+stderr on newer versions (Ubuntu CI) but
+  # not on macOS bash 3.2's older bats — strict-equality matching is
+  # platform-fragile because we emit a "not in allowlist" warning to
+  # stderr. Use substring assertions instead: key absent + prefix present.
   PP_PROMPT_VAR_ALLOWLIST="name val" run pp_render_prompt leakprobe
   [ "$status" -eq 0 ]
-  [[ "$output" != *"sk-NEVER-LEAK-THIS"* ]]
-  [[ "$output" == "leak: " ]]
+  [[ "$output" != *"sk-NEVER-LEAK-THIS"* ]]   # secret NOT substituted
+  [[ "$output" == *"leak:"* ]]                # the literal prefix is present
   unset OPENAI_API_KEY
 }
 

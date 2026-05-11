@@ -28,7 +28,10 @@ else
   cp "$SETTINGS_FILE" "$bak"
   ok "backup: $bak"
 
-  tmp=$(mktemp)
+  # Tmp file in the SAME directory as settings.json so mv stays atomic-rename
+  # within the same filesystem (review fix carried back from bin/polymath
+  # commit 491b2e5). Caught by the ENGINEERING lens on 2026-05-11.
+  tmp=$(mktemp "${SETTINGS_FILE}.XXXXXX") || { warn "mktemp failed; settings.json untouched"; exit 0; }
   # Match by basename via jq's `test` regex so orphans from a moved checkout
   # still get cleaned up. The `// []` guards prevent jq from crashing when
   # the array is null/absent (review fix H2).

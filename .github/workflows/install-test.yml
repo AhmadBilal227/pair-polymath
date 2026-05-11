@@ -181,22 +181,39 @@ jobs:
         # the paths exist before snapshotting, and don't let stderr-suppressed
         # find failures break the pipeline.
         run: |
+          # NOTE (review fix LOW-3): we use `set -uo pipefail` here without
+          # `-e`. Trade-off: the diagnostic phase that sets up the baseline
+          # snapshot (mkdir / find) should not abort the whole step on a
+          # transient non-zero — we want the dry-run assertions below to run
+          # regardless and report what actually went wrong. The assertions
+          # themselves check `install_rc` and `$fail` explicitly so we don't
+          # lose failure signal. Worth revisiting if setup ever silently
+          # masks a real bug.
           set -uo pipefail
-          # Pre-create the snapshot targets so `find` always has valid
-          # arguments. dry-run should not add anything to these dirs;
-          # creating empty dirs here is part of the snapshot baseline, not
-          # something the installer is responsible for.
-          mkdir -p "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config"
+          # Review fix MEDIUM-1: only pre-create the path the installer is
+          # expected to touch ($HOME/.claude). If we pre-created
+          # $HOME/.local/bin / share / .config before the snapshot, any new
+          # dir the installer mkdir'd under those would be missed (baseline
+          # and post-install snapshot would both contain the empty dir, diff
+          # would be silent). Leaving them absent forces honest detection.
+          mkdir -p "$HOME/.claude"
           snapshot() {
-            # `|| true` keeps the pipeline rc=0 even if find hits a
-            # transiently missing path (defense in depth on top of mkdir).
-            { find "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config" \
-                -mindepth 1 2>/dev/null || true; } | sort
+            # `find -L` follows symlinks. Each path is conditional: tested
+            # -e first so missing roots produce zero output without `find`
+            # exiting non-zero. This keeps the snapshot honest about what's
+            # actually on disk (vs. silently pre-creating roots which would
+            # hide installer-created subtrees).
+            for root in "$HOME/.claude" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config"; do
+              [ -e "$root" ] && find "$root" -mindepth 1 2>/dev/null
+            done | sort
           }
           home_before=$(snapshot)
           echo "=== home_before (first 30 lines) ==="
           echo "$home_before" | head -30
-          echo "=== home_before line count: $(echo "$home_before" | wc -l) ==="
+          # Review fix LOW-2: `echo "$var" | wc -l` reports 1 for empty
+          # because echo adds a trailing newline. printf '%s' gives the true
+          # count.
+          echo "=== home_before line count: $(printf '%s' "$home_before" | wc -l) ==="
 
           set +e
           bash ./bin/install.sh --dry-run --yes > /tmp/dry-run.log 2>&1

@@ -97,15 +97,17 @@ teardown() {
   mkdir -p "$HOME/.claude/pair-polymath/prompts"
   echo 'leak: ${OPENAI_API_KEY}' > "$HOME/.claude/pair-polymath/prompts/leakprobe.md"
   export OPENAI_API_KEY="sk-NEVER-LEAK-THIS-67890"
-  # Scope allowlist to NOT include OPENAI_API_KEY.
-  # bats' `run` merges stdout+stderr on newer versions (Ubuntu CI) but
-  # not on macOS bash 3.2's older bats — strict-equality matching is
-  # platform-fragile because we emit a "not in allowlist" warning to
-  # stderr. Use substring assertions instead: key absent + prefix present.
-  PP_PROMPT_VAR_ALLOWLIST="name val" run pp_render_prompt leakprobe
+  # R2 M1 fix: the R1 assertion was a substring match (`*"leak:"*`) that would
+  # have green-passed if the loader left the placeholder LITERAL in the output
+  # (e.g. `leak: ${OPENAI_API_KEY}`) — defeating the security guarantee.
+  # Now we redirect stderr to /dev/null inside a subshell so bats' `$output`
+  # captures stdout-only, and assert EXACT equality of the rendered line.
+  PP_PROMPT_VAR_ALLOWLIST="name val" \
+    run bash -c ". \"$PP_ROOT/lib/prompt-loader.sh\"; pp_render_prompt leakprobe 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"sk-NEVER-LEAK-THIS"* ]]   # secret NOT substituted
-  [[ "$output" == *"leak:"* ]]                # the literal prefix is present
+  [[ "$output" != *"sk-NEVER-LEAK-THIS"* ]]    # secret NOT substituted
+  [[ "$output" != *'${OPENAI_API_KEY}'* ]]     # placeholder NOT left literal
+  [ "$output" = "leak: " ]                     # exact: rendered empty
   unset OPENAI_API_KEY
 }
 

@@ -7,6 +7,9 @@ setup() {
   export PP_MAX_DAILY_CALLS=10000
   # shellcheck disable=SC1091
   . "${BATS_TEST_DIRNAME}/../lib/budget.sh"
+  # Pre-create the budget file so the first of many parallel writers doesn't
+  # race against file creation under tmpfs (Ubuntu CI observed this race).
+  echo 0 > "$PP_BUDGET_FILE"
 }
 
 teardown() {

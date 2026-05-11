@@ -9,7 +9,17 @@
 PP_BUDGET_FILE="${PP_CACHE_DIR}/pp-budget-$(date +%Y%m%d).txt"
 PP_BUDGET_LOCK="${PP_BUDGET_FILE}.lock"
 
+# Internal: ensure the budget file's parent dir exists. mkdir -p is idempotent
+# and a no-op when the dir is already there. Without this guard, the first of
+# many parallel budget_inc callers can race against a missing PP_CACHE_DIR
+# (observed on Ubuntu tmpfs CI runners: bats test 1 reported "No such file or
+# directory" on the write redirect from one of 100 concurrent workers).
+_pp_budget_ensure_dir() {
+  mkdir -p "$(dirname "$PP_BUDGET_FILE")" 2>/dev/null || true
+}
+
 _pp_budget_acquire() {
+  _pp_budget_ensure_dir
   local attempts=0
   while ! mkdir "$PP_BUDGET_LOCK" 2>/dev/null; do
     attempts=$((attempts + 1))

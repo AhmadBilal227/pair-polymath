@@ -57,7 +57,11 @@ check_or_install() {
 if command -v brew >/dev/null 2>&1; then
   PKG_INSTALL_JQ="brew install jq"
 elif command -v apt-get >/dev/null 2>&1; then
-  PKG_INSTALL_JQ="sudo apt-get install -y jq"
+  # apt-get update is mandatory: GitHub Actions runners (and many fresh
+  # container images) ship with stale package indexes that reference
+  # versions no longer present on mirrors. Without update, the install
+  # 404s on the cached version.
+  PKG_INSTALL_JQ="sudo apt-get update && sudo apt-get install -y jq"
 else
   err "Could not find brew or apt-get — install jq manually then re-run."
   exit 1

@@ -108,19 +108,19 @@ _pp_run() {
     return 0
   fi
 
-  # --verbose: stream stderr+stdout directly to terminal, no capture.
-  # Use this when an install step is failing and you need to SEE why.
-  if [ "$PP_VERBOSE" = "1" ]; then
-    local rc=0
-    "$@" || rc=$?
-    audit_log "$action" "$cmd_str" "$rc" "verbose mode — see terminal"
-    return "$rc"
-  fi
-
+  # R2 fix (DevOps M2 / Code-rev M2): --verbose previously skipped stderr
+  # capture entirely, losing the audit-log diagnostic at the exact moment
+  # the user needs it (failure with --verbose = post-mortem JSONL has no
+  # stderr_tail). Now: tee stderr to BOTH terminal and capture file so the
+  # user sees live output AND the audit log retains the last-500-bytes tail.
   local stderr_tmp
   stderr_tmp=$(mktemp 2>/dev/null) || stderr_tmp="/tmp/pp-stderr-$$"
   local rc=0
-  "$@" 2> "$stderr_tmp" || rc=$?
+  if [ "$PP_VERBOSE" = "1" ]; then
+    "$@" 2> >(tee "$stderr_tmp" >&2) || rc=$?
+  else
+    "$@" 2> "$stderr_tmp" || rc=$?
+  fi
   local stderr_tail=""
   if [ -s "$stderr_tmp" ]; then
     stderr_tail=$(tail -c 500 "$stderr_tmp")
@@ -155,17 +155,15 @@ _pp_eval() {
     return 0
   fi
 
-  if [ "$PP_VERBOSE" = "1" ]; then
-    local rc=0
-    eval "$cmd_str" || rc=$?
-    audit_log "$action" "$cmd_str" "$rc" "verbose mode — see terminal"
-    return "$rc"
-  fi
-
+  # R2 fix: same tee pattern as _pp_run so --verbose preserves the audit log.
   local stderr_tmp
   stderr_tmp=$(mktemp 2>/dev/null) || stderr_tmp="/tmp/pp-stderr-$$"
   local rc=0
-  eval "$cmd_str" 2> "$stderr_tmp" || rc=$?
+  if [ "$PP_VERBOSE" = "1" ]; then
+    eval "$cmd_str" 2> >(tee "$stderr_tmp" >&2) || rc=$?
+  else
+    eval "$cmd_str" 2> "$stderr_tmp" || rc=$?
+  fi
   local stderr_tail=""
   if [ -s "$stderr_tmp" ]; then
     stderr_tail=$(tail -c 500 "$stderr_tmp")
@@ -400,9 +398,10 @@ fi
 # of a guess-and-fallback chain. A real new-device install on Ubuntu 24.04
 # failed silently here pre-fix: pip3 hit PEP 668's "externally-managed-
 # environment" but the user only saw "install failed". OS-aware selection
-# prefers pipx on PEP-668-locked Linux, brew on macOS, and pip3 elsewhere.
+# prefers pipx on PEP-668-locked Linux, brew+pipx on macOS, and pip3 elsewhere.
 PP_OS="unknown"
 PP_OS_VERSION=""
+PP_OS_LIKE=""   # ID_LIKE — populated from /etc/os-release on Linux derivatives
 case "$(uname -s 2>/dev/null)" in
   Darwin)
     PP_OS="macos"
@@ -410,101 +409,180 @@ case "$(uname -s 2>/dev/null)" in
     ;;
   Linux)
     if [ -r /etc/os-release ]; then
-      # /etc/os-release is the freedesktop.org standard. Sets $ID + $VERSION_ID.
+      # /etc/os-release is the freedesktop.org standard. Sets $ID, $VERSION_ID,
+      # $ID_LIKE. R2 fix: unset first (defense against parent-env leakage),
+      # source under +e/+u (malformed file shouldn't abort the installer —
+      # Code-reviewer H1), then re-enable strict mode.
+      unset ID VERSION_ID ID_LIKE
+      set +e +u
       # shellcheck disable=SC1091
-      . /etc/os-release
+      . /etc/os-release 2>/dev/null
+      set -e -u
       PP_OS="${ID:-linux}"
       PP_OS_VERSION="${VERSION_ID:-?}"
+      PP_OS_LIKE="${ID_LIKE:-}"
     else
       PP_OS="linux"
     fi
     ;;
 esac
 
-# PEP 668 detection: modern Debian/Ubuntu drop a marker file that signals
-# pip3 must NOT install into the system Python. The file's presence is the
-# authoritative signal — version-string parsing isn't reliable across forks.
+# PEP 668 detection: modern Debian/Ubuntu/Fedora and Homebrew Python drop a
+# marker file in their stdlib that signals "do not pip3 install --user here."
+# R2 fix: add /opt/homebrew/lib/python3*/ (Apple Silicon brew) and
+# /usr/local/lib/python3*/ (Intel macOS brew) — the original glob missed
+# both, so brew-Python-only users got incorrectly routed to pip3 --user.
 PP_PEP668=0
-for marker in /usr/lib/python3*/EXTERNALLY-MANAGED /Library/Frameworks/Python.framework/Versions/*/lib/python3.*/EXTERNALLY-MANAGED; do
+for marker in \
+    /usr/lib/python3*/EXTERNALLY-MANAGED \
+    /usr/lib/python3/EXTERNALLY-MANAGED \
+    /opt/homebrew/lib/python3*/EXTERNALLY-MANAGED \
+    /usr/local/lib/python3*/EXTERNALLY-MANAGED \
+    /Library/Frameworks/Python.framework/Versions/*/lib/python3.*/EXTERNALLY-MANAGED; do
   if [ -e "$marker" ]; then
     PP_PEP668=1
     break
   fi
 done
 
+# Print PEP 668 status only on Linux (where the install path actually depends
+# on it). On macOS the brew-then-pipx path doesn't care — and showing
+# "PEP 668" there is just confusing user-facing noise.
 printf '  Detected: %s %s' "$PP_OS" "$PP_OS_VERSION"
-[ "$PP_PEP668" = "1" ] && printf ' (PEP 668 — externally-managed-environment)'
+if [ "$PP_OS" != "macos" ] && [ "$PP_PEP668" = "1" ]; then
+  printf ' (PEP 668 — externally-managed-environment)'
+fi
 printf '\n'
-audit_log "os-detect" "uname=$PP_OS version=$PP_OS_VERSION pep668=$PP_PEP668" 0 ""
+audit_log "os-detect" "uname=$PP_OS version=$PP_OS_VERSION pep668=$PP_PEP668 id_like=$PP_OS_LIKE" 0 ""
+
+# R2 fix (DevOps H3): Homebrew refuses to run as root since 2019. Detect
+# EUID=0 before dispatching brew and bail with a clear error rather than
+# letting brew's "Don't run as root" abort show up as a confused install
+# failure. Apply only to the macos path since Linux installs frequently
+# run via sudo legitimately.
+if [ "$PP_OS" = "macos" ] && [ "$(id -u)" = "0" ]; then
+  err "running as root on macOS — Homebrew refuses root."
+  err "Re-run without sudo: ./bin/install.sh"
+  audit_log "root-on-macos" "id -u returned 0" 1 "brew won't run as root"
+  exit 1
+fi
+
+# R2 fix (DevOps M2): non-TTY stdin without --yes is the curl-pipe footgun.
+# read returns EOF immediately, ans="" defaults to Y in every prompt → full
+# silent auto-install. Detect and require --yes for this mode.
+if ! [ -t 0 ] && [ "$PP_YES" != "1" ]; then
+  err "Non-interactive stdin detected without --yes."
+  err "If you piped this installer (curl | bash) or ran it under CI without a TTY,"
+  err "you must pass --yes explicitly to auto-accept prompts:"
+  err "  ./bin/install.sh --yes"
+  audit_log "non-tty-without-yes" "isatty(0)=0 PP_YES=0" 1 "refused to auto-accept silently"
+  exit 1
+fi
+
+# Helper: detect whether the current OS matches one of the listed family
+# names via ID or ID_LIKE. ID_LIKE is space-separated per the os-release spec.
+# Used to route Debian/Ubuntu derivatives (Pop, Mint, Kali, Zorin, Elementary,
+# Raspbian, etc.) to the apt-family branch even if ID isn't recognized.
+_pp_os_in_family() {
+  local target_family="$1"
+  case " $target_family " in
+    *" $PP_OS "*) return 0 ;;
+  esac
+  for like in $PP_OS_LIKE; do
+    case " $target_family " in
+      *" $like "*) return 0 ;;
+    esac
+  done
+  return 1
+}
 
 # Pick the LLM install command per OS + PEP 668 status.
 # Each branch is explicit so the user sees what we're about to do.
+#
+# R2 fixes:
+# - macOS no longer dispatches `brew install llm` (formula doesn't exist in
+#   Homebrew core — Code-reviewer H3, DevOps M5). Now: brew install pipx +
+#   pipx install llm.
+# - Alpine package is `py3-pipx`, not `pipx` (DevOps H1).
+# - ID_LIKE is now consulted via _pp_os_in_family so derivatives route correctly
+#   (Code-reviewer M3, GPT MEDIUM).
 PIP_INSTALL_LLM=""
-case "$PP_OS" in
-  macos)
-    # Homebrew is the canonical macOS path. brew has an llm formula.
-    if command -v brew >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="brew install llm"
-    elif command -v pipx >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
-    elif command -v pip3 >/dev/null 2>&1; then
-      # macOS system python doesn't enforce PEP 668, so --user works.
-      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+if _pp_os_in_family "macos"; then
+  # Homebrew core has no `llm` formula. Use pipx (via brew install pipx if
+  # missing). Falls back to pip3 --user only if both brew AND pipx are absent.
+  if command -v pipx >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+  elif command -v brew >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="brew install pipx && pipx install 'llm>=0.20,<1.0'"
+  elif command -v pip3 >/dev/null 2>&1; then
+    # Last-resort on macOS without brew or pipx. PEP 668 is not enforced
+    # by the macOS system python (/usr/bin/python3 from CLT) so --user works.
+    PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+  fi
+elif _pp_os_in_family "ubuntu debian linuxmint pop kali zorin elementary raspbian neon"; then
+  if command -v pipx >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+  elif [ "$PP_PEP668" = "1" ]; then
+    PIP_INSTALL_LLM="sudo apt-get update && sudo apt-get install -y pipx && pipx install 'llm>=0.20,<1.0'"
+  elif command -v pip3 >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+  fi
+elif _pp_os_in_family "fedora rhel centos rocky almalinux"; then
+  if command -v pipx >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+  elif command -v dnf >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="sudo dnf install -y pipx && pipx install 'llm>=0.20,<1.0'"
+  elif command -v pip3 >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+  fi
+elif _pp_os_in_family "arch manjaro"; then
+  if command -v pipx >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+  elif command -v pacman >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="sudo pacman -S --noconfirm python-pipx && pipx install 'llm>=0.20,<1.0'"
+  fi
+elif _pp_os_in_family "alpine"; then
+  if command -v pipx >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+  elif command -v apk >/dev/null 2>&1; then
+    # Alpine community repo package name is py3-pipx, not pipx (R2 DevOps H1).
+    # Also: Alpine Docker has no sudo. Try without sudo if we're root.
+    if [ "$(id -u)" = "0" ]; then
+      PIP_INSTALL_LLM="apk add --no-cache py3-pipx && pipx install 'llm>=0.20,<1.0'"
+    else
+      PIP_INSTALL_LLM="sudo apk add --no-cache py3-pipx && pipx install 'llm>=0.20,<1.0'"
     fi
-    ;;
-  ubuntu|debian|linuxmint|pop)
-    # PEP 668 is enforced on Ubuntu 23.04+, Debian 12+, Mint 22+, Pop_OS 24+.
-    # pipx is the official recommended path. apt-get install pipx is one
-    # command; then pipx install llm. Otherwise fall back to pip3 --user
-    # with --break-system-packages where PEP 668 applies (we surface this
-    # decision rather than papering over it).
-    if command -v pipx >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
-    elif [ "$PP_PEP668" = "1" ]; then
-      # No pipx and PEP 668 enforced. Best path: install pipx via apt, then
-      # use it. Falls through to apt-get if user consents.
-      PIP_INSTALL_LLM="sudo apt-get update && sudo apt-get install -y pipx && pipx ensurepath && pipx install 'llm>=0.20,<1.0'"
-    elif command -v pip3 >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
-    fi
-    ;;
-  fedora|rhel|centos|rocky|almalinux)
-    if command -v pipx >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
-    elif command -v dnf >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="sudo dnf install -y pipx && pipx install 'llm>=0.20,<1.0'"
-    elif command -v pip3 >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
-    fi
-    ;;
-  arch|manjaro)
-    if command -v pipx >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
-    elif command -v pacman >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="sudo pacman -S --noconfirm python-pipx && pipx install 'llm>=0.20,<1.0'"
-    fi
-    ;;
-  alpine)
-    if command -v pipx >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
-    elif command -v apk >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="sudo apk add --no-cache pipx && pipx install 'llm>=0.20,<1.0'"
-    fi
-    ;;
-  *)
-    # Unknown OS — best-effort cascade.
-    if command -v pipx >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
-    elif command -v brew >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="brew install llm"
-    elif command -v pip3 >/dev/null 2>&1; then
-      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
-    fi
-    ;;
-esac
+  fi
+else
+  # Unknown OS — best-effort cascade.
+  if command -v pipx >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+  elif command -v pip3 >/dev/null 2>&1; then
+    PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+  fi
+fi
 
 check_or_install jq "$PKG_INSTALL_JQ"
 check_or_install llm "$PIP_INSTALL_LLM"
+
+# R2 fix (Code-reviewer M1 + DevOps H2): pipx installs llm to ~/.local/bin
+# but doesn't update the current shell's PATH. Without this, the immediately-
+# following `command -v llm` check fails and the user sees "install succeeded
+# → install failed" two lines apart. Prepend now; pipx ensurepath will make
+# it permanent across shell sessions.
+case "$PIP_INSTALL_LLM" in
+  *pipx*)
+    case ":$PATH:" in
+      *":$HOME/.local/bin:"*) ;;
+      *) export PATH="$HOME/.local/bin:$PATH" ;;
+    esac
+    # pipx ensurepath edits shell rc files so the path persists across
+    # sessions. Run it now (idempotent if already done).
+    if command -v pipx >/dev/null 2>&1 && [ "$PP_DRY_RUN" != "1" ]; then
+      pipx ensurepath >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
 
 # pip --user installs to ~/.local/bin (Linux) or ~/Library/Python/.../bin (macOS),
 # which may not be on PATH. Verify llm is now invocable; print PATH hint if not.

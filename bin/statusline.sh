@@ -4,6 +4,14 @@
 # Designed for refreshInterval: 2 in settings.json.
 # Spec: ~/.claude/specs/2026-05-11-claude-code-statusline-design.md
 
+# Locale: force byte-oriented C locale for awk/sort/grep throughout this
+# file. de_DE.UTF-8 etc. cause awk's printf "%d" of a float to mis-parse
+# (e.g. "0.05" -> 0 if comma is the decimal separator). The shell harness
+# round of the Ralph loop caught this exact pattern in lib/metrics.sh
+# (PR #10 R2) — applying the same defense to the core.
+LC_ALL=C
+export LC_ALL
+
 # Pair Polymath — load config + libs
 _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -252,7 +260,10 @@ fi
 if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
   repo_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
   if [ -n "$repo_root" ]; then
-    cache_key=$(echo "$repo_root" | shasum | cut -d' ' -f1)
+    # Ubuntu ships sha1sum, not shasum. Without a fallback, this line
+    # silently produced an empty cache_key on Linux → every repo on the
+    # box shared one cache file at /tmp/cc-pr-.cache (Ralph round 2 BUG 2).
+    cache_key=$(echo "$repo_root" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -d' ' -f1)
     cache_file="/tmp/cc-pr-${cache_key}.cache"
     if [ ! -f "$cache_file" ] || [ $(($(date +%s) - $(stat -f %m "$cache_file" 2>/dev/null || echo 0))) -gt 600 ]; then
       ( cd "$repo_root" && gh pr list --json number 2>/dev/null | jq -r 'length' > "$cache_file" 2>/dev/null ) &
@@ -298,7 +309,12 @@ fi
 
 # === Line 2: LLM-analyzed HN digests (refreshed every 30min in background) ===
 TIP_CACHE="${HOME}/.claude/cache/cc-tips.txt"
-TIP_LOCK="/tmp/cc-tips-fetch-${session_id}.lock"
+# TIP_LOCK was previously keyed per-session, but TIP_CACHE is a single global
+# file — so two Claude Code windows with different session_ids both passed
+# the lock check independently and raced the cache write. The second writer's
+# `mv` silently clobbered the first (Ralph round 2 BUG 4). Now: lock scope
+# matches cache scope (global).
+TIP_LOCK="/tmp/cc-tips-fetch.lock"
 mkdir -p "${HOME}/.claude/cache" 2>/dev/null
 
 cache_age=$(($(date +%s) - $(stat -f %m "$TIP_CACHE" 2>/dev/null || echo 0)))
@@ -431,7 +447,13 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       _pp_cycle_cleanup() {
         metrics_flush_cycle "$session_id" 2>/dev/null
         rmdir "$PP_LOCK" 2>/dev/null || rm -rf "$PP_LOCK" 2>/dev/null
-        rmdir "${PP_BUDGET_FILE}.lock" 2>/dev/null
+        # NOTE: the cycle subshell holds the budget lock only transiently
+        # inside budget_reserve / budget_inc (released before those functions
+        # return). When this trap fires, the subshell is NOT holding the
+        # budget lock — so rmdir-ing it here releases a lock that may be
+        # currently held by a concurrent statusline invocation's budget call,
+        # corrupting its atomicity. (Ralph round 2 H3.) Do nothing with the
+        # budget lock here; lib/budget.sh manages its own lifecycle.
       }
       trap _pp_cycle_cleanup EXIT
       trap '_pp_cycle_cleanup; exit 130' INT
@@ -483,7 +505,8 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
           && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
         repo_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
         if [ -n "$repo_root" ]; then
-          repo_key=$(echo "$repo_root" | shasum 2>/dev/null | cut -d' ' -f1 | head -c 12)
+          # Same shasum-vs-sha1sum portability fallback as line ~255.
+          repo_key=$(echo "$repo_root" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -d' ' -f1 | head -c 12)
 
           # PR list — fire-and-forget refresh, read latest cached
           pr_cache="${HOME}/.claude/cache/cc-pr-detail-${repo_key}.cache"
@@ -527,9 +550,18 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       # fan-out so an exhausted budget skips everything.
       # FIX (review C1): reserve WORST-CASE 23 calls (base 9 + 7 retries + 7 escalation invs)
       # so the daily cap can't be bypassed by drop storms. Excess unused calls aren't refunded.
+      #
+      # GATE on `llm` availability (Ralph round 2 BUG 5 — caught by all 3
+      # reviewers). If llm is missing, every downstream LLM call short-
+      # circuits, but the 23 calls stay reserved permanently — at 5-minute
+      # cycles that's 288 × 23 = 6624 phantom calls/day, eating the entire
+      # PP_MAX_DAILY_CALLS=3500 cap before noon for users who never made an
+      # actual API call. Skip the reservation entirely in that case.
       can_run=0
-      if budget_reserve 23; then
-        can_run=1
+      if command -v llm >/dev/null 2>&1; then
+        if budget_reserve 23; then
+          can_run=1
+        fi
       fi
 
       # Initialize per-cycle USD telemetry tmp file (P3.1). Counts each LLM
@@ -670,6 +702,7 @@ GROUND
         # === PARALLEL N-AGENT FAN-OUT ===
         # Run all loaded lenses in parallel subshells. Each writes to its own cache.
         # Lens metadata comes from $PP_LENS_IDS/HATS/FOCUS (loaded from lenses/*.json).
+        _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"
           lens_hats="${PP_LENS_HATS[$lens_idx]}"
@@ -761,7 +794,12 @@ $lens_evidence"
             # Validate + write per-lens cache
             if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
               if echo "$lens_suggestion" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
-                echo "$lens_suggestion" > "$PP_CACHE_LENS"
+                # Atomic write: tmp+mv so the display path's `head -1` can't
+                # catch a half-written line (Ralph round 2 BUG 3 + Code-rev M2).
+                # Inconsistent with the rest of the file — TIP_CACHE and PR/CI
+                # caches already use this pattern at lines ~343, ~495, ~506.
+                printf '%s\n' "$lens_suggestion" > "${PP_CACHE_LENS}.tmp" 2>/dev/null \
+                  && mv "${PP_CACHE_LENS}.tmp" "$PP_CACHE_LENS" 2>/dev/null
                 # Append to histories (session + project) — appends are atomic on POSIX
                 echo "$lens_suggestion" >> "$HIST_FILE_SESSION"
                 echo "$lens_suggestion" >> "$HIST_FILE_PROJECT"
@@ -770,8 +808,16 @@ $lens_evidence"
             fi
             # SILENT → don't overwrite (keep previous valid observation)
           ) &
+          _pp_analyst_pids+=("$!")
         done
-        wait  # all PP_LENS_COUNT analysts to complete
+        # Wait ONLY on the analysts — bare `wait` would also reap the
+        # fire-and-forget gh PR/CI background jobs spawned at lines ~258,
+        # ~495, ~506, which can hang ~30s on slow network and hold the
+        # cycle lock blocking subsequent cycles (Ralph round 2 BUG 1 +
+        # Code-rev L1).
+        for _pp_apid in "${_pp_analyst_pids[@]}"; do
+          wait "$_pp_apid" 2>/dev/null
+        done
 
         # === SELF-CRITIQUE PASS (gpt-5, ~$0.025/call) ===
         # Reviews all lens observations against grounded facts; drops weak/hallucinated/redundant ones.
@@ -842,7 +888,12 @@ $critique_input"
                   # Validate and accept the retry (loosened body min to 40 for retries)
                   if [ -n "$retry_result" ] && [ "$retry_result" != "SILENT" ] \
                       && echo "$retry_result" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
-                    echo "$retry_result" > "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
+                    # Atomic write — matches the primary path's pattern
+                    # (Ralph round 2 BUG 3). Display reads via `head -1`
+                    # can't race a half-written torn line.
+                    _pp_retry_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
+                    printf '%s\n' "$retry_result" > "${_pp_retry_cache}.tmp" 2>/dev/null \
+                      && mv "${_pp_retry_cache}.tmp" "$_pp_retry_cache" 2>/dev/null
                     echo "${verdict} (retry accepted)" > "$verdict_file"
                   fi
                 elif echo "$verdict" | grep -Eqi '\bPASS\b'; then

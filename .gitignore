@@ -1,0 +1,19 @@
+# Cache + runtime state
+cache/
+*.log
+*.bak
+*.bak.*
+
+# Local config overrides
+.env.local
+.env
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~

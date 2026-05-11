@@ -1,0 +1,8 @@
+{
+  "session_id": "smoke-test-session",
+  "workspace": {"current_dir": "/tmp"},
+  "model": {"display_name": "Sonnet 4.6"},
+  "transcript_path": "/tmp/nonexistent-transcript.jsonl",
+  "cost": {"total_cost_usd": 0.0},
+  "exceeds_200k_tokens": false
+}

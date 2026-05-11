@@ -604,6 +604,129 @@ HELP
     fi
     ;;
 
+  cost)
+    shift
+    _pp_cost_since="7d"
+    _pp_cost_by_lens=0
+    _pp_cost_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --since)
+          [ -n "${2:-}" ] || { printf 'polymath cost: --since requires a value (e.g. 7d, 30d, 1d)\n' >&2; exit 2; }
+          _pp_cost_since="$2"
+          shift 2
+          ;;
+        --by-lens) _pp_cost_by_lens=1; shift ;;
+        --json) _pp_cost_json=1; shift ;;
+        -h|--help)
+          cat <<HELP
+polymath cost — show estimated USD spend from metrics.jsonl
+
+Usage:
+  polymath cost                       Last 7d, table by day
+  polymath cost --since 30d           Last 30 days
+  polymath cost --by-lens             Breakdown by call type
+  polymath cost --json                Raw JSONL for piping to jq
+
+Note: figures are ESTIMATES based on static avg-token assumptions and per-million
+pricing in lib/metrics.sh. Real spend may vary 20-50%. v0.3 plans real --usage
+parsing.
+HELP
+          exit 0
+          ;;
+        *) printf 'polymath cost: unknown flag %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+
+    # Validate --since (Nd format)
+    case "$_pp_cost_since" in
+      *d) : ;;
+      *) printf 'polymath cost: --since must be like 7d, 30d (got %s)\n' "$_pp_cost_since" >&2; exit 2 ;;
+    esac
+    _pp_cost_days="${_pp_cost_since%d}"
+    case "$_pp_cost_days" in
+      ''|*[!0-9]*) printf 'polymath cost: --since days must be numeric (got %s)\n' "$_pp_cost_since" >&2; exit 2 ;;
+    esac
+    [ "$_pp_cost_days" -lt 1 ] && { printf 'polymath cost: --since must be >= 1d (got %s)\n' "$_pp_cost_since" >&2; exit 2; }
+
+    _pp_metrics_file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/metrics.jsonl"
+    if [ ! -s "$_pp_metrics_file" ]; then
+      printf 'polymath cost: no metrics yet (run a session to produce them).\n'
+      exit 0
+    fi
+
+    # Compute cutoff timestamp (UTC) for "since N days". BSD date uses -v -Nd;
+    # GNU date uses -d "-N days". Probe by trying BSD form first (macOS).
+    if date -u -v "-${_pp_cost_days}d" '+%Y-%m-%dT%H:%M:%SZ' >/dev/null 2>&1; then
+      _pp_cost_cutoff=$(date -u -v "-${_pp_cost_days}d" '+%Y-%m-%dT%H:%M:%SZ')
+    else
+      _pp_cost_cutoff=$(date -u -d "-${_pp_cost_days} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+    fi
+    if [ -z "$_pp_cost_cutoff" ]; then
+      printf 'polymath cost: could not compute cutoff date for --since %s\n' "$_pp_cost_since" >&2
+      exit 1
+    fi
+
+    if [ "$_pp_cost_json" = "1" ]; then
+      # Raw JSONL filtered by cutoff
+      jq -c --arg cutoff "$_pp_cost_cutoff" 'select(.ts >= $cutoff)' "$_pp_metrics_file"
+      exit 0
+    fi
+
+    if [ "$_pp_cost_by_lens" = "1" ]; then
+      printf '\nCost by call type (last %s):\n' "$_pp_cost_since"
+      _pp_cost_bytype=$(jq -s --arg cutoff "$_pp_cost_cutoff" '
+        map(select(.ts >= $cutoff))
+        | map(.by_type) | add // {}
+        | to_entries | sort_by(-.value)
+      ' "$_pp_metrics_file" 2>/dev/null)
+      if [ -z "$_pp_cost_bytype" ] || [ "$_pp_cost_bytype" = "[]" ]; then
+        printf '  (no data in window)\n\n'
+        exit 0
+      fi
+      printf '%s' "$_pp_cost_bytype" \
+        | jq -r '.[] | "  " + .key + ": " + (.value | tostring) + " calls"'
+      printf '\n'
+      exit 0
+    fi
+
+    # Default: table by day with date / cycles / calls / USD columns.
+    _pp_cost_rows=$(jq -rs --arg cutoff "$_pp_cost_cutoff" '
+      map(select(.ts >= $cutoff))
+      | group_by(.ts[0:10])
+      | map({
+          date: .[0].ts[0:10],
+          cycles: length,
+          calls: (map(.calls) | add // 0),
+          usd: (map(.usd_est) | add // 0)
+        })
+      | sort_by(.date)
+      | .[]
+      | [.date, (.cycles|tostring), (.calls|tostring), (.usd|.*100|round/100|tostring)]
+      | @tsv
+    ' "$_pp_metrics_file" 2>/dev/null)
+
+    if [ -z "$_pp_cost_rows" ]; then
+      printf '\nNo cycles in last %s.\n\n' "$_pp_cost_since"
+      exit 0
+    fi
+
+    _pp_cost_totals=$(jq -rs --arg cutoff "$_pp_cost_cutoff" '
+      map(select(.ts >= $cutoff))
+      | {cycles: length, calls: (map(.calls) | add // 0), usd: (map(.usd_est) | add // 0)}
+      | [(.cycles|tostring), (.calls|tostring), (.usd|.*100|round/100|tostring)]
+      | @tsv
+    ' "$_pp_metrics_file" 2>/dev/null)
+
+    printf '\n'
+    printf '%-12s  %7s  %7s  %10s\n' 'Date' 'Cycles' 'Calls' 'USD (est)'
+    printf -- '─────────────────────────────────────────\n'
+    printf '%s\n' "$_pp_cost_rows" | awk -F'\t' '{printf "%-12s  %7s  %7s  $%9s\n", $1, $2, $3, $4}'
+    printf -- '─────────────────────────────────────────\n'
+    printf '%s\n' "$_pp_cost_totals" | awk -F'\t' '{printf "%-12s  %7s  %7s  $%9s\n", "Total", $1, $2, $3}'
+    printf '\n'
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
@@ -614,11 +737,12 @@ Usage:
   polymath enable      Enable the LLM lens cycle (set PP_EXTERNAL_LLM=1)
   polymath disable     Disable the LLM cycle / status-only mode (PP_EXTERNAL_LLM=0)
   polymath logs        Tail recent lens observations (-n, --lens, --follow)
+  polymath cost        Show estimated USD spend (--since, --by-lens, --json)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)
   polymath version     Print version
   polymath help        This message
 
-v0.2 will add: cost, self-test
+v0.2 will add: self-test
 EOF
     ;;
 

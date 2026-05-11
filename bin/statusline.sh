@@ -16,6 +16,8 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/grounding.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/prompt-loader.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/metrics.sh"
 
 # Load lens registry from lenses/*.json (built-in + user overrides).
 # Populates PP_LENS_{COUNT,IDS,HATS,FOCUS,COLOR,ENABLED}.
@@ -513,6 +515,10 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
         can_run=1
       fi
 
+      # Initialize per-cycle USD telemetry tmp file (P3.1). Counts each LLM
+      # call by type + model; rolled up at end of cycle into metrics.jsonl.
+      metrics_init "$session_id"
+
       if [ "$can_run" -eq 1 ]; then
       # === Stage 1: PLANNER (gpt-5-mini) — picks a file to read ===
       planner_input=$(cat <<PLAN
@@ -537,7 +543,10 @@ PLAN
       if command -v llm >/dev/null 2>&1; then
         planner_prompt=$(pp_render_prompt planner)
         candidate_file=""
-        [ -n "$planner_prompt" ] && candidate_file=$(printf "%s" "$planner_input" | run_llm 30 -m gpt-5-mini -s "$planner_prompt" 2>/dev/null | head -1 | tr -d "\"'" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ -n "$planner_prompt" ]; then
+          metrics_increment_call planner gpt-5-mini
+          candidate_file=$(printf "%s" "$planner_input" | run_llm 30 -m gpt-5-mini -s "$planner_prompt" 2>/dev/null | head -1 | tr -d "\"'" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        fi
       fi
 
       # Read the chosen file (validated, 5KB cap)
@@ -663,7 +672,10 @@ GROUND
             if [ "$is_escalated" -eq 1 ]; then
               inv_sys=$(pp_render_prompt escalation-investigation)
               inv_output=""
-              [ -n "$inv_sys" ] && inv_output=$(printf "%s" "$grounded" | run_llm 25 -m gpt-5-mini -s "$inv_sys" 2>/dev/null)
+              if [ -n "$inv_sys" ]; then
+                metrics_increment_call inv gpt-5-mini
+                inv_output=$(printf "%s" "$grounded" | run_llm 25 -m gpt-5-mini -s "$inv_sys" 2>/dev/null)
+              fi
               # Note: counted under worst-case-23 reservation at cycle start.
 
               if [ -n "$inv_output" ]; then
@@ -705,7 +717,10 @@ $lens_evidence"
 
             analyst_prompt=$(pp_render_prompt analyst-primary)
             lens_suggestion=""
-            [ -n "$analyst_prompt" ] && lens_suggestion=$(printf "%s" "$lens_grounded" | run_llm 60 -m "$agent_model" -s "$analyst_prompt" 2>/dev/null)
+            if [ -n "$analyst_prompt" ]; then
+              metrics_increment_call analyst "$agent_model"
+              lens_suggestion=$(printf "%s" "$lens_grounded" | run_llm 60 -m "$agent_model" -s "$analyst_prompt" 2>/dev/null)
+            fi
 
             # Validate + write per-lens cache
             if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
@@ -745,7 +760,10 @@ ${grounded:0:3000}
 OBSERVATIONS TO JUDGE:
 $critique_input"
           critique_output=""
-          [ -n "$critique_sys" ] && critique_output=$(printf "%s" "$critique_data" | run_llm 30 -m "$PP_MODEL_CRITIQUE" -s "$critique_sys" 2>/dev/null)
+          if [ -n "$critique_sys" ]; then
+            metrics_increment_call critique "$PP_MODEL_CRITIQUE"
+            critique_output=$(printf "%s" "$critique_data" | run_llm 30 -m "$PP_MODEL_CRITIQUE" -s "$critique_sys" 2>/dev/null)
+          fi
           # Note: counted under worst-case-23 reservation at cycle start.
 
           # Apply verdicts + 1-retry auto-correction loop + streak tracking for escalation
@@ -779,7 +797,10 @@ $critique_input"
                   retry_sys=$(pp_render_prompt analyst-retry)
 
                   retry_result=""
-                  [ -n "$retry_sys" ] && retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
+                  if [ -n "$retry_sys" ]; then
+                    metrics_increment_call retry "$PP_MODEL"
+                    retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
+                  fi
                   # Note: counted under worst-case-23 reservation at cycle start.
 
                   # Validate and accept the retry (loosened body min to 40 for retries)
@@ -803,6 +824,11 @@ $critique_input"
         tail -100 "$HIST_FILE_PROJECT" > "${HIST_FILE_PROJECT}.tmp" 2>/dev/null && mv "${HIST_FILE_PROJECT}.tmp" "$HIST_FILE_PROJECT"
       fi  # grounded && llm available
       fi  # can_run — gates BOTH planner and analyst fan-out
+
+      # Roll up the per-cycle call log into one metrics.jsonl entry.
+      # No-op if metrics_init wasn't called or no calls were made.
+      metrics_flush_cycle "$session_id"
+
       rmdir "$PP_LOCK" 2>/dev/null || rm -rf "$PP_LOCK" 2>/dev/null
     ) >/dev/null 2>&1 &
   fi

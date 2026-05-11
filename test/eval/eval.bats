@@ -118,11 +118,16 @@ EOF
     PP_EVAL_MODE=1 PP_EXTERNAL_LLM=0 PP_PARALLEL_INTERVAL_S=1 PP_IDLE_THRESHOLD_S=999999 \
     bash -c "bash '$REPO_ROOT/bin/statusline.sh' < '$sandbox/input.json'"
   [ "$status" -eq 0 ]
-  # Read PP_LENS_COUNT from the lens loader rather than hardcoding 7. The
-  # default registry can grow/shrink and the test should follow (R1
-  # code-reviewer / GPT M3).
-  expected_count=$(PP_ROOT="$REPO_ROOT" bash -c ". '$REPO_ROOT/lib/lens-loader.sh' && pp_load_lenses >/dev/null 2>&1 && echo \$PP_LENS_COUNT")
+  # Read the expected lens count from the registry directly (count .json
+  # files in lenses/). Sourcing lib/lens-loader.sh inside `bash -c` was
+  # fragile cross-platform — set -u + PP_ROOT scoping made $PP_LENS_COUNT
+  # empty on Ubuntu bash 5 even when statusline.sh's own copy worked
+  # fine. Counting files is a more direct surrogate for the same value.
+  expected_count=$(find "$REPO_ROOT/lenses" -maxdepth 1 -name "*.json" -type f 2>/dev/null | wc -l | tr -d ' ')
   line_count=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
+  if [ "$line_count" -ne "$expected_count" ]; then
+    printf 'line_count=%s expected_count=%s output:\n%s\n' "$line_count" "$expected_count" "$output" >&2
+  fi
   [ "$line_count" -eq "$expected_count" ]
   # Every line matches the LENS_ID|||...|||...|||... shape
   printf '%s\n' "$output" | grep -Eq '^[A-Z_]+\|\|\|'

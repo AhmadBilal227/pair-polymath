@@ -260,7 +260,7 @@ Dependencies: `jq`, `llm` (≥0.20). Optional: `gh` for richer git grounding, `g
 
 ## What's coming in v0.3
 
-Shipped in v0.2 (see [CHANGELOG.md](CHANGELOG.md)): full subcommand suite (`doctor`, `cost`, `disable`, `enable`, `logs`, `update`, `self-test`), USD telemetry → `metrics.jsonl`, verifiable privacy log, `--dry-run` / `--yes` / `--no-sudo` installer + audit log, full `docs/` tree, branch-protected β workflow.
+Shipped in v0.2 (see [CHANGELOG.md](CHANGELOG.md)): subcommands `cost`, `disable`, `enable`, `logs`, `update`, `self-test` (`doctor` shipped in v0.1.0-alpha); USD telemetry → `metrics.jsonl`; verifiable privacy log; `--dry-run` / `--yes` / `--no-sudo` installer + audit log; full `docs/` tree; branch-protected β workflow.
 
 Still deferred to v0.3:
 - `NO_COLOR` / `--no-color` across all printers (issue #11)

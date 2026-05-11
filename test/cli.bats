@@ -481,6 +481,100 @@ SH
   ! [[ "$output" == *"Fetching from origin"* ]]
 }
 
+# === Round-3 regressions ===
+
+# Regression for review fix F7' (round 3): the round-1 mtime fix used a
+# BSD-first / GNU-fallback chain. On GNU/Linux `stat -f %m FILE` does NOT
+# fail — it returns the MOUNT POINT string, which `date -r FILE` then
+# accepts as a filename. Result: every log entry's timestamp silently
+# resolved to the mount point's mtime. Format-valid but value-wrong, so the
+# F7 format-only test still passed. This test asserts VALUE correctness:
+# two files with different mtimes must produce two different output stamps
+# (they would be identical — mount point mtime — under the broken chain).
+@test "polymath logs: timestamp matches file mtime, not mount point (F7' round-3)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  f1="$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  f2="$PP_CACHE_DIR/cc-monitor-test-session-SECURITY.txt"
+  printf 'X: hook|||body-eng\n' > "$f1"
+  # Sleep long enough that the mtimes are guaranteed-different at HH:MM:SS
+  # resolution, and that the LS ordering is stable on both BSD and ext4.
+  sleep 2
+  printf 'Y: hook|||body-sec\n' > "$f2"
+  run bash "$PP_ROOT/bin/polymath" logs -n 2
+  [ "$status" -eq 0 ]
+  # Extract each entry's "YYYY-MM-DD HH:MM:SS" stamp (first two whitespace-
+  # separated fields of the line that contains the lens id).
+  ts_eng=$(echo "$output" | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}.*ENGINEERING' | awk '{print $1, $2}')
+  ts_sec=$(echo "$output" | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}.*SECURITY' | awk '{print $1, $2}')
+  [ -n "$ts_eng" ]
+  [ -n "$ts_sec" ]
+  # If both came from the mount point (bug), these would be identical.
+  [ "$ts_eng" != "$ts_sec" ]
+}
+
+# Companion to F7' — keep the original format assertion, but also confirm
+# we never fall back to the '?' sentinel.
+@test "polymath logs: timestamp is YYYY-MM-DD HH:MM:SS not '?' (F7' format)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  printf 'X: hook|||body\n' > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  run bash "$PP_ROOT/bin/polymath" logs
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}'
+  ! echo "$output" | grep -q '^?'
+}
+
+# Regression for review fix G3 (round 3): --follow with --lens must follow
+# only that lens's specific cache file, and refuse gracefully if that file
+# doesn't yet exist.
+@test "polymath logs --follow --lens: gracefully reports missing lens cache (G3)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  # Seed an unrelated lens so the session-sniff path succeeds, but the
+  # requested lens cache file doesn't exist.
+  printf 'X: hook|||body\n' > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  run bash "$PP_ROOT/bin/polymath" logs --follow --lens NOPE
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no cache file yet"* ]]
+  [[ "$output" == *"NOPE"* ]]
+}
+
+# Regression for review fix G4 (round 3): --lens filter must apply BEFORE
+# head -n, otherwise --lens X -n N can return zero when X's files aren't
+# in the newest N. Stage cache files so the lens-of-interest is the OLDEST,
+# then assert it still surfaces.
+@test "polymath logs --lens X -n N: filter applied before head (G4)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  # ENGINEERING is the OLDEST file in the cache.
+  printf 'A: hook-eng|||body-eng\n' \
+    > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  sleep 1
+  # Add 10 newer files for OTHER lenses.
+  for lens in B C D E F G H I J K; do
+    printf 'X: hook-%s|||body-%s\n' "$lens" "$lens" \
+      > "$PP_CACHE_DIR/cc-monitor-test-session-$lens.txt"
+    # Small delay to keep ls -t ordering deterministic across filesystems.
+    sleep 0.05
+  done
+  # Pre-fix: head -n 5 picks B..F, --lens ENGINEERING filter → 0 results.
+  # Post-fix: --lens ENGINEERING filter → 1 file, head -n 5 → 1 file.
+  run bash "$PP_ROOT/bin/polymath" logs --lens ENGINEERING -n 5
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"body-eng"* ]]
+  [[ "$output" == *"ENGINEERING"* ]]
+  ! [[ "$output" == *"body-B"* ]]
+}
+
 # Regression for review fix F9: non-interactive stdin without --yes must
 # refuse, not silently default to Y.
 @test "polymath update: non-interactive stdin without --yes refuses (F9)" {

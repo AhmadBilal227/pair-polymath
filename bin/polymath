@@ -10,6 +10,20 @@ PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/budget.sh"
 
+# Detect GNU vs BSD stat ONCE, upfront (review fix F7').
+# Round-1 F7 used a fallback chain `stat -f %m FILE || stat -c %Y FILE`. The
+# problem: on GNU/Linux `stat -f %m FILE` does NOT fail — `-f` means
+# "filesystem mode" and `%m` is the mount point string (e.g. `/`). That
+# string then went to `date -r STRING` which GNU's `date -r FILE` happily
+# accepts as a filename, yielding the MOUNT POINT'S mtime as every log
+# entry's timestamp. Format-valid but value-wrong; tests that asserted only
+# format passed. Explicit detection avoids the trap.
+if stat --version 2>/dev/null | grep -qE 'GNU|coreutils'; then
+  _PP_STAT_FLAVOR=gnu
+else
+  _PP_STAT_FLAVOR=bsd
+fi
+
 # _pp_set_user_env_var KEY VALUE
 # Atomically set KEY=VALUE in $CLAUDE_DIR/pair-polymath/config/user.env,
 # preserving every other line. Symlink-aware (writes through to the link
@@ -213,21 +227,28 @@ HELP
       exit 0
     fi
 
-    # Review fix F7: portable file-mtime → human timestamp.
-    # macOS BSD `date -r FILE` interprets the arg as epoch seconds (not a
-    # filename), so the prior chained fallback silently produced `?` on Macs.
-    # Try BSD stat first (-f %m → epoch), then GNU stat (-c %Y → epoch),
-    # formatting each with its native `date` flag.
+    # Review fix F7' (round 3): explicit flavor-driven mtime resolution. The
+    # round-1 fallback chain `stat -f %m FILE || stat -c %Y FILE` silently
+    # produced WRONG values on GNU/Linux because `stat -f %m FILE` doesn't
+    # fail there — `-f` means "filesystem mode" and `%m` returns the mount
+    # point string, which GNU `date -r FILE` then happily treats as a
+    # filename. _PP_STAT_FLAVOR is detected once upfront (top of file).
     _pp_logs_get_mtime() {
       local f="$1"
-      local secs out
-      if secs=$(stat -f %m "$f" 2>/dev/null) && [ -n "$secs" ]; then
-        out=$(date -r "$secs" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
-      fi
-      if secs=$(stat -c %Y "$f" 2>/dev/null) && [ -n "$secs" ]; then
-        out=$(date -d "@$secs" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
-      fi
-      printf '?'
+      local secs
+      case "$_PP_STAT_FLAVOR" in
+        gnu)
+          secs=$(stat -c %Y "$f" 2>/dev/null) || { printf '?'; return; }
+          date -d "@$secs" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '?'
+          ;;
+        bsd)
+          secs=$(stat -f %m "$f" 2>/dev/null) || { printf '?'; return; }
+          date -r "$secs" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '?'
+          ;;
+        *)
+          printf '?'
+          ;;
+      esac
     }
 
     _pp_logs_print_one() {
@@ -236,8 +257,9 @@ HELP
       local lens_id
       # Review fix F2: previous `([A-Z_]+)` rejected lens IDs with digits or
       # lowercase (LENS1, engineering_v2). Broaden to [A-Za-z0-9_]+.
+      # Round-3 G4: --lens filtering moved OUT of this function and into the
+      # file-list build step, so head -n no longer drops lens-matching files.
       lens_id=$(printf '%s' "$file" | sed -nE 's@.*-([A-Za-z0-9_]+)\.txt$@\1@p')
-      [ -n "$_pp_logs_lens" ] && [ "$lens_id" != "$_pp_logs_lens" ] && return 0
       local raw
       raw=$(head -1 "$file" 2>/dev/null)
       [ -z "$raw" ] && return 0
@@ -262,6 +284,21 @@ HELP
     }
 
     if [ "$_pp_logs_follow" = "1" ]; then
+      # Review fix G3 (round 3): --follow was previously tailing the newest
+      # single cache file regardless of --lens, diverging from non-follow
+      # mode's filter behavior. When --lens is set, tail ONLY that lens's
+      # specific cache file. Refuse gracefully if no file yet exists.
+      if [ -n "$_pp_logs_lens" ]; then
+        target="$_pp_cache_dir/cc-monitor-$_pp_logs_session-$_pp_logs_lens.txt"
+        if [ ! -f "$target" ]; then
+          printf 'polymath logs --follow: no cache file yet for lens %s (session %s)\n' \
+            "$_pp_logs_lens" "$_pp_logs_session"
+          exit 0
+        fi
+        printf '--follow on lens %s (Ctrl-C to exit)\n\n' "$_pp_logs_lens"
+        tail -F "$target" 2>/dev/null
+        exit 0
+      fi
       printf 'polymath logs --follow: waiting for new observations (Ctrl-C to exit)\n\n'
       # tail -F the most recent cc-monitor file for this session (newest only —
       # following all 7 simultaneously is more complex; v0.3 may improve).
@@ -277,18 +314,39 @@ HELP
       exit 0
     fi
 
-    # Default mode: collect, sort by mtime desc, print top N (filtered if --lens).
-    # Review fix F5: post-filter -verdict.txt / -streak.txt sidecars — the glob
-    # matches them but they have a different content shape and would render as
-    # garbled "observations".
+    # Default mode: collect candidate files, filter --lens FIRST, then head -n.
+    # Review fix G4 (round 3): previously `head -n` ran BEFORE the --lens
+    # filter, so `polymath logs --lens X -n N` could yield zero results if
+    # X's cache files weren't among the newest N. Now filter then head.
+    # Review fix F5: also strip -verdict.txt / -streak.txt sidecars — the
+    # glob matches them but they have different content shape and would
+    # render as garbled "observations".
     _pp_logs_tmp=$(mktemp)
     # shellcheck disable=SC2010
     ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null \
       | grep -v -- '-verdict\.txt$' \
       | grep -v -- '-streak\.txt$' \
-      | head -"$_pp_logs_n" > "$_pp_logs_tmp"
+      > "$_pp_logs_tmp"
+
+    # Pre-filter by --lens before applying head -n (G4).
+    if [ -n "$_pp_logs_lens" ]; then
+      _pp_logs_tmp2=$(mktemp)
+      grep -F -- "-$_pp_logs_lens.txt" < "$_pp_logs_tmp" > "$_pp_logs_tmp2" || true
+      mv "$_pp_logs_tmp2" "$_pp_logs_tmp"
+    fi
+
+    # Now cap to -n.
+    _pp_logs_tmp3=$(mktemp)
+    head -n "$_pp_logs_n" < "$_pp_logs_tmp" > "$_pp_logs_tmp3"
+    mv "$_pp_logs_tmp3" "$_pp_logs_tmp"
+
     if [ ! -s "$_pp_logs_tmp" ]; then
-      printf 'polymath logs: no observations for session %s yet\n' "$_pp_logs_session"
+      if [ -n "$_pp_logs_lens" ]; then
+        printf 'polymath logs: no observations for lens %s in session %s\n' \
+          "$_pp_logs_lens" "$_pp_logs_session"
+      else
+        printf 'polymath logs: no observations for session %s yet\n' "$_pp_logs_session"
+      fi
       rm -f "$_pp_logs_tmp"
       exit 0
     fi

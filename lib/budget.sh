@@ -23,7 +23,7 @@ _pp_budget_acquire() {
   local attempts=0
   while ! mkdir "$PP_BUDGET_LOCK" 2>/dev/null; do
     attempts=$((attempts + 1))
-    [ "$attempts" -gt 50 ] && return 1
+    [ "$attempts" -gt 250 ] && return 1
     sleep 0.02 2>/dev/null || sleep 1
   done
   return 0

@@ -5,16 +5,28 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug! Please run `bash bin/polymath doctor` first and paste the output — it captures the env state we need to triage.
+        Thanks for reporting a bug! If `polymath doctor` runs on your machine, paste its output below — it captures everything we need to triage in one shot. If `polymath` itself won't run (install/bootstrap bug), skip that field and use the "Bootstrap failure" section instead.
   - type: textarea
     id: doctor
     attributes:
       label: Output of `polymath doctor`
-      description: Paste the full output here. The doctor reports OS, bash version, dep versions, and config-wiring state.
+      description: Run `bash bin/polymath doctor` and paste the full output. Skip if doctor itself crashes — fill the "Bootstrap failure" field below.
       placeholder: "Pair Polymath doctor..."
       render: text
     validations:
-      required: true
+      required: false
+  - type: textarea
+    id: bootstrap
+    attributes:
+      label: Bootstrap failure (only if `polymath doctor` won't run)
+      description: |
+        Paste the relevant output. Examples we need:
+        - `bash --version` and `command -v jq llm git`
+        - The exact error from `bash bin/polymath ...` or `./bin/install.sh`
+        - Last 20 lines of `~/.claude/pair-polymath/install.log` if present
+      render: text
+    validations:
+      required: false
   - type: textarea
     id: what-happened
     attributes:

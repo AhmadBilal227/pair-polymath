@@ -59,14 +59,18 @@ Body lines wrap at ~72 chars. Reference issues with `Refs #N` or `Fixes #N`.
 Significant changes get an external LLM code review before merge:
 
 ```bash
-git show <SHA> | llm -t review-code -m gpt-5.5
+git show <SHA> | llm -t review-code -m gpt-5
+# or whatever frontier model your llm CLI has access to:
+git show <SHA> | llm -t review-code         # uses your llm default
 ```
 
-This is a documented norm, not a CI gate. The author runs it for every milestone. PR reviewers SHOULD do this for any change touching `lib/`, `bin/`, or workflow files.
+The maintainer uses `gpt-5.5` (where available) for higher-severity findings; `gpt-5` and `gpt-4o` produce comparable signal for most refactors. This is a documented norm, not a CI gate. PR reviewers SHOULD do this for any change touching `lib/`, `bin/`, hooks, or workflow files.
+
+The `llm` CLI is by Simon Willison (`pip3 install --user llm`). See `llm models` for what your install has.
 
 ## Reporting bugs
 
-Use the issue templates at `.github/ISSUE_TEMPLATE/`. The bug template requires `polymath doctor` output — paste it; we'll need it.
+Use the issue templates at `.github/ISSUE_TEMPLATE/`. The bug template prefers `polymath doctor` output, but has a separate "Bootstrap failure" path for cases where `polymath` itself won't run (install / bash version / missing-dep bugs).
 
 ## Releasing (maintainers only)
 

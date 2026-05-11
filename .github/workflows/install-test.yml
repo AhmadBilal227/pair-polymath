@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Force a clean baseline (review fix H1+M1)
         # ubuntu-latest ships with jq pre-installed; if we leave it in place,

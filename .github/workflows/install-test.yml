@@ -1,0 +1,124 @@
+name: install-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Permissions: this workflow only reads the repo and writes to a temp HOME.
+# No deploy / no secret access. If you add OpenAI-key-bearing tests, gate them
+# behind `if: github.actor == github.repository_owner` and put the key in a
+# secret.
+permissions:
+  contents: read
+
+jobs:
+  # End-to-end install on a clean Ubuntu runner. Verifies the installer can
+  # actually install missing deps via sudo apt-get + pip3 --user, merge
+  # settings.json, and produce a doctor-passable state — none of which is
+  # exercised by the macOS dev loop.
+  install-clean-ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show baseline (no jq, no llm expected pre-install)
+        run: |
+          set -euo pipefail
+          echo "bash: $(bash --version | head -1)"
+          echo "jq pre-install: $(command -v jq || echo absent)"
+          echo "llm pre-install: $(command -v llm || echo absent)"
+          test ! -e "$HOME/.claude" || (echo "$HOME/.claude unexpectedly exists" && exit 1)
+
+      - name: Install bats (test harness only — not exercised by installer)
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Run installer non-interactively
+        # The installer prompts in this order on a clean Ubuntu:
+        #   1. Claude dir doesn't exist → "Create it? [Y/n]"    → Y
+        #   2. jq not found            → "Install via 'sudo apt-get install -y jq'? [Y/n]" → Y
+        #   3. llm not found           → "Install via 'pip3 install --user llm>=0.20,<1.0'? [Y/n]" → Y
+        #   4. OpenAI key prompt       → (blank line = skip)
+        # `printf` feeds answers on stdin; the installer's `stty -echo || true`
+        # makes the no-echo branch a no-op in non-TTY CI.
+        run: |
+          set -euo pipefail
+          printf 'Y\nY\nY\n\n' | bash ./bin/install.sh
+          # Make pip3 --user binary visible to subsequent steps
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate ~/.claude/settings.json structure
+        run: |
+          set -euo pipefail
+          test -f "$HOME/.claude/settings.json"
+          jq empty "$HOME/.claude/settings.json"
+          # statusLine points at OUR script (strict path match — same logic as doctor)
+          jq -e '.statusLine.command | test("bin/statusline\\.sh")' "$HOME/.claude/settings.json" >/dev/null
+          # Both hooks installed
+          jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(test("hooks/inject-monitor-insight\\.sh"))' "$HOME/.claude/settings.json" >/dev/null
+          jq -e '[.hooks.PostToolUse[]?.hooks[]?.command]      | any(test("hooks/cache-test-result\\.sh"))'      "$HOME/.claude/settings.json" >/dev/null
+
+      - name: Validate user override dir + permissions
+        run: |
+          set -euo pipefail
+          test -d "$HOME/.claude/pair-polymath/lenses"
+          test -d "$HOME/.claude/pair-polymath/prompts"
+          test -d "$HOME/.claude/pair-polymath/cache"
+          test -d "$HOME/.claude/pair-polymath/config"
+          test -f "$HOME/.claude/pair-polymath/config/user.env"
+          # 0700 enforced by installer (chmod 700 || true). On filesystems
+          # that drop the chmod (rare), we still expect at least no group/other
+          # write bits — accept tighter modes too.
+          mode=$(stat -c '%a' "$HOME/.claude/pair-polymath")
+          case "$mode" in 700|0700|750|550|500) : ;; *) echo "unexpected mode $mode"; exit 1 ;; esac
+
+      - name: Run polymath doctor (non-network)
+        # Doctor will report:
+        #   - openai key MISSING → red (we skipped the prompt intentionally)
+        # which means the overall status is BROKEN, exit 1. That's expected for
+        # CI without secrets. We assert it ran + emitted the expected sections.
+        run: |
+          set -uo pipefail
+          out=$(bash ./bin/polymath doctor 2>&1) || true
+          echo "$out"
+          echo "$out" | grep -q 'Pair Polymath doctor'
+          echo "$out" | grep -q 'jq'
+          echo "$out" | grep -q 'lenses'
+          echo "$out" | grep -q '6/6 built-in present'
+          echo "$out" | grep -q 'Summary:'
+          # Verify strict-path-match found OUR paths (not a substring decoy)
+          echo "$out" | grep -E 'statusLine wired.*(→|\\$PP_ROOT)' >/dev/null \
+            || (echo "doctor did not detect our statusLine" && exit 1)
+          echo "$out" | grep 'hooks wired.*UserPromptSubmit \+ PostToolUse' >/dev/null \
+            || (echo "doctor did not detect our hooks" && exit 1)
+
+      - name: Run bats suite on Ubuntu
+        # The macOS dev loop runs bash 3.2; CI runs bash 5.x. Catches features
+        # that work on one and not the other.
+        run: bats test/
+
+      - name: Smoke statusline against fixture
+        run: |
+          set -euo pipefail
+          cat test/fixtures/stdin-sample.json | bash bin/statusline.sh > /tmp/sl.out 2> /tmp/sl.err
+          test -s /tmp/sl.out
+          # Exit 0 implicit (set -e); also check no stderr noise
+          if [ -s /tmp/sl.err ]; then
+            echo "unexpected stderr:"
+            cat /tmp/sl.err
+            exit 1
+          fi
+
+      - name: Run uninstaller and verify clean state
+        run: |
+          set -euo pipefail
+          # 'n' to the "remove user dir + cache?" prompt — keep cache/config
+          printf 'n\n' | bash ./bin/uninstall.sh
+          # Our statusLine + hooks should be gone
+          jq -e '.statusLine == null' "$HOME/.claude/settings.json" >/dev/null
+          jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(test("inject-monitor-insight")) | not' "$HOME/.claude/settings.json" >/dev/null
+          jq -e '[.hooks.PostToolUse[]?.hooks[]?.command]      | any(test("cache-test-result"))      | not' "$HOME/.claude/settings.json" >/dev/null
+          # User dir should still be there since we answered 'n'
+          test -d "$HOME/.claude/pair-polymath"

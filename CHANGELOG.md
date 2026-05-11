@@ -3,9 +3,16 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0-alpha] — 2026-05-11
 
-### Added
+First tagged release. Private repo only at `github.com/AhmadBilal227/pair-polymath`. Architecture covers lean v1 (M1–M6) plus v0.2 Phase 1 (`polymath doctor`, Docker-Linux installer CI). 66 bats tests across 8 suites.
+
+### Added (Phase 1 of v0.2)
+- `polymath doctor` subcommand — 12 strict health checks (bash version, jq, llm, openai key, settings.json validity, statusLine wired, hooks wired, cache writable, budget tracker, lens registry, prompts, statusline smoke) + optional `--network` probe (~$0.0001 to verify live OpenAI reach). Path matching is strict-realpath, not substring.
+- `polymath enable` / `polymath disable` subcommands — atomic toggle of `PP_EXTERNAL_LLM` in `user.env` with symlink-aware, cross-filesystem-safe writes and data-loss guards on grep errors.
+- `.github/workflows/install-test.yml` — clean Ubuntu installer round-trip CI: removes pre-installed jq, runs installer non-interactively, asserts strict-path matches in `settings.json`, runs `polymath doctor`, runs the bats suite on bash 5, smoke-tests `statusline.sh`, exercises uninstaller.
+
+### Added (Lean v1)
 - M1: Initial repo skeleton extracted from `~/.claude/` (statusline + 2 hooks)
 - M2-lean: `config/default.env`, `lib/config.sh`, `lib/budget.sh`, 3 bats suites, shellcheck + bats CI
 - M3: lens metadata externalized to `lenses/*.json` (7 files), `lib/lens-loader.sh`, `lib/grounding.sh` (containment + grep validators)

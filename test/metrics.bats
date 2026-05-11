@@ -266,3 +266,96 @@ teardown() {
   run jq -r '.calls' < "$PP_METRICS_FILE"
   [ "$output" = "10" ]
 }
+
+# === Round-3 review fixes ===
+
+@test "R3-PR10-3: jq failure preserves tmp for next-init recovery" {
+  # Shadow jq with a function that always fails. metrics_flush_cycle should
+  # NOT delete PP_METRICS_TMP — the next metrics_init must recover it.
+  metrics_init "s1"
+  metrics_increment_call planner gpt-5-mini
+  local tmp_path="$PP_METRICS_TMP"
+  [ -s "$tmp_path" ]
+
+  # Force jq to fail by overriding it in this shell. Subshells inherit
+  # functions via `export -f` (or sourcing) — but since metrics_flush_cycle
+  # is itself a function called in this shell, it sees our jq override.
+  jq() { return 1; }
+  export -f jq 2>/dev/null || true
+
+  run metrics_flush_cycle "s1"
+  [ "$status" -ne 0 ]
+
+  # tmp must survive
+  [ -s "$tmp_path" ]
+  # metrics.jsonl must NOT contain a corrupt entry
+  if [ -f "$PP_METRICS_FILE" ]; then
+    local lines
+    lines=$(wc -l < "$PP_METRICS_FILE" | tr -d ' ')
+    [ "$lines" -eq 0 ]
+  fi
+
+  # Recover: clear the jq override and re-init. metrics_init sees the
+  # leftover tmp and flushes it before truncating.
+  unset -f jq
+  metrics_init "s1"
+  [ -f "$PP_METRICS_FILE" ]
+  local post
+  post=$(wc -l < "$PP_METRICS_FILE" | tr -d ' ')
+  [ "$post" -eq 1 ]
+}
+
+@test "R3-PR10-4: concurrent metrics_flush_cycle produces atomic JSONL" {
+  # 10 parallel cycles writing to the same metrics.jsonl. Without the
+  # append lock, `cat >> "$PP_METRICS_FILE"` calls can interleave and
+  # produce partial / corrupted lines. With the lock, every line must
+  # parse as JSON and we must see exactly 10 lines.
+  local sub_root="$PP_TEST_HOME/r3-parallel"
+  mkdir -p "$sub_root"
+  export PP_CACHE_DIR="$sub_root"
+  export PP_METRICS_FILE="$PP_CACHE_DIR/metrics.jsonl"
+  export PP_METRICS_TMP_PREFIX="$PP_CACHE_DIR/metrics-tmp"
+  export PP_METRICS_LOCK="${PP_METRICS_FILE}.lock"
+  export PP_METRICS_WARN_LOG="$PP_CACHE_DIR/metrics-warnings.log"
+  mkdir -p "$PP_CACHE_DIR"
+
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    (
+      . "$PP_ROOT/lib/metrics.sh"
+      metrics_init "session-$i"
+      metrics_increment_call planner gpt-5-mini
+      metrics_increment_call analyst gpt-5-mini
+      metrics_flush_cycle "session-$i"
+    ) &
+  done
+  wait
+
+  [ -s "$PP_METRICS_FILE" ]
+  local lines
+  lines=$(wc -l < "$PP_METRICS_FILE" | tr -d ' ')
+  [ "$lines" -eq 10 ]
+  # Every line must parse as JSON
+  run jq -c . < "$PP_METRICS_FILE"
+  [ "$status" -eq 0 ]
+}
+
+@test "R3-PR10-6: unknown-model warnings persist to warnings log" {
+  metrics_init "s1"
+  metrics_increment_call planner gpt-4o-mini
+  metrics_flush_cycle "s1"
+  [ -s "$PP_METRICS_WARN_LOG" ]
+  run cat "$PP_METRICS_WARN_LOG"
+  [[ "$output" == *"gpt-4o-mini"* ]]
+  [[ "$output" == *"unknown model"* ]]
+}
+
+@test "R3-PR10-6: same unknown model warns only once per cache dir" {
+  metrics_init "s1"
+  metrics_increment_call planner gpt-4o
+  metrics_increment_call analyst gpt-4o
+  metrics_increment_call critique gpt-4o
+  metrics_flush_cycle "s1"
+  local count
+  count=$(grep -c "gpt-4o" "$PP_METRICS_WARN_LOG")
+  [ "$count" -eq 1 ]
+}

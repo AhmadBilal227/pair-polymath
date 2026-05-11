@@ -415,17 +415,28 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
   if [ "$acquired" = "1" ]; then
     echo "$(date +%s)" > "$PP_LAST_PARALLEL"
     (
-      # Single trap covering metrics flush + the cycle lock (now a dir) +
+      # Split traps covering metrics flush + the cycle lock (now a dir) +
       # the unified budget lock. Order matters: flush metrics BEFORE
       # releasing the cycle lock so a SIGTERM can't orphan the tmp file
       # OR lose the cost data (review fix R2-M1). metrics_flush_cycle is
       # idempotent on missing tmp, so a clean exit running through here
       # AND through the explicit call at end-of-subshell is safe.
-      trap '
+      #
+      # Round-3 fix R3-PR10-2: previous design used a single trap for
+      # EXIT INT TERM HUP — but on INT/TERM/HUP the trap body runs cleanup
+      # and the subshell KEEPS GOING with locks already released, racing
+      # any next cycle that re-acquires them. Now we cleanup-then-exit
+      # 128+N (bash convention) on each kill signal. EXIT still cleans up
+      # only since EXIT already implies exit.
+      _pp_cycle_cleanup() {
         metrics_flush_cycle "$session_id" 2>/dev/null
         rmdir "$PP_LOCK" 2>/dev/null || rm -rf "$PP_LOCK" 2>/dev/null
         rmdir "${PP_BUDGET_FILE}.lock" 2>/dev/null
-      ' EXIT INT TERM HUP
+      }
+      trap _pp_cycle_cleanup EXIT
+      trap '_pp_cycle_cleanup; exit 130' INT
+      trap '_pp_cycle_cleanup; exit 143' TERM
+      trap '_pp_cycle_cleanup; exit 129' HUP
 
       # === Pre-flight: gather grounded facts (shared by all 5 agents) ===
       activity_tail=$(tail -c 5000 "$transcript_path" 2>/dev/null)

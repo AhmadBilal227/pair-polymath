@@ -703,6 +703,13 @@ HELP
       printf '%s' "$_pp_cost_bytype" \
         | jq -r '.[] | "  " + .key + ": " + (.calls | tostring) + " calls / $" + ((.usd * 10000 | round) / 10000 | tostring)'
       printf '\n'
+      # Round-3 fix R3-PR10-6: surface unknown-model warnings.
+      _pp_warn_file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/metrics-warnings.log"
+      if [ -s "$_pp_warn_file" ]; then
+        printf '\033[33m⚠\033[0m  Unknown models seen — figures may underestimate spend:\n'
+        awk -F'\t' 'NR<=5 {print "  " $0}' "$_pp_warn_file"
+        printf '  See: %s\n\n' "$_pp_warn_file"
+      fi
       exit 0
     fi
 
@@ -744,6 +751,13 @@ HELP
     printf -- '─────────────────────────────────────────\n'
     printf '%s\n' "$_pp_cost_totals" | awk -F'\t' '{printf "%-12s  %7s  %7s  $%8s\n", "Total", $1, $2, $3}'
     printf '\n'
+    # Round-3 fix R3-PR10-6: surface unknown-model warnings.
+    _pp_warn_file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/metrics-warnings.log"
+    if [ -s "$_pp_warn_file" ]; then
+      printf '\033[33m⚠\033[0m  Unknown models seen — figures may underestimate spend:\n'
+      awk -F'\t' 'NR<=5 {print "  " $0}' "$_pp_warn_file"
+      printf '  See: %s\n\n' "$_pp_warn_file"
+    fi
     ;;
 
   help|-h|--help|"")

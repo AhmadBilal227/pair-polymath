@@ -1079,3 +1079,40 @@ EOF
   # And the table must NOT show $0 as the only USD value (pre-fix bug)
   [[ "$output" != *"\$        0 "* ]]
 }
+
+@test "R3-PR10-6: polymath cost surfaces unknown-model warnings (default table)" {
+  # When metrics-warnings.log exists and is non-empty, the table view
+  # should append a yellow warning block listing the first few unknown
+  # models with the path to the log file.
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":1,"usd_est":0,"by_type":{"planner":1},"by_type_usd":{"planner":0}}
+EOF
+  printf '%s\tunknown model gpt-4o-mini — billing as $0; configure via user.env\n' \
+    "$today_iso" > "$PP_CACHE_DIR/metrics-warnings.log"
+  run bash "$PP_ROOT/bin/polymath" cost
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Unknown models seen"* ]]
+  [[ "$output" == *"gpt-4o-mini"* ]]
+}
+
+@test "R3-PR10-6: polymath cost --by-lens surfaces unknown-model warnings" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local today_iso
+  today_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  cat > "$PP_CACHE_DIR/metrics.jsonl" <<EOF
+{"ts":"$today_iso","session":"a","calls":1,"usd_est":0,"by_type":{"planner":1},"by_type_usd":{"planner":0}}
+EOF
+  printf '%s\tunknown model claude-3.5-sonnet — billing as $0; configure via user.env\n' \
+    "$today_iso" > "$PP_CACHE_DIR/metrics-warnings.log"
+  run bash "$PP_ROOT/bin/polymath" cost --by-lens
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Unknown models seen"* ]]
+  [[ "$output" == *"claude-3.5-sonnet"* ]]
+}

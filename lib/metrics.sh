@@ -39,6 +39,16 @@ PP_AVG_TOK_RETRY_OUT="${PP_AVG_TOK_RETRY_OUT:-180}"
 PP_CACHE_DIR="${PP_CACHE_DIR:-${HOME}/.claude/cache}"
 PP_METRICS_FILE="${PP_CACHE_DIR}/metrics.jsonl"
 PP_METRICS_TMP_PREFIX="${PP_CACHE_DIR}/metrics-tmp"
+# Round-3 fix R3-PR10-4: serialize appends to metrics.jsonl. Two parallel
+# cycles writing to the same file via `cat >>` can interleave bytes
+# mid-line and corrupt JSONL. Mirror the mkdir-lock pattern from
+# lib/budget.sh.
+PP_METRICS_LOCK="${PP_METRICS_FILE}.lock"
+# Round-3 fix R3-PR10-6: unknown-model warnings used to go to stderr,
+# which in the cycle subshell is redirected to /dev/null — the user
+# never saw them. We persist warnings to a log file so `polymath cost`
+# can surface them in its output.
+PP_METRICS_WARN_LOG="${PP_CACHE_DIR}/metrics-warnings.log"
 
 # _pp_awk — wrapper that pins locale to C so awk's printf formats numbers
 # with `.` decimals regardless of the user's LC_NUMERIC / LC_ALL settings
@@ -46,6 +56,26 @@ PP_METRICS_TMP_PREFIX="${PP_CACHE_DIR}/metrics-tmp"
 # output meant to be parsed downstream by jq, bash arithmetic, etc.
 _pp_awk() {
   LC_ALL=C awk "$@"
+}
+
+# _pp_metrics_acquire / _pp_metrics_release — atomic append lock for
+# metrics.jsonl (review fix R3-PR10-4). mkdir is atomic on every POSIX
+# filesystem; sleep 0.02 × 250 attempts ≈ 5s timeout. Pattern matches
+# lib/budget.sh's _pp_budget_acquire — single shared helper would be
+# nice but would create a sourcing dependency we don't want here.
+_pp_metrics_acquire() {
+  mkdir -p "$(dirname "$PP_METRICS_LOCK")" 2>/dev/null || true
+  local attempts=0
+  while ! mkdir "$PP_METRICS_LOCK" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -gt 250 ] && return 1
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  return 0
+}
+
+_pp_metrics_release() {
+  rmdir "$PP_METRICS_LOCK" 2>/dev/null
 }
 
 # metrics_init SESSION_ID — set up a per-cycle tmp file.
@@ -118,11 +148,20 @@ _metrics_usd_for_call() {
       # Rate-limit the warning to once per (session × model) so we don't
       # spam stderr if the same unknown model is called dozens of times
       # per cycle. The marker file is wiped when PP_CACHE_DIR is.
-      local safe_model warn_marker
+      #
+      # Round-3 fix R3-PR10-6: in addition to stderr (which the cycle
+      # subshell discards), persist the warning to PP_METRICS_WARN_LOG so
+      # `polymath cost` can surface it. A v0.3 issue is tracked for
+      # user-configurable per-model prices (R3-PR10-5).
+      local safe_model warn_marker warn_ts
       safe_model=$(printf '%s' "$model" | tr -cd 'a-zA-Z0-9._-' | cut -c1-64)
       warn_marker="${PP_CACHE_DIR}/.metrics-unknown-${safe_model}.warned"
       if [ -n "$model" ] && [ ! -f "$warn_marker" ]; then
         printf 'lib/metrics.sh: unknown model "%s" — billing as $0. Set PP_PRICE_* in user.env to track.\n' "$model" >&2
+        warn_ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+        mkdir -p "$(dirname "$PP_METRICS_WARN_LOG")" 2>/dev/null || true
+        printf '%s\tunknown model %s — billing as $0; configure via user.env\n' \
+          "$warn_ts" "$model" >> "$PP_METRICS_WARN_LOG" 2>/dev/null || true
         : > "$warn_marker" 2>/dev/null || true
       fi
       in_per_m=0; out_per_m=0
@@ -198,9 +237,16 @@ metrics_flush_cycle() {
 
   # Build the JSONL entry in a tmp file in the SAME directory, then append.
   # Same-dir mktemp keeps the rename atomic on the same filesystem.
+  #
+  # Round-3 fix R3-PR10-3: previous version removed PP_METRICS_TMP
+  # UNCONDITIONALLY after jq ran. If jq failed (OOM, missing binary,
+  # corrupted argjson) the cycle's call data was permanently lost. Now:
+  # if jq fails OR produces an empty entry, preserve PP_METRICS_TMP so
+  # the next metrics_init recovery path can retry, and return non-zero.
   local entry_tmp
   entry_tmp=$(mktemp "${PP_METRICS_FILE}.entry.XXXXXX") || {
-    rm -f "$PP_METRICS_TMP" 2>/dev/null
+    printf 'metrics_flush_cycle: mktemp failed; tmp preserved at %s for next-init recovery\n' \
+      "$PP_METRICS_TMP" >&2
     return 1
   }
   jq -cn \
@@ -212,10 +258,26 @@ metrics_flush_cycle() {
     --argjson by_type_usd "$by_type_usd" \
     '{ts:$ts, session:$sid, calls:$calls, usd_est:$usd, by_type:$by_type, by_type_usd:$by_type_usd}' \
     > "$entry_tmp" 2>/dev/null
+  local jq_rc=$?
 
-  if [ -s "$entry_tmp" ]; then
-    cat "$entry_tmp" >> "$PP_METRICS_FILE"
+  if [ "$jq_rc" -ne 0 ] || [ ! -s "$entry_tmp" ]; then
+    rm -f "$entry_tmp" 2>/dev/null
+    printf 'metrics_flush_cycle: jq build failed (rc=%d); tmp preserved at %s for next-init recovery\n' \
+      "$jq_rc" "$PP_METRICS_TMP" >&2
+    return 1
   fi
+
+  # Round-3 fix R3-PR10-4: serialize the append. Two cycles writing
+  # concurrently via `cat >>` can interleave bytes mid-line. On lock
+  # timeout, preserve tmp (don't block the cycle) and surface to stderr.
+  if ! _pp_metrics_acquire; then
+    rm -f "$entry_tmp" 2>/dev/null
+    printf 'metrics_flush_cycle: append-lock timeout; tmp preserved at %s for next-init recovery\n' \
+      "$PP_METRICS_TMP" >&2
+    return 1
+  fi
+  cat "$entry_tmp" >> "$PP_METRICS_FILE"
+  _pp_metrics_release
   rm -f "$entry_tmp" "$PP_METRICS_TMP" 2>/dev/null
   return 0
 }

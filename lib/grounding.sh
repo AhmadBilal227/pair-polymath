@@ -32,19 +32,29 @@ pp_contain_path() {
 }
 
 # pp_safe_grep_pattern PATTERN
-# Returns 0 if PATTERN is a safe LLM-supplied grep pattern.
-# Rejects: empty, length<4, length>100, pure metacharacters (., .*, ^.*$, etc.)
+# Returns 0 if PATTERN is safe to pass to `grep -E -- "$PATTERN"`.
+# Rejects: empty, length<4, length>100, leading `-` (option-injection),
+# pure metacharacters, and patterns whose alnum chars are dwarfed by metachars.
+# Callers MUST also pass the pattern after `--` to grep.
 pp_safe_grep_pattern() {
   local p="${1:-}"
   local len="${#p}"
   [ "$len" -lt 4 ] && return 1
   [ "$len" -gt 100 ] && return 1
+  # Reject leading dash so an accepted pattern can never be parsed as a grep option,
+  # even if a caller forgets the `--` separator.
+  case "$p" in
+    -*) return 1 ;;
+  esac
+  # Reject pure-metachar shapes and known-broad patterns.
   case "$p" in
     .|.*|.\*|^|\$|^.\*\$|^\.\*\$|*\*\*\*|\\*) return 1 ;;
   esac
-  # At least one alphanumeric character required.
-  case "$p" in
-    *[A-Za-z0-9]*) return 0 ;;
-    *) return 1 ;;
-  esac
+  # Require enough alphanumeric content to anchor the search (≥3 alnum chars).
+  # This rejects patterns like "^.*a.*$" where the alnum payload is just one
+  # character buried in metachars.
+  local stripped
+  stripped=$(printf '%s' "$p" | tr -cd 'A-Za-z0-9')
+  [ "${#stripped}" -lt 3 ] && return 1
+  return 0
 }

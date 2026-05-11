@@ -25,7 +25,8 @@ any_injected=0
 collected_blocks=""
 
 for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
-  mon_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${lens_idx}.txt"
+  lens_name="${LENS_NAMES[$lens_idx]}"
+  mon_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_name}.txt"
   [ ! -f "$mon_cache" ] && continue
   [ ! -s "$mon_cache" ] && continue
 
@@ -37,9 +38,10 @@ for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
   [ -z "$mon" ] && continue
   if ! echo "$mon" | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then continue; fi
 
-  # Per-lens idempotency
-  hash_file="${HOME}/.claude/cache/cc-monitor-injected-hash-${session_id}-lens${lens_idx}.txt"
-  time_file="${HOME}/.claude/cache/cc-monitor-injected-time-${session_id}-lens${lens_idx}.txt"
+  # Per-lens idempotency (keyed by lens id, not numeric index — index can shift
+  # when the user enables/disables/reorders lenses)
+  hash_file="${HOME}/.claude/cache/cc-monitor-injected-hash-${session_id}-${lens_name}.txt"
+  time_file="${HOME}/.claude/cache/cc-monitor-injected-time-${session_id}-${lens_name}.txt"
   current_hash=$(echo "$mon" | shasum 2>/dev/null | cut -d' ' -f1)
   last_hash=$(cat "$hash_file" 2>/dev/null || echo "")
   last_time=$(cat "$time_file" 2>/dev/null || echo 0)
@@ -54,7 +56,6 @@ for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
 
   topic="${mon%%|||*}"
   body="${mon#*|||}"
-  lens_name="${LENS_NAMES[$lens_idx]}"
 
   collected_blocks+="${lens_name}: ${topic}"$'\n'"  ${body}"$'\n\n'
   any_injected=1

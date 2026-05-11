@@ -638,12 +638,14 @@ GROUND
           lens_group="${PP_LENS_IDS[$lens_idx]}"
           lens_hats="${PP_LENS_HATS[$lens_idx]}"
           lens_focus="${PP_LENS_FOCUS[$lens_idx]}"
-          PP_CACHE_LENS="${PP_CACHE_DIR}/cc-monitor-${session_id}-lens${lens_idx}.txt"
+          # Cache filenames keyed by lens id (not numeric index) — survives
+          # user enabling/disabling/reordering lenses without stale-data bugs.
+          PP_CACHE_LENS="${PP_CACHE_DIR}/cc-monitor-${session_id}-${lens_group}.txt"
 
           # === Escalation check: if this lens has 3+ consecutive drops, escalate to deep mode ===
           # Deep mode = extra lens-specific evidence-gathering (mini-planner picks files + greps)
           # before main analyst runs. Resets after one PASS.
-          lens_streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${lens_idx}-streak.txt"
+          lens_streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_group}-streak.txt"
           lens_streak=$(cat "$lens_streak_file" 2>/dev/null || echo 0)
           is_escalated=0
           [ "$lens_streak" -ge 3 ] && [ "${PP_ENABLE_ESCALATION:-1}" = "1" ] && is_escalated=1
@@ -732,9 +734,12 @@ $lens_evidence"
         # FIX (advisor #1): truncate per-lens output to bound token cost on big observations.
         critique_input=""
         for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
-          cf="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}.txt"
+          ci_id="${PP_LENS_IDS[$ci]}"
+          cf="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
           if [ -f "$cf" ] && [ -s "$cf" ]; then
             obs_short=$(head -1 "$cf" | head -c 500)   # cap each lens at 500 chars
+            # Critique protocol still uses lensN: tokens (not filesystem names) so the
+            # verdict parser at the next loop can grep "^lens${ci}:" unchanged.
             critique_input="${critique_input}lens${ci}: ${obs_short}"$'\n'
           fi
         done
@@ -752,9 +757,10 @@ $critique_input"
           # Apply verdicts + 1-retry auto-correction loop + streak tracking for escalation
           if [ -n "$critique_output" ]; then
             for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
+              ci_id="${PP_LENS_IDS[$ci]}"
               verdict=$(echo "$critique_output" | grep -E "^lens${ci}:" | head -1)
-              verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}-verdict.txt"
-              streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}-streak.txt"
+              verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
+              streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-streak.txt"
               if [ -n "$verdict" ]; then
                 echo "$verdict" > "$verdict_file"
                 # FIX (review I1): DROP must be checked first (more specific) + word-boundary match
@@ -764,7 +770,7 @@ $critique_input"
                   echo $((cur_streak + 1)) > "$streak_file"
 
                   # Empty the cache (drop)
-                  : > "${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}.txt"
+                  : > "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
 
                   # === 1-RETRY AUTO-CORRECTION ===
                   # Re-run analyst with critique reason as feedback. One shot.
@@ -784,7 +790,7 @@ $critique_input"
                   # Validate and accept the retry (loosened body min to 40 for retries)
                   if [ -n "$retry_result" ] && [ "$retry_result" != "SILENT" ] \
                       && echo "$retry_result" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
-                    echo "$retry_result" > "${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}.txt"
+                    echo "$retry_result" > "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
                     echo "${verdict} (retry accepted)" > "$verdict_file"
                   fi
                 elif echo "$verdict" | grep -Eqi '\bPASS\b'; then
@@ -815,7 +821,7 @@ mon_body=""
 _pp_slot_total=$((PP_LENS_COUNT + 1))
 lens_slot=$(( ($(date +%s) / 30) % _pp_slot_total ))
 if [ "$lens_slot" -lt "$PP_LENS_COUNT" ]; then
-  PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-lens${lens_slot}.txt"
+  PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$lens_slot]}.txt"
   if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
     mon=$(head -1 "$PP_CACHE_DISPLAY")
     if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then

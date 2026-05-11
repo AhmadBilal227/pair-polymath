@@ -83,3 +83,22 @@ teardown() {
   run pp_safe_grep_pattern "$long"
   [ "$status" -ne 0 ]
 }
+
+@test "grep-safe: rejects leading dash (option injection guard)" {
+  run pp_safe_grep_pattern "-Roo"
+  [ "$status" -ne 0 ]
+  run pp_safe_grep_pattern "--include=foo"
+  [ "$status" -ne 0 ]
+}
+
+@test "grep-safe: rejects alnum dwarfed by metachars" {
+  # length>4 but only one alnum char — broad-match risk
+  run pp_safe_grep_pattern "^.*a.*\$"
+  [ "$status" -ne 0 ]
+}
+
+@test "grep-safe: accepts identifier with surrounding metachars" {
+  # 3+ alnum chars present even with regex around them
+  run pp_safe_grep_pattern "^budget_inc\\("
+  [ "$status" -eq 0 ]
+}

@@ -1,10 +1,20 @@
 #!/usr/bin/env bats
-# Lens loader: parses lenses/*.json, dedupes by id, sorts display_order.
+# Lens loader: parses lenses/*.json, dedupes by id, sorts display_order,
+# enforces hard cap, fails loud on zero loaded.
 
 setup() {
   export PP_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
+  # Hermetic: isolated HOME so dev's real ~/.claude/pair-polymath/lenses
+  # doesn't pollute the test results.
+  PP_TEST_HOME="$(mktemp -d)"
+  export HOME="$PP_TEST_HOME"
   # shellcheck disable=SC1091
   . "${PP_ROOT}/lib/lens-loader.sh"
+}
+
+teardown() {
+  rm -rf "$PP_TEST_HOME"
+  unset PP_LENS_MAX
 }
 
 @test "loader: loads all 7 built-in lenses" {
@@ -26,4 +36,66 @@ setup() {
     [ -n "${PP_LENS_FOCUS[$i]}" ]
     [ -n "${PP_LENS_COLOR[$i]}" ]
   done
+}
+
+@test "loader: user lens override replaces built-in with matching id" {
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  cat > "$HOME/.claude/pair-polymath/lenses/01-ux-design.json" <<'JSON'
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["CUSTOM_HAT"],
+  "focus": "user-override focus string",
+  "color_hex": "#ff0000",
+  "enabled": true,
+  "extras": {}
+}
+JSON
+  pp_load_lenses
+  [ "$PP_LENS_COUNT" -eq 7 ]
+  [ "${PP_LENS_IDS[0]}" = "UX_DESIGN" ]
+  [ "${PP_LENS_FOCUS[0]}" = "user-override focus string" ]
+  [ "${PP_LENS_HATS[0]}" = "CUSTOM_HAT" ]
+}
+
+@test "loader: respects PP_LENS_MAX cap (DoS guard against stuffed user dir)" {
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  for i in $(seq 1 25); do
+    cat > "$HOME/.claude/pair-polymath/lenses/$(printf 'extra-%02d' "$i").json" <<JSON
+{ "version": 1, "id": "EXTRA_$i", "display_order": $((100 + i)),
+  "hats": ["X"], "focus": "filler $i", "color_hex": "#000000", "enabled": true }
+JSON
+  done
+  export PP_LENS_MAX=10
+  pp_load_lenses 2>/dev/null
+  [ "$PP_LENS_COUNT" -eq 10 ]
+}
+
+@test "loader: zero lenses → return 1 + stderr warning" {
+  # Point PP_ROOT at an empty dir, disable user dir, and confirm loud failure
+  PP_ROOT_EMPTY="$(mktemp -d)"
+  mkdir -p "$PP_ROOT_EMPTY/lenses"
+  PP_ROOT="$PP_ROOT_EMPTY" run pp_load_lenses
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no lenses loaded"* ]]
+  rm -rf "$PP_ROOT_EMPTY"
+}
+
+@test "loader: stable tiebreak when display_order ties" {
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  # Inject 2 user lenses both with display_order=100 — verify deterministic id-ascending order
+  cat > "$HOME/.claude/pair-polymath/lenses/zz-banana.json" <<'JSON'
+{ "version": 1, "id": "ZZ_BANANA", "display_order": 100, "hats": ["X"],
+  "focus": "f", "color_hex": "#111111", "enabled": true }
+JSON
+  cat > "$HOME/.claude/pair-polymath/lenses/aa-apple.json" <<'JSON'
+{ "version": 1, "id": "AA_APPLE", "display_order": 100, "hats": ["X"],
+  "focus": "f", "color_hex": "#222222", "enabled": true }
+JSON
+  pp_load_lenses
+  # Both new lenses appear at the tail (after the 7 built-ins, all display_order 1-7).
+  # AA_APPLE sorts before ZZ_BANANA by id within the tied display_order=100.
+  [ "${PP_LENS_IDS[7]}" = "AA_APPLE" ]
+  [ "${PP_LENS_IDS[8]}" = "ZZ_BANANA" ]
 }

@@ -4,7 +4,9 @@
 #
 # Resolution: built-in lenses from $PP_ROOT/lenses/, then user lenses from
 # $HOME/.claude/pair-polymath/lenses/. User lenses with matching `id` OVERRIDE
-# built-ins. Sort order: display_order ascending.
+# built-ins. Sort order: display_order ascending, id ascending on ties.
+# Hard cap: PP_LENS_MAX (default 16) — prevents a stuffed user dir from
+# turning a statusline refresh into a parallel-LLM cost bomb.
 
 # Populates these globals:
 #   PP_LENS_COUNT       — integer
@@ -17,10 +19,10 @@
 pp_load_lenses() {
   local builtin_dir="$PP_ROOT/lenses"
   local user_dir="$HOME/.claude/pair-polymath/lenses"
+  local max="${PP_LENS_MAX:-16}"
   local tmp
   tmp=$(mktemp)
 
-  # Collect: built-ins first, then user (later wins on id)
   {
     [ -d "$builtin_dir" ] && find "$builtin_dir" -maxdepth 1 -name '*.json' -type f 2>/dev/null
     [ -d "$user_dir" ]    && find "$user_dir"    -maxdepth 1 -name '*.json' -type f 2>/dev/null
@@ -31,14 +33,14 @@ pp_load_lenses() {
     ' "$f" 2>/dev/null
   done > "$tmp"
 
-  # Dedupe by id (last entry wins — user overrides built-in)
-  # then sort by display_order
   PP_LENS_IDS=()
   PP_LENS_HATS=()
   PP_LENS_FOCUS=()
   PP_LENS_COLOR=()
   PP_LENS_ENABLED=()
 
+  # Dedupe by id (last entry wins → user overrides built-in), then sort by
+  # display_order with id as stable tiebreak.
   local awk_out
   awk_out=$(awk -F'\t' '
     {
@@ -47,20 +49,32 @@ pp_load_lenses() {
       order[id] = $1
     }
     END {
-      for (id in data) print order[id] "\t" data[id]
+      for (id in data) print order[id] "\t" id "\t" data[id]
     }
-  ' "$tmp" | sort -n | cut -f2-)
+  ' "$tmp" | sort -k1,1n -k2,2 | cut -f3-)
 
+  local loaded=0
   while IFS=$'\t' read -r order id hats focus color enabled src; do
     [ -z "$id" ] && continue
     [ "$enabled" = "false" ] && continue
+    if [ "$loaded" -ge "$max" ]; then
+      printf 'pp_load_lenses: lens cap (%s) reached; ignoring remainder\n' "$max" >&2
+      break
+    fi
     PP_LENS_IDS+=("$id")
     PP_LENS_HATS+=("$hats")
     PP_LENS_FOCUS+=("$focus")
     PP_LENS_COLOR+=("$color")
     PP_LENS_ENABLED+=("$enabled")
+    loaded=$((loaded + 1))
   done <<< "$awk_out"
 
   PP_LENS_COUNT="${#PP_LENS_IDS[@]}"
   rm -f "$tmp"
+
+  if [ "$PP_LENS_COUNT" -eq 0 ]; then
+    printf 'pp_load_lenses: no lenses loaded (checked %s and %s)\n' "$builtin_dir" "$user_dir" >&2
+    return 1
+  fi
+  return 0
 }

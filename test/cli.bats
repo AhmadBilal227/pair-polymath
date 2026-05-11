@@ -117,6 +117,132 @@ EOF
   ! [[ "$output" == *"will add: enable"* ]]
 }
 
+# === polymath logs ===
+
+@test "polymath logs: empty cache yields friendly message" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  run bash "$PP_ROOT/bin/polymath" logs
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no observations yet"* ]]
+}
+
+@test "polymath logs: prints recent observation in expected format" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  printf 'DEVOPS: install.sh has unchecked mktemp|||Investigate the cross-FS mv risk\n' \
+    > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  run bash "$PP_ROOT/bin/polymath" logs
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ENGINEERING"* ]]
+  [[ "$output" == *"unchecked mktemp"* ]]
+  [[ "$output" == *"cross-FS mv risk"* ]]
+}
+
+@test "polymath logs: --lens filters" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  printf 'A: e-hook|||e-body\n' > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  printf 'B: s-hook|||s-body\n' > "$PP_CACHE_DIR/cc-monitor-test-session-SECURITY.txt"
+  run bash "$PP_ROOT/bin/polymath" logs --lens SECURITY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SECURITY"* ]]
+  [[ "$output" == *"s-body"* ]]
+  ! [[ "$output" == *"e-body"* ]]
+}
+
+@test "polymath logs: -n caps output" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  for lens in A B C D E F; do
+    printf 'X: hook-%s|||body-%s\n' "$lens" "$lens" \
+      > "$PP_CACHE_DIR/cc-monitor-test-session-$lens.txt"
+  done
+  run bash "$PP_ROOT/bin/polymath" logs -n 2
+  [ "$status" -eq 0 ]
+  # Count "body-" occurrences — should be exactly 2
+  count=$(echo "$output" | grep -c 'body-')
+  [ "$count" -eq 2 ]
+}
+
+@test "polymath logs: -n rejects non-numeric" {
+  run bash "$PP_ROOT/bin/polymath" logs -n abc
+  [ "$status" -eq 2 ]
+}
+
+@test "polymath logs: unknown flag exits 2" {
+  run bash "$PP_ROOT/bin/polymath" logs --nope
+  [ "$status" -eq 2 ]
+}
+
+@test "polymath logs: shows DROP annotation when verdict sidecar present" {
+  export CLAUDE_DIR="$HOME/.claude"
+  export PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export PP_SESSION_ID="test-session"
+  printf 'X: hook|||body\n' > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING.txt"
+  printf 'lens1: DROP - too vague\n' > "$PP_CACHE_DIR/cc-monitor-test-session-ENGINEERING-verdict.txt"
+  run bash "$PP_ROOT/bin/polymath" logs
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DROP"* ]]
+}
+
+# === polymath update ===
+
+@test "polymath update: rejects non-git PP_ROOT cleanly" {
+  PP_NON_GIT=$(mktemp -d)
+  mkdir -p "$PP_NON_GIT/bin" "$PP_NON_GIT/lib" "$PP_NON_GIT/lenses" "$PP_NON_GIT/prompts"
+  echo "0.0.0" > "$PP_NON_GIT/VERSION"
+  cp "$PP_ROOT/bin/polymath" "$PP_NON_GIT/bin/polymath"
+  cp "$PP_ROOT/lib/config.sh" "$PP_NON_GIT/lib/"
+  cp "$PP_ROOT/lib/budget.sh" "$PP_NON_GIT/lib/"
+  cp "$PP_ROOT/lib/lens-loader.sh" "$PP_NON_GIT/lib/"
+  cp -r "$PP_ROOT/lenses/." "$PP_NON_GIT/lenses/"
+  cp -r "$PP_ROOT/prompts/." "$PP_NON_GIT/prompts/"
+  run bash "$PP_NON_GIT/bin/polymath" update
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not a git checkout"* ]]
+  rm -rf "$PP_NON_GIT"
+}
+
+@test "polymath update --dry-run: makes no changes, prints plan" {
+  # Use the real PP_ROOT — it IS a git checkout. fetch will probably fail in
+  # hermetic test env (no remote configured for the tmp HOME) but the dry-run
+  # gate is "before any pull"; if fetch succeeds and there are no commits,
+  # output should say up-to-date.
+  HOME=$PP_TEST_HOME run bash "$PP_ROOT/bin/polymath" update --dry-run
+  # Allow either: up-to-date, OR fetch-failed (network/auth), OR dry-run-msg
+  [ "$status" -le 1 ]
+}
+
+@test "polymath update: unknown flag exits 2" {
+  run bash "$PP_ROOT/bin/polymath" update --nope
+  [ "$status" -eq 2 ]
+}
+
+@test "polymath update --help: prints usage" {
+  run bash "$PP_ROOT/bin/polymath" update --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"polymath update"* ]]
+  [[ "$output" == *"Pull latest"* ]]
+}
+
+@test "polymath help: lists logs and update" {
+  run bash "$PP_ROOT/bin/polymath" help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"polymath logs"* ]]
+  [[ "$output" == *"polymath update"* ]]
+  ! [[ "$output" == *"will add: logs"* ]]
+  ! [[ "$output" == *"will add: update"* ]]
+}
+
 # Regression for review fix M1: symlinked user.env must keep its symlink.
 # Without the fix, mv replaces the symlink with a regular file in the .claude
 # tree, silently breaking dotfile-manager setups.

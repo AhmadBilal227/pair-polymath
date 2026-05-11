@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pair Polymath CLI — lean v1: status + version subcommands only.
-# v0.2 will add: doctor, cost, disable, enable, logs.
+# v0.2 will add: doctor, cost, disable, enable, logs, update, self-test.
 
 set -u
 
@@ -140,6 +140,182 @@ case "$cmd" in
     printf 'LLM cycle enabled. New cycles take effect within 5 min.\n'
     ;;
 
+  logs)
+    shift
+    _pp_logs_n=10
+    _pp_logs_lens=""
+    _pp_logs_follow=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -n) _pp_logs_n="${2:-10}"; shift 2 ;;
+        --lens) _pp_logs_lens="$2"; shift 2 ;;
+        --follow|-f) _pp_logs_follow=1; shift ;;
+        -h|--help)
+          cat <<HELP
+polymath logs — tail recent lens observations
+
+Usage:
+  polymath logs                Last 10 observations across all lenses
+  polymath logs -n 50          Last 50 observations
+  polymath logs --lens ENGINEERING
+                               Filter to one lens by id
+  polymath logs --follow       Stream new observations as cycles complete
+
+Observations live in \$CLAUDE_DIR/cache/cc-monitor-\$SESSION-\$LENS.txt
+HELP
+          exit 0
+          ;;
+        *) printf 'polymath logs: unknown flag %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+
+    # Cap -n to a sane upper bound
+    case "$_pp_logs_n" in
+      ''|*[!0-9]*) printf 'polymath logs: -n requires a positive integer\n' >&2; exit 2 ;;
+    esac
+    [ "$_pp_logs_n" -gt 200 ] && _pp_logs_n=200
+
+    _pp_cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+    [ -d "$_pp_cache_dir" ] || { printf 'polymath logs: cache dir does not exist (%s); no observations yet\n' "$_pp_cache_dir"; exit 0; }
+
+    # Determine session_id
+    _pp_logs_session="${PP_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
+    if [ -z "$_pp_logs_session" ]; then
+      _pp_logs_session=$(ls -t "$_pp_cache_dir"/cc-monitor-*-*.txt 2>/dev/null \
+        | head -1 \
+        | sed -nE 's@.*/cc-monitor-([^-]+)-.*\.txt$@\1@p')
+    fi
+    if [ -z "$_pp_logs_session" ]; then
+      printf 'polymath logs: no observations yet (run a session to produce them)\n'
+      exit 0
+    fi
+
+    _pp_logs_print_one() {
+      local file="$1"
+      [ -s "$file" ] || return 0
+      local lens_id
+      lens_id=$(printf '%s' "$file" | sed -nE 's@.*-([A-Z_]+)\.txt$@\1@p')
+      [ -n "$_pp_logs_lens" ] && [ "$lens_id" != "$_pp_logs_lens" ] && return 0
+      local raw
+      raw=$(head -1 "$file" 2>/dev/null)
+      [ -z "$raw" ] && return 0
+      # Parse "HAT: hook|||body" — hook is before |||, body after
+      local hook body
+      hook="${raw%%|||*}"
+      body="${raw#*|||}"
+      # Timestamp from file mtime (portable: stat varies macOS vs Linux)
+      local ts
+      ts=$(date -r "$file" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+        || stat -c '%y' "$file" 2>/dev/null | cut -c1-19 \
+        || echo '?')
+      printf '%s  %s\n  %s\n  %s\n' "$ts" "$lens_id" "$hook" "$body"
+      # Verdict sidecar — print only if present and contains DROP
+      local verdict_file="${file%.txt}-verdict.txt"
+      if [ -f "$verdict_file" ]; then
+        local v
+        v=$(head -1 "$verdict_file")
+        case "$v" in
+          *DROP*) printf '  [DROP: %s]\n' "$v" ;;
+        esac
+      fi
+      printf '\n'
+    }
+
+    if [ "$_pp_logs_follow" = "1" ]; then
+      printf 'polymath logs --follow: waiting for new observations (Ctrl-C to exit)\n\n'
+      # tail -F the most recent cc-monitor file for this session (newest only —
+      # following all 7 simultaneously is more complex; v0.3 may improve)
+      latest=$(ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null | head -1)
+      [ -z "$latest" ] && { printf 'no observations yet for session %s\n' "$_pp_logs_session"; exit 0; }
+      tail -F "$latest" 2>/dev/null
+      exit 0
+    fi
+
+    # Default mode: collect, sort by mtime desc, print top N (filtered if --lens)
+    _pp_logs_tmp=$(mktemp)
+    ls -t "$_pp_cache_dir"/cc-monitor-"$_pp_logs_session"-*.txt 2>/dev/null | head -"$_pp_logs_n" > "$_pp_logs_tmp"
+    if [ ! -s "$_pp_logs_tmp" ]; then
+      printf 'polymath logs: no observations for session %s yet\n' "$_pp_logs_session"
+      rm -f "$_pp_logs_tmp"
+      exit 0
+    fi
+    while IFS= read -r f; do
+      _pp_logs_print_one "$f"
+    done < "$_pp_logs_tmp"
+    rm -f "$_pp_logs_tmp"
+    ;;
+
+  update)
+    shift
+    _pp_update_yes=0
+    _pp_update_dry=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --yes|-y) _pp_update_yes=1; shift ;;
+        --dry-run) _pp_update_dry=1; shift ;;
+        -h|--help)
+          cat <<HELP
+polymath update — Pull latest + re-run installer (idempotent)
+
+Usage:
+  polymath update              Interactive: shows diff, asks confirm
+  polymath update --yes        Non-interactive: pull + re-install if any new commits
+  polymath update --dry-run    Show what would happen; make no changes
+
+Refuses on local divergence (use 'git pull --rebase' manually if needed).
+HELP
+          exit 0
+          ;;
+        *) printf 'polymath update: unknown flag %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+
+    if [ ! -d "$PP_ROOT/.git" ]; then
+      printf 'polymath update: PP_ROOT (%s) is not a git checkout — manual update needed\n' "$PP_ROOT" >&2
+      exit 1
+    fi
+
+    printf 'Fetching from origin...\n'
+    if ! git -C "$PP_ROOT" fetch origin --tags --quiet 2>&1; then
+      printf 'polymath update: git fetch failed (network? auth?)\n' >&2
+      exit 1
+    fi
+
+    _pp_update_new=$(git -C "$PP_ROOT" log --oneline HEAD..origin/main 2>/dev/null)
+    if [ -z "$_pp_update_new" ]; then
+      printf 'Already up to date.\n'
+      exit 0
+    fi
+
+    printf '\nNew commits on origin/main:\n'
+    printf '%s\n' "$_pp_update_new" | sed 's/^/  /'
+    printf '\n'
+
+    if [ "$_pp_update_dry" = "1" ]; then
+      printf '[dry-run] Would: git pull --ff-only && ./bin/install.sh\n'
+      exit 0
+    fi
+
+    if [ "$_pp_update_yes" != "1" ]; then
+      printf 'Pull and re-run installer? [Y/n] '
+      read -r _pp_update_ans
+      case "${_pp_update_ans:-Y}" in
+        [Yy]*|"") ;;
+        *) printf 'Aborted.\n'; exit 0 ;;
+      esac
+    fi
+
+    if ! git -C "$PP_ROOT" pull --ff-only origin main 2>&1; then
+      printf '\npolymath update: pull failed.\n' >&2
+      printf 'Local branch may have diverged. Inspect with: cd %s && git status\n' "$PP_ROOT" >&2
+      exit 1
+    fi
+
+    printf '\nRe-running installer (idempotent — preserves your settings.json + user.env)...\n'
+    # --yes lands in P2.3; until then this is interactive
+    bash "$PP_ROOT/bin/install.sh"
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
@@ -149,10 +325,12 @@ Usage:
   polymath doctor      Run health checks (--network for live OpenAI probe)
   polymath enable      Enable the LLM lens cycle (set PP_EXTERNAL_LLM=1)
   polymath disable     Disable the LLM cycle / status-only mode (PP_EXTERNAL_LLM=0)
+  polymath logs        Tail recent lens observations (-n, --lens, --follow)
+  polymath update      Pull latest + re-run installer (--yes, --dry-run)
   polymath version     Print version
   polymath help        This message
 
-v0.2 will add: cost, logs
+v0.2 will add: cost, self-test
 EOF
     ;;
 

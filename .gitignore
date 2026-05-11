@@ -17,3 +17,13 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# Security — never commit secrets
+*.pem
+*.key
+*.p12
+*credentials*
+*.token
+.openai.key
+.anthropic.key
+.fal.key

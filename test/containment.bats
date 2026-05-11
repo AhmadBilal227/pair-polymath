@@ -193,3 +193,165 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == "$PP_TEST_BASE"/* ]] || [[ "$output" == "$PP_TEST_BASE_REAL"/* ]]
 }
+
+# === F1: case-insensitive matching (macOS APFS case-fold friendly) ===
+
+@test "secret-file: case-insensitive — rejects .ENV, ID_RSA, Credentials.JSON, SERVER.PEM" {
+  for f in .ENV ID_RSA Credentials.JSON SERVER.PEM; do
+    run pp_is_secret_file "/x/$f"
+    [ "$status" -eq 0 ]
+  done
+}
+
+# === F2: expanded pattern list catches real-world credential filenames ===
+
+@test "secret-file: expanded patterns — service-account, kubeconfig, wp-config, *_rsa, .pgpass, *_token" {
+  for f in service-account-prod.json my.kubeconfig kubeconfig wp-config.php my_rsa my_dsa my_ed25519 .pgpass api_token build_secret my_apikey foo.private_key .git-credentials .aws_credentials; do
+    run pp_is_secret_file "/x/$f"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "secret-file: broadened *credentials* matches aws-credentials.json and gcp-credentials" {
+  for f in aws-credentials.json gcp-credentials prod-credentials.yml; do
+    run pp_is_secret_file "/x/$f"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "secret-file: broadened *secrets* matches database-secrets and prod-secrets.yml" {
+  for f in database-secrets prod-secrets.yml app-secrets.json; do
+    run pp_is_secret_file "/x/$f"
+    [ "$status" -eq 0 ]
+  done
+}
+
+# === F3: path-component (dirname) denylist ===
+
+@test "secret-file: rejects files inside secret-named directories" {
+  for p in "secrets/config.json" "private/db.yml" ".ssh/known_hosts" ".aws/config" ".credentials/token" ".keys/api" ".secrets/foo"; do
+    run pp_is_secret_file "/proj/$p"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "secret-file: dirname check is case-insensitive too" {
+  run pp_is_secret_file "/proj/SECRETS/config.json"
+  [ "$status" -eq 0 ]
+  run pp_is_secret_file "/proj/.SSH/known_hosts"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: dirname check does NOT trigger on innocuous paths" {
+  for p in "src/main.py" "lib/grounding.sh" "test/foo.bats" "docs/README.md" "app/components/Button.tsx"; do
+    run pp_is_secret_file "/proj/$p"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "secret-file: PP_SECRET_DIR_PATTERNS_EXTRA adds dirname patterns additively" {
+  PP_SECRET_DIR_PATTERNS_EXTRA="vault" run pp_is_secret_file "/proj/vault/key.txt"
+  [ "$status" -eq 0 ]
+  # Defaults still apply
+  PP_SECRET_DIR_PATTERNS_EXTRA="vault" run pp_is_secret_file "/proj/secrets/x.txt"
+  [ "$status" -eq 0 ]
+}
+
+@test "contain: rejects file inside secrets/ dir even with innocuous basename" {
+  mkdir -p "$PP_TEST_BASE/secrets"
+  echo "k" > "$PP_TEST_BASE/secrets/config.json"
+  run pp_contain_path "$PP_TEST_BASE" "secrets/config.json"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "contain: rejects file inside .ssh/ dir even with innocuous basename" {
+  mkdir -p "$PP_TEST_BASE/.ssh"
+  echo "h" > "$PP_TEST_BASE/.ssh/known_hosts"
+  run pp_contain_path "$PP_TEST_BASE" ".ssh/known_hosts"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+# === F4: symlink basename-trust — check BOTH candidate and realpath ===
+
+@test "contain: rejects symlink whose link basename matches denylist (link → innocent target)" {
+  echo "innocent" > "$PP_TEST_BASE/sub/innocent.txt"
+  ( cd "$PP_TEST_BASE/sub" && ln -sf innocent.txt id_rsa )
+  run pp_contain_path "$PP_TEST_BASE" "sub/id_rsa"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "contain: rejects symlink whose realpath basename matches denylist (innocent link → secret target)" {
+  echo "sk-fake" > "$PP_TEST_BASE/sub/aws_credentials_personal"
+  ( cd "$PP_TEST_BASE/sub" && ln -sf aws_credentials_personal notes.txt )
+  run pp_contain_path "$PP_TEST_BASE" "sub/notes.txt"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "contain: rejects innocuous symlink that resolves into a secrets/ directory" {
+  mkdir -p "$PP_TEST_BASE/secrets"
+  echo "k" > "$PP_TEST_BASE/secrets/db.conf"
+  ( cd "$PP_TEST_BASE/sub" && ln -sf ../secrets/db.conf app.config )
+  run pp_contain_path "$PP_TEST_BASE" "sub/app.config"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+# === F5: pathname-expansion immunity (set -f discipline) ===
+
+@test "secret-file: glob patterns do NOT expand against cwd files" {
+  # Create a file that would match `*.env` if globbing leaked.
+  # If `*.env` expanded to literal `prod.env`, the case statement would only
+  # match the basename "prod.env", not ".env" — which would be a regression.
+  (
+    cd "$PP_TEST_BASE/sub"
+    : > prod.env
+    : > foo.env
+    # Now from inside this cwd, .env still has to match the literal *.env pattern.
+    pp_is_secret_file ".env"
+  )
+  [ "$?" -eq 0 ]
+}
+
+@test "secret-file: glob expansion immunity also covers dirname patterns" {
+  # Create a dir named "secrets" in cwd. If dirname patterns leaked, mixing
+  # with the literal file pattern check could produce surprise matches.
+  (
+    cd "$PP_TEST_BASE/sub"
+    mkdir -p secrets
+    : > secrets/foo
+    pp_is_secret_file "/proj/private/file.txt"
+  )
+  [ "$?" -eq 0 ]
+}
+
+# === F6: empty-string escape hatch (genuine '' disables; whitespace-only warns) ===
+
+@test "secret-file: PP_SECRET_FILE_PATTERNS='' (explicit empty) disables basename check" {
+  # With basename check disabled, .env should NOT match (also not in any
+  # secret dir). Other check (dirname) still runs but matches nothing here.
+  PP_SECRET_FILE_PATTERNS="" run pp_is_secret_file "/x/.env"
+  [ "$status" -ne 0 ]
+}
+
+@test "secret-file: PP_SECRET_FILE_PATTERNS='' still allows dirname check to fire" {
+  # File inside secrets/ should STILL be rejected via dir-pattern check even
+  # when basename patterns are explicitly disabled.
+  PP_SECRET_FILE_PATTERNS="" run pp_is_secret_file "/proj/secrets/config.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: PP_SECRET_FILE_PATTERNS whitespace-only falls back to defaults with stderr warning" {
+  run bash -c '. "$0" && PP_SECRET_FILE_PATTERNS="   " pp_is_secret_file "/x/.env"' "${BATS_TEST_DIRNAME}/../lib/grounding.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: PP_SECRET_DIR_PATTERNS='' (explicit empty) disables dirname check" {
+  # With dir check disabled but basename check still on, an innocuous file
+  # inside secrets/ should now pass.
+  PP_SECRET_DIR_PATTERNS="" run pp_is_secret_file "/proj/secrets/config.json"
+  [ "$status" -ne 0 ]
+}

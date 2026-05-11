@@ -14,6 +14,8 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/lens-loader.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/grounding.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/prompt-loader.sh"
 
 # Load lens registry from lenses/*.json (built-in + user overrides).
 # Populates PP_LENS_{COUNT,IDS,HATS,FOCUS,COLOR,ENABLED}.
@@ -327,24 +329,8 @@ if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
         grep -oE '<title>[^<]+</title>' | sed 's/<\/\?title>//g' | tail -10 | head -10)
 
       if [ -n "$stories" ] && command -v llm >/dev/null 2>&1; then
-        digest=$(printf "USER PROJECT CONTEXT (from CLAUDE.md):\n%s\n\nRECENT WORK (last 5 commits):\n%s\n\nHN STORIES:\n%s\n\nARXIV PAPERS (cs.AI / cs.HC):\n%s" "$project_ctx" "$recent_commits" "$stories" "$arxiv_titles" | run_llm 40 -m gpt-5-mini -s \
-"You're a personal learning editor for a developer/founder. You see their project context, recent work, plus today's HN stories and ArXiv papers. Write exactly 5 digests that THIS USER specifically should read or apply — bias hard toward relevance to their domain.
-
-For each digest, pick the most relevant lens from the user's work domain:
-UX, VISUAL, FRONTEND, BACKEND, ARCH, SECURITY, PERF, A11Y, BIZ, MARKET, PRODUCT, FINOPS, RESEARCH
-
-Output format — one digest per line, EXACT shape:
-LENS: punchy hook|||body explaining why it matters TO THIS USER + so-what + what to learn or do
-
-Constraints:
-- LENS: uppercase, one of the above
-- Hook: ≤80 chars
-- Body: 130-200 chars; the so-what + actionable; mention the user's domain when relevant
-- Separator: exactly |||
-- No emojis, quotes, numbering, preamble, markdown
-- Skip generic content — every digest must connect to the user's actual work
-
-Output 5 lines, nothing else." 2>/dev/null)
+        tip_digest_sys=$(pp_render_prompt tip-digest)
+        digest=$(printf "USER PROJECT CONTEXT (from CLAUDE.md):\n%s\n\nRECENT WORK (last 5 commits):\n%s\n\nHN STORIES:\n%s\n\nARXIV PAPERS (cs.AI / cs.HC):\n%s" "$project_ctx" "$recent_commits" "$stories" "$arxiv_titles" | run_llm 40 -m gpt-5-mini -s "$tip_digest_sys" 2>/dev/null)
 
         if [ -n "$digest" ]; then
           echo "$digest" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*[-*0-9.)]*[[:space:]]*//' > "${TIP_CACHE}.tmp"
@@ -545,7 +531,7 @@ PLAN
 
       candidate_file=""
       if command -v llm >/dev/null 2>&1; then
-        planner_prompt="Pick ONE file path whose contents would most clarify the current activity. The path MUST appear in the GIT STATUS, RECENTLY-CHANGED FILES, CWD LISTING, or RECENT TOOL CALLS sections — never invent. Prefer source files over build artifacts. If no file would help, output NONE. Output: just the path or NONE. No quotes, no explanation."
+        planner_prompt=$(pp_render_prompt planner)
         candidate_file=$(printf "%s" "$planner_input" | run_llm 30 -m gpt-5-mini -s "$planner_prompt" 2>/dev/null | head -1 | tr -d "\"'" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       fi
 
@@ -670,7 +656,7 @@ GROUND
             # Escalation pre-investigation: run BEFORE analyst when this lens has 3+ drop streak.
             lens_evidence=""
             if [ "$is_escalated" -eq 1 ]; then
-              inv_sys="You are pre-investigating for the ${lens_group} lens focused on ${lens_focus}. Given the grounded facts below, identify (a) ONE additional file path from CWD/git status whose contents would be most revealing for this lens, OR (b) ONE grep pattern that would surface evidence specific to this lens. Output exactly two lines: FILE: <path or NONE>  and  GREP: <pattern or NONE>. No preamble."
+              inv_sys=$(pp_render_prompt escalation-investigation)
               inv_output=$(printf "%s" "$grounded" | run_llm 25 -m gpt-5-mini -s "$inv_sys" 2>/dev/null)
               # Note: counted under worst-case-23 reservation at cycle start.
 
@@ -711,7 +697,7 @@ $inv_hits"
 $lens_evidence"
             fi
 
-            analyst_prompt="You are the ${lens_group} agent in a 7-agent parallel advisory team. THIS CYCLE you specialize in ${lens_focus}. Pick a HAT from ${lens_hats}. RELEVANCE MODE: ${relevance_directive} SENIOR-ENGINEER CHALLENGE MODE: Treat the transcript like a confident junior's report. When the assistant or user claims something is 'done', 'fixed', 'working', or 'verified', do NOT take it at face value. Check the evidence (file contents, git status, test cache, CI runs). If the claim lacks supporting evidence, your observation should be: the claimed state is unverified — here's the test or check to prove it. Challenge confident-sounding statements; do not flatter the work. PRIORITY EVIDENCE: If LAST TEST/LINT RUN shows ERROR: true, prioritize that failure as the observation and cite the specific test name from OUTPUT if visible. If OPEN PRS shows a draft or failing CI for the active branch, or RECENT CI RUNS shows a failing or in-progress workflow, surface that observation specifically — it outranks abstract concerns. You are a senior technical consultant — fluent as product designer, engineer, architect, founder, and cognitive scientist — pair-programming with Claude Code. You receive GROUNDED FACTS plus PREVIOUS OBSERVATIONS and transcript tail. Surface ONE specific actionable observation that the user could be missing within YOUR domain for this cycle. FRAMEWORKS (cite by name ONLY when one clearly fits the situation — never force-fit, never use more than one per observation): Cynefin (simple/complicated/complex/chaotic categorization), Theory of Constraints (find/exploit the bottleneck), First Principles (decompose to fundamentals), Chesterton's Fence (do not remove what you do not understand), Premortem (imagine future failure, work backward), Hofstadter's Law (tasks take longer than expected), Goodhart's Law (a metric that becomes the target ceases to be useful), Conway's Law (system structure mirrors org structure), Postel's Law (be liberal in what you accept, conservative in what you emit). CRITICAL RULES: Only cite paths or symbols that appear in the provided sections. NEVER invent. When citing a function/class name in your observation, that name MUST appear in SYMBOL REFERENCE COUNTS. If it does not appear, mark with [unverified] OR pick a different observation. If FILE READ section has contents, prefer observations referencing those contents. Do NOT repeat anything in PREVIOUS OBSERVATIONS. Pick a different angle. If inferring without ground truth, tag [inferred] in the body. Skip the obvious. Look for blind spots. OUTPUT FORMAT: single line, exact shape: HAT: hook|||body where HAT is 2-12 chars uppercase, hook is 40-70 chars, body is 80-180 chars with concrete next step ending in a verb like Fix Refactor Extract Add Move Verify Cap Cite Schedule or Defer. No emojis, quotes, markdown, numbering, or preamble. If nothing notable: output SILENT."
+            analyst_prompt=$(pp_render_prompt analyst-primary)
             lens_suggestion=$(printf "%s" "$lens_grounded" | run_llm 60 -m "$agent_model" -s "$analyst_prompt" 2>/dev/null)
 
             # Validate + write per-lens cache
@@ -745,7 +731,7 @@ $lens_evidence"
         done
 
         if [ -n "$critique_input" ]; then
-          critique_sys="You are reviewing ${PP_LENS_COUNT} advisor observations against grounded facts. For EACH lens line, decide PASS or DROP. DROP if: hallucinated (cites file/symbol not in grounded facts), stale (referring to fixed issues), redundant (same angle as another lens), low-value (vague, generic, no concrete action). PASS if: specific, verifiable, actionable, technically grounded. Output format: ONE line per lens, exactly: lensN: PASS  or  lensN: DROP — REASON  (where REASON is one short phrase explaining why). No preamble."
+          critique_sys=$(pp_render_prompt critique)
           critique_data="GROUNDED FACTS:
 ${grounded:0:3000}
 
@@ -782,7 +768,7 @@ $critique_input"
                   rlens_hats="${PP_LENS_HATS[$ci]}"
                   rlens_focus="${PP_LENS_FOCUS[$ci]}"
 
-                  retry_sys="You are the ${rlens_group} lens. Your previous observation was DROPPED by the critique pass with reason: ${drop_reason}. Try a DIFFERENT angle, file, or pattern. Same constraints: pick a HAT from ${rlens_hats}, focus on ${rlens_focus}, output exactly HAT: hook|||body (hook 40-70 chars, body 80-180 chars ending in a verb). Only cite paths/symbols visible in the grounded facts. If you still cannot find a valid different observation, output SILENT."
+                  retry_sys=$(pp_render_prompt analyst-retry)
 
                   retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
                   # Note: counted under worst-case-23 reservation at cycle start.

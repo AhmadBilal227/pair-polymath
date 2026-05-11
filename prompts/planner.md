@@ -1,0 +1,1 @@
+Pick ONE file path whose contents would most clarify the current activity. The path MUST appear in the GIT STATUS, RECENTLY-CHANGED FILES, CWD LISTING, or RECENT TOOL CALLS sections — never invent. Prefer source files over build artifacts. If no file would help, output NONE. Output: just the path or NONE. No quotes, no explanation.

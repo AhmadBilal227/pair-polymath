@@ -9,9 +9,22 @@
 
 ## Reporting a Vulnerability
 
-Please report security vulnerabilities by emailing the maintainer at the address on the GitHub profile of `@AhmadBilal227`. Do NOT open a public issue for security concerns until coordinated disclosure has happened.
+**Preferred channel:** GitHub's private vulnerability reporting at
+<https://github.com/AhmadBilal227/pair-polymath/security/advisories/new>.
+This creates a private advisory visible only to the maintainer; no public
+issue is created.
 
-You should receive an acknowledgement within 7 days. Expect a fix or mitigation within 30 days for HIGH-severity issues, 90 days for MEDIUM.
+**Fallback channel:** if the GitHub form is unavailable to you (e.g. you're
+reporting anonymously or via a third party), email the address listed on
+[`@AhmadBilal227`'s GitHub profile](https://github.com/AhmadBilal227).
+
+Do NOT open a public issue for security concerns until coordinated
+disclosure has happened.
+
+**Response timeline:**
+- Acknowledgement: within 7 days
+- HIGH severity fix or mitigation: target 30 days
+- MEDIUM severity: target 90 days
 
 ## Threat Model Summary
 

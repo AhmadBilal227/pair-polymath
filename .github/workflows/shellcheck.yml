@@ -2,7 +2,8 @@ name: shellcheck
 
 on:
   push:
-    branches: [main]
+    branches-ignore: ['gh-pages']
+    tags-ignore: ['**']        # tag pushes already covered by the main commit; avoid duplicate runs
   pull_request:
     branches: [main]
 

@@ -4,13 +4,15 @@
 # Designed for refreshInterval: 2 in settings.json.
 # Spec: ~/.claude/specs/2026-05-11-claude-code-statusline-design.md
 
-# Locale: force byte-oriented C locale for awk/sort/grep throughout this
-# file. de_DE.UTF-8 etc. cause awk's printf "%d" of a float to mis-parse
-# (e.g. "0.05" -> 0 if comma is the decimal separator). The shell harness
-# round of the Ralph loop caught this exact pattern in lib/metrics.sh
-# (PR #10 R2) — applying the same defense to the core.
-LC_ALL=C
-export LC_ALL
+# Locale handling: the awk float-parse bug (de_DE.UTF-8 comma decimal) lives
+# on a small handful of specific awk calls (load_1m parsing at ~line 282).
+# Round 1 of the Ralph loop set `LC_ALL=C; export LC_ALL` file-globally, but
+# that broke the progress-bar render — BSD `tr ' ' '▰'` is single-byte under
+# C locale and emits only the first byte (0xE2) of the 3-byte U+25B0 char,
+# garbling the most prominent visual element of the status line (R2 H1 — caught
+# by code-reviewer + GPT-5.2). Scope the C-locale fix to the awk calls that
+# actually need it (inline `LC_ALL=C awk ...`) and leave the surrounding shell
+# in the user's locale so `tr`, `date`, and emoji output stay correct.
 
 # Pair Polymath — load config + libs
 _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -278,9 +280,12 @@ if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
 fi
 
 # 12. CPU load — only at critical (>5.0). Saves space; line 2 needs the room.
+# `sysctl -n vm.loadavg` outputs a float (e.g. "0.05"); under de_DE.UTF-8
+# awk's printf "%d" of a float can mis-parse comma-decimal separators.
+# LC_ALL=C is scoped to the awk that does the actual float math (R2 H1 scope).
 load_1m=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
 if [ -n "$load_1m" ]; then
-  load_int=$(awk -v l="$load_1m" 'BEGIN { printf "%d", l * 10 }')
+  load_int=$(LC_ALL=C awk -v l="$load_1m" 'BEGIN { printf "%d", l * 10 }')
   if [ "$load_int" -ge 50 ]; then
     line="${line} ${SUBTLE}cpu${R} ${SOFT_CRIMSON}${load_1m}${R}"
   fi
@@ -319,9 +324,18 @@ mkdir -p "${HOME}/.claude/cache" 2>/dev/null
 
 cache_age=$(($(date +%s) - $(stat -f %m "$TIP_CACHE" 2>/dev/null || echo 0)))
 if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
-  lock_age=$(($(date +%s) - $(stat -f %m "$TIP_LOCK" 2>/dev/null || echo 0)))
-  if [ ! -f "$TIP_LOCK" ] || [ "$lock_age" -gt 180 ]; then
-    touch "$TIP_LOCK"
+  # Atomic lock primitive (Ralph R2 H3). The previous
+  # `[ ! -f "$LOCK" ] && touch "$LOCK"` was a check-then-touch TOCTOU race —
+  # two parallel statuslines could both see absent + both touch + both spawn
+  # the background fetcher → mv-clobber on TIP_CACHE. mkdir is atomic on all
+  # POSIX filesystems; the matching pattern is already used in lib/budget.sh.
+  # Stale takeover after 180s (orphaned crash recovery).
+  TIP_LOCK_DIR="${TIP_LOCK}.d"
+  lock_age=$(($(date +%s) - $(stat -f %m "$TIP_LOCK_DIR" 2>/dev/null || echo 0)))
+  if [ "$lock_age" -gt 180 ]; then
+    rmdir "$TIP_LOCK_DIR" 2>/dev/null
+  fi
+  if mkdir "$TIP_LOCK_DIR" 2>/dev/null; then
     (
       stories=$(curl -s --max-time 8 "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=15" 2>/dev/null \
         | jq -r '.hits[] | "- \(.title)" + (if (.url // "") != "" then " — \(.url)" else "" end)' 2>/dev/null)
@@ -363,7 +377,9 @@ if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
         echo "$stories" | sed 's/^- //; s/ — http.*$//' > "${TIP_CACHE}.tmp"
         [ -s "${TIP_CACHE}.tmp" ] && mv "${TIP_CACHE}.tmp" "$TIP_CACHE"
       fi
-      rm -f "${TIP_CACHE}.tmp" "$TIP_LOCK"
+      # Clean up the .tmp + atomic lock dir (the lock is a dir now, not a file)
+      rm -f "${TIP_CACHE}.tmp"
+      rmdir "$TIP_LOCK_DIR" 2>/dev/null
     ) >/dev/null 2>&1 &
   fi
 fi
@@ -536,7 +552,10 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       [ "$cwd" != "-" ] && cwd_ls=$(ls -1 "$cwd" 2>/dev/null | head -30)
 
       # Memory: per-project (persistent) + per-session (immediate)
-      project_key=$(echo "$cwd" | shasum 2>/dev/null | cut -d' ' -f1 | head -c 12)
+      # Same shasum/sha1sum portability fallback as lines ~266 and ~509 —
+      # missed by R1 (Ralph R2 H/L2: Ubuntu has only sha1sum, would silently
+      # produce empty project_key → all projects collide on history files).
+      project_key=$(echo "$cwd" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -d' ' -f1 | head -c 12)
       HIST_FILE_PROJECT="${HOME}/.claude/cache/cc-monitor-history-project-${project_key}.txt"
       HIST_FILE_SESSION="${HOME}/.claude/cache/cc-monitor-history-${session_id}.txt"
       prev_session=$(tail -10 "$HIST_FILE_SESSION" 2>/dev/null)
@@ -863,11 +882,25 @@ $critique_input"
                   cur_streak=$(cat "$streak_file" 2>/dev/null || echo 0)
                   echo $((cur_streak + 1)) > "$streak_file"
 
-                  # Empty the cache (drop)
-                  : > "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
-
                   # === 1-RETRY AUTO-CORRECTION ===
-                  # Re-run analyst with critique reason as feedback. One shot.
+                  # Capture the prior failed output BEFORE we truncate it (the
+                  # analyst subshell already wrote it to disk; $lens_suggestion
+                  # itself isn't in scope here — it's a subshell-local variable).
+                  # R2 ai-engineer #1: the most important behavior bug R1 didn't
+                  # address — retry stdin was byte-identical to primary stdin and
+                  # the failed observation never reached the retry model, making
+                  # retry a lottery re-roll instead of corrective feedback.
+                  _pp_lens_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
+                  _pp_failed_output=""
+                  [ -f "$_pp_lens_cache" ] && _pp_failed_output=$(head -1 "$_pp_lens_cache" 2>/dev/null)
+
+                  # Atomic drop: truncate via tmp + rename so the display
+                  # reader's `head -1` can't catch the file mid-truncate
+                  # window (R2 H2 — same class R1 fixed for writes, missed
+                  # for truncates).
+                  : > "${_pp_lens_cache}.tmp" 2>/dev/null \
+                    && mv "${_pp_lens_cache}.tmp" "$_pp_lens_cache" 2>/dev/null
+
                   drop_reason=$(echo "$verdict" | sed 's/^lens[0-9]*:[[:space:]]*//;s/^DROP[[:space:]]*-[[:space:]]*//')
                   # Re-derive this lens's prompt from the shared registry (lenses/*.json).
                   # Uses the SAME long-form focus as the primary path — no drift between
@@ -880,8 +913,15 @@ $critique_input"
 
                   retry_result=""
                   if [ -n "$retry_sys" ]; then
-                    metrics_increment_call retry "$PP_MODEL"
-                    retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
+                    metrics_increment_call retry "${PP_RETRY_MODEL:-$PP_MODEL}"
+                    # Inject the failed output + drop reason as concrete
+                    # counter-example into the retry input. The
+                    # analyst-retry.md prompt references ${drop_reason} but
+                    # without the original output the model has no contrast
+                    # to learn from. (R2 ai-engineer #1.)
+                    retry_input=$(printf 'PREVIOUS FAILED OBSERVATION:\n%s\n\nWHY IT WAS DROPPED:\n%s\n\n%s' \
+                      "$_pp_failed_output" "$drop_reason" "$grounded")
+                    retry_result=$(printf "%s" "$retry_input" | run_llm 45 -m "${PP_RETRY_MODEL:-$PP_MODEL}" -s "$retry_sys" 2>/dev/null)
                   fi
                   # Note: counted under worst-case-23 reservation at cycle start.
 

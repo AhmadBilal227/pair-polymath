@@ -16,11 +16,11 @@
 
 ## Use cases
 
-**The senior engineer on a large codebase.** You're driving Claude through a 50-file refactor. Three lenses run in parallel: ENGINEERING watches for coupling regressions and missing test coverage; SECURITY checks for new attack surface in your auth-adjacent diffs; PERF_FINOPS flags hot paths that would regress under the new code. None of them block Claude — they whisper. You decide what to verify.
+**The senior engineer on a large codebase.** You're driving Claude through a complex changeset where any single file might miss its interaction with others. Each cycle, the advisor reads the transcript tail, `git status`, and **one** planner-picked file (a slice, not the whole codebase). Across cycles, lenses build a thread: ENGINEERING flags coupling regressions visible in the picked file; SECURITY checks the attack surface implied by recent auth-adjacent diffs; PERF_FINOPS notes hot-path concerns the chosen file surfaces. These are hypotheses with limited context — Claude is free to verify, ignore, or push back.
 
-**The solo founder shipping fast.** Product surface ships in a sprint. The STRATEGIC_FOUNDER lens asks "what aren't you doing because of this?" each cycle. PRODUCT_BIZ flags scope drift and missing user-value gaps. COGNITIVE_FLOW watches for too-many-open-threads — the failure mode that kills solo speed. The advisor is the cofounder you don't have yet.
+**The solo founder shipping fast.** The STRATEGIC_FOUNDER lens asks "what aren't you doing because of this?" given the recent transcript tail. PRODUCT_BIZ surfaces possible scope-drift signals or user-value gaps from the visible work. COGNITIVE_FLOW watches the transcript for too-many-open-threads patterns that kill solo speed. Each observation is a hypothesis from a thin slice of context — useful as a prompt to reflect, not a verdict.
 
-**The engineer learning while shipping.** You're moving fast in unfamiliar territory (a new framework, a new domain, a new architecture). The teacher line on your statusline rotates digests of top-of-the-week AI / HCI / systems work from HN + arXiv. Two-minute reads while builds run. Skill compounding without context-switching to a separate "learning" mode.
+**The engineer learning while shipping.** You're moving fast in unfamiliar territory (a new framework, a new domain, a new architecture). The teacher line on your statusline rotates digests of popularity-ranked HN stories and recent arXiv `cs.AI` / `cs.HC` titles, compressed by `gpt-5-mini`. Two-minute reads while builds run. No claim about long-term skill outcomes — just keeping a window open to the field's signal.
 
 ---
 
@@ -44,17 +44,17 @@ When you submit a prompt to Claude Code, a `UserPromptSubmit` hook injects the s
 
 ### Real example: the system caught a bug in its own installer
 
-> Today the system caught a real bug in its own installer. The `ENGINEERING` lens, watching the repo's recent commits, surfaced:
+> On 2026-05-11, the `ENGINEERING` lens surfaced this observation against the planner-picked installer file:
 >
 > ```
 > ENGINEERING: DEVOPS: mktemp in install/uninstall can create tmp on other FS
 > ```
 >
-> Investigation found that `bin/install.sh` and `bin/uninstall.sh` used bare `mktemp` (defaults to `/tmp`), then `mv "$tmp" "$SETTINGS_FILE"`. On Linux with `/tmp` as tmpfs, that `mv` crosses filesystems — copy+delete, not atomic. Claude Code reads `settings.json` on every prompt, so a partial read of a half-written file is a real risk under any concurrent statusline refresh. The same atomicity bug had already been fixed for `bin/polymath`'s `user.env` writes in an earlier commit but was never carried back to the installer pair.
+> Investigation confirmed it: `bin/install.sh` and `bin/uninstall.sh` used bare `mktemp` (defaults to `/tmp`), then `mv "$tmp" "$SETTINGS_FILE"`. On Linux with `/tmp` as tmpfs, that `mv` crosses filesystems — copy+delete, not atomic. Claude Code reads `settings.json` on every prompt, so a partial read of a half-written file is a real risk under any concurrent statusline refresh. The same atomicity bug had already been fixed for `bin/polymath`'s `user.env` writes in an earlier commit but was never carried back to the installer pair.
 >
-> Fix: [PR #3](https://github.com/AhmadBilal227/pair-polymath/pull/3) merged 18 minutes after the observation surfaced. `bin/install.sh:178` and `bin/uninstall.sh:34` now create the tmp file in the same directory as `settings.json` via `mktemp "${SETTINGS_FILE}.XXXXXX"`. Atomic-rename-within-filesystem restored. Commit [`49fefc9`](https://github.com/AhmadBilal227/pair-polymath/commit/49fefc9).
+> Fix shipped in [PR #3](https://github.com/AhmadBilal227/pair-polymath/pull/3), commit [`49fefc9`](https://github.com/AhmadBilal227/pair-polymath/commit/49fefc9). `bin/install.sh:178` and `bin/uninstall.sh:34` now create the tmp file in the same directory as `settings.json` via `mktemp "${SETTINGS_FILE}.XXXXXX"`. Atomic-rename-within-filesystem restored.
 >
-> Without the advisor, this would have shipped to user #2 on Linux as a flaky / racing `settings.json` write under tmpfs load.
+> The bug might have been caught by a careful code review later. The advisor surfaced it earlier — that's the proposition, not a guarantee.
 
 ---
 
@@ -91,7 +91,7 @@ To uninstall:
 
 Removes our entries from `settings.json`, matched **by basename** (`statusline.sh`, `inject-monitor-insight.sh`, `cache-test-result.sh`). This means an old install from a moved checkout still gets cleaned up — but if you have your own scripts with those exact basenames, they'd be caught too. Rename your own scripts if this is a concern.
 
-> **Cost-conscious?** Typical session: $3–15/day on default models (`gpt-5-mini` per lens, `gpt-5` for critique). Worst-case (sustained drop-storm with all retries + escalation): $35/day. Hard cap configurable via `PP_MAX_DAILY_CALLS` (default 3500). Disable instantly for sensitive sessions: `polymath disable`.
+> **Cost-conscious?** Typical session: $3–15/day on default models (`gpt-5-mini` per lens, `gpt-5` for critique) under default prompt sizes. Worst-case (sustained drop-storm with all retries + escalation): $35/day. The hard cap is on **call count**, not USD — `PP_MAX_DAILY_CALLS` (default 3500). A USD spend cap based on per-call telemetry lands in v0.2 (see [roadmap](#whats-coming-in-v02)). Disable for sensitive sessions with `polymath disable` (takes effect on the next 5-min cycle).
 
 ---
 
@@ -175,10 +175,14 @@ What leaves your machine per cycle:
 - The first ~3 KB of **one** file, picked by the planner (containment-checked to stay inside `cwd` via `realpath` prefix-match)
 - Hacker News top stories + arXiv `cs.AI` / `cs.HC` recent titles (public RSS, no PII)
 
-What never leaves:
-- Your environment variables. The prompt loader uses single-pass substitution over placeholders found in the original template — even if an LLM-generated `drop_reason` value contains the literal text `${OPENAI_API_KEY}`, it will NOT be re-scanned and expanded into the rendered prompt. (Regression-tested in `test/prompt-loader.bats`.)
-- The full conversation history (only the tail).
-- Secrets in source files (best-effort: a separate `pre-commit-secret-scan.sh` hook in your `~/.claude/hooks/` can prevent accidental commits, but is not part of this plugin).
+What we actively defend against leaking:
+- **Recursive `${VAR}` expansion in rendered prompts.** The prompt loader is single-pass over placeholders found in the *original* template. Even if an LLM-generated `drop_reason` value contains the literal text `${OPENAI_API_KEY}`, it will NOT be re-scanned and expanded into the rendered prompt. (Regression-tested in `test/prompt-loader.bats`.) Note: built-in prompts MAY reference `${PP_MODEL}` and similar non-secret vars — that's by design. User overrides should not reference secret-bearing env vars in their templates.
+- **The full conversation history.** Only the last ~5 KB of the transcript ships per cycle.
+- **Files outside your cwd.** `pp_contain_path` enforces realpath prefix match.
+
+What we do NOT defend against (be aware):
+- **Secrets you typed or pasted into your transcript.** They live in the transcript and the last 5 KB of it is in scope. If you pasted an API key into Claude as part of a debug session, it's at risk. Clear sensitive transcripts before activating the advisor, or use `polymath disable` for those sessions.
+- **Secret-bearing files INSIDE cwd.** The planner can currently pick `.env`, `*.key`, `credentials.json` etc. from cwd as the per-cycle grounding file. Tracking under [issue #5](https://github.com/AhmadBilal227/pair-polymath/issues/5); denylist patterns land in v0.3. Until then: use `.gitignore` and `polymath disable` defensively if your cwd has secrets at the root.
 
 To opt out of LLM cycles entirely while keeping the statusline:
 
@@ -192,21 +196,21 @@ echo 'PP_EXTERNAL_LLM=0' >> ~/.claude/pair-polymath/config/user.env
 
 **Does this slow down Claude Code?** No. The lens cycle runs in a detached background subshell — your statusline refreshes (`refreshInterval: 2`) never wait for an LLM call. Worst case the statusline shows the previous cycle's line 2 while a new one is computing.
 
-**Will this leak my code to OpenAI?** Per cycle: the last ~5 KB of your transcript, `git status` + last 5 commit subjects, and the first ~3 KB of ONE file (containment-checked to stay inside your cwd via realpath prefix match). HN + arXiv RSS titles also fetched (public). NEVER: env vars, full conversation history, files outside your cwd. See [Privacy](#privacy) and [SECURITY.md](SECURITY.md).
+**Will this leak my code to OpenAI?** Per cycle: the last ~5 KB of your transcript, `git status` + last 5 commit subjects, and the first ~3 KB of ONE planner-picked file (containment-checked to stay inside cwd). HN + arXiv RSS titles also fetched (public). NEVER sent: full conversation history, files outside your cwd, recursively-expanded `${VAR}` values in prompts. **At risk:** secrets you pasted INTO your transcript, and secret-bearing files INSIDE cwd (e.g. `.env`) until [issue #5](https://github.com/AhmadBilal227/pair-polymath/issues/5) ships denylist patterns. See [Privacy](#privacy) and [SECURITY.md](SECURITY.md).
 
-**What if I use Anthropic instead of OpenAI?** Today, the lens cycle calls OpenAI via the `llm` CLI (`gpt-5-mini` per lens, `gpt-5` for critique). The `llm` CLI itself supports Anthropic, Google, local models via plugins — multi-provider config lands in v0.3. Until then: status + curated tips run with `PP_EXTERNAL_LLM=0`, no API needed.
+**What if I use Anthropic instead of OpenAI?** Today, both the lens cycle and the tip-digest call OpenAI via the `llm` CLI (`gpt-5-mini` per lens, `gpt-5` for critique, `gpt-5-mini` for tip compression). The `llm` CLI itself supports Anthropic, Google, local models via plugins — multi-provider config lands in v0.3. Until then: set `PP_EXTERNAL_LLM=0` (via `polymath disable`) to skip the OpenAI lens cycle; statusline line 1 continues to render status indicators without any API calls.
 
 **How do I disable for a sensitive session?** `polymath disable` toggles `PP_EXTERNAL_LLM=0` in `~/.claude/pair-polymath/config/user.env`. Effective next cycle. Re-enable with `polymath enable`. No reinstall required.
 
 **Does it work offline?** Status-only mode does: branch, dirty marker, context-window bar, rate-limit display, today's cumulative cost. Lens advisories obviously require network. The cycle skips gracefully when `llm` calls fail.
 
-**What's the daily cost cap and is it hard?** `PP_MAX_DAILY_CALLS=3500` by default. Hard — enforced atomically via a single shared `mkdir`-based lock at cycle start, which reserves the worst-case 23 calls. If reserving would exceed the cap, the cycle is skipped entirely. See the [Cost](#cost) section for the formula.
+**What's the daily cap and is it hard?** `PP_MAX_DAILY_CALLS=3500` by default — a hard cap on **call count**, not USD. Enforced atomically via a single shared `mkdir`-based lock at cycle start, which reserves the worst-case 23 calls. If reserving would exceed the cap, the cycle is skipped entirely. If a process crashes mid-cycle after reserving, those 23 are forfeited until the next day — a known under-utilization that an in-progress USD telemetry feature (v0.2) will improve. The cap is robust to concurrent statusline refreshes but assumes processes exit cleanly; it does not auto-recover stale reservations. See the [Cost](#cost) section for the call-count formula.
 
 **What happens if my API key is invalid?** The cycle's LLM call fails, the lens cache stays empty, line 2 of your statusline rotates through tip digests instead (which also fail loudly until the key is set), and `polymath doctor` will report `✗ openai key` red. Status line 1 keeps working normally — no degradation in non-LLM features.
 
 **Can I add my own lens?** Yes. Drop a JSON file into `~/.claude/pair-polymath/lenses/` matching the [Lens schema](#lens-schema). The loader picks it up on the next cycle. Hard cap of `PP_LENS_MAX=16` to prevent a stuffed directory from fanning out into too many parallel calls.
 
-**Can I override the prompts?** Yes. Drop a `.md` file with a matching name into `~/.claude/pair-polymath/prompts/`. The loader does `${variable_name}` substitution against the calling scope. See `prompts/analyst-primary.md` for the canonical example.
+**Can I override the prompts?** Yes. Drop a `.md` file with a matching name into `~/.claude/pair-polymath/prompts/`. The loader does `${variable_name}` substitution against the calling scope, single-pass over placeholders found in the original template (so a substituted *value* containing `${X}` won't recursively expand). See `prompts/analyst-primary.md` for the canonical example. **Caveat:** the variables in scope at substitution time include shell env vars — don't write `${OPENAI_API_KEY}` or similar into your override templates expecting it to stay literal; reference only the prompt-specific vars (`${lens_group}`, `${lens_hats}`, `${lens_focus}`, `${drop_reason}`, `${PP_LENS_COUNT}`).
 
 ---
 

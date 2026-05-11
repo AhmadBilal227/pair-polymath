@@ -564,28 +564,38 @@ else
   fi
 fi
 
-# R3 fix (R2 ordering bug — multiple reviewers): PATH prepend MUST happen
-# before check_or_install llm so the post-install `command -v llm` check
-# (at the top-level script ~line 600) can find pipx's installation. R2 had
-# this block AFTER check_or_install which meant pipx-installed llm was
-# silently invisible until the next shell.
+# R3 + R4 fix (PATH ordering + scope discipline): everything below is
+# gated on the install command actually using pipx, so we don't pollute
+# the shell environment for installs that take a different path.
 case "$PIP_INSTALL_LLM" in
   *pipx*)
+    # Prepend ~/.local/bin to PATH BEFORE check_or_install llm so the
+    # post-install `command -v llm` check at line ~600 can find pipx's
+    # installation. R2 had this AFTER which meant llm was silently
+    # invisible until the next shell.
     case ":$PATH:" in
       *":$HOME/.local/bin:"*) ;;
       *) export PATH="$HOME/.local/bin:$PATH" ;;
     esac
+
+    # R3 + R4 fix: pipx 1.x refuses to run as root unless PIPX_HOME +
+    # PIPX_BIN_DIR point to system locations. Linux containers
+    # (Alpine/Ubuntu Docker) default to root. Scope these exports to the
+    # pipx-install branch only (R4 GPT HIGH-2: don't pollute env for
+    # non-pipx installs).
+    if [ "$(id -u)" = "0" ] && [ "$PP_OS" != "macos" ]; then
+      export PIPX_HOME="${PIPX_HOME:-/opt/pipx}"
+      export PIPX_BIN_DIR="${PIPX_BIN_DIR:-/usr/local/bin}"
+      # Also prepend PIPX_BIN_DIR to PATH so the post-install check finds
+      # llm on minimal images where /usr/local/bin isn't in default PATH
+      # (R4 GPT HIGH-3 + Debugger theoretical-but-narrow concern).
+      case ":$PATH:" in
+        *":$PIPX_BIN_DIR:"*) ;;
+        *) export PATH="$PIPX_BIN_DIR:$PATH" ;;
+      esac
+    fi
     ;;
 esac
-
-# R3 fix (DevOps H2): pipx 1.x refuses to run as root unless PIPX_HOME +
-# PIPX_BIN_DIR point to system locations. Linux containers (Alpine/Ubuntu
-# Docker) default to root, so the new apt/apk pipx install paths would
-# fail at the second `&&` link. Set the system-bin location for root.
-if [ "$(id -u)" = "0" ] && [ "$PP_OS" != "macos" ]; then
-  export PIPX_HOME="${PIPX_HOME:-/opt/pipx}"
-  export PIPX_BIN_DIR="${PIPX_BIN_DIR:-/usr/local/bin}"
-fi
 
 check_or_install jq "$PKG_INSTALL_JQ"
 check_or_install llm "$PIP_INSTALL_LLM"

@@ -11,13 +11,20 @@ input=$(cat 2>/dev/null || echo '{}')
 session_id=$(echo "$input" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$session_id" ] && exit 0
 
-# Must match LENS ordering in statusline-command.sh
-LENS_NAMES=("UX_DESIGN" "ENGINEERING" "SECURITY" "PERF_FINOPS" "PRODUCT_BIZ" "STRATEGIC_FOUNDER" "COGNITIVE_FLOW")
+# Load lens registry — single source of truth shared with bin/statusline.sh.
+# PP_ROOT is the plugin root (hooks/ lives directly under it).
+PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck disable=SC1091
+. "${PP_ROOT}/lib/lens-loader.sh"
+pp_load_lenses
+LENS_NAMES=("${PP_LENS_IDS[@]}")
+LENS_COUNT="${PP_LENS_COUNT:-${#LENS_NAMES[@]}}"
+
 now=$(date +%s)
 any_injected=0
 collected_blocks=""
 
-for lens_idx in 0 1 2 3 4 5 6; do
+for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
   mon_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${lens_idx}.txt"
   [ ! -f "$mon_cache" ] && continue
   [ ! -s "$mon_cache" ] && continue

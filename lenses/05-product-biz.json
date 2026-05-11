@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "PRODUCT_BIZ",
+  "display_order": 5,
+  "hats": ["PRODUCT", "BIZ", "MARKET", "RESEARCH"],
+  "focus": "user value gaps, scope drift, pricing/monetization angle, competitor positioning, research validity, missing product surface",
+  "color_hex": "#10b981",
+  "deep_priority": 1,
+  "enabled": true,
+  "extras": {}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "SECURITY",
+  "display_order": 3,
+  "hats": ["SECURITY"],
+  "focus": "secrets in commits, untracked sensitive files, attack surface, auth/authz, data exposure, dependency vulnerabilities",
+  "color_hex": "#ef4444",
+  "deep_priority": 1,
+  "enabled": true,
+  "extras": {}
+}

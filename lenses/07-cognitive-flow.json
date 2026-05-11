@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "COGNITIVE_FLOW",
+  "display_order": 7,
+  "hats": ["FLOW", "FOCUS", "REST"],
+  "focus": "cognitive load signals, context-switch cost, deep-work windows, break timing, burnout markers, decision fatigue, working-memory overload from too many open threads",
+  "color_hex": "#94a3b8",
+  "deep_priority": 1,
+  "enabled": true,
+  "extras": {}
+}

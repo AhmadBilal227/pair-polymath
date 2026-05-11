@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "PERF_FINOPS",
+  "display_order": 4,
+  "hats": ["PERF", "FINOPS"],
+  "focus": "latency hot paths, bundle size, cache hit rate, model/API cost, idle resources, scaling limits",
+  "color_hex": "#06b6d4",
+  "deep_priority": 1,
+  "enabled": true,
+  "extras": {}
+}

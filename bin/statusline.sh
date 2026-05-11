@@ -10,6 +10,14 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/config.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/budget.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/lens-loader.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/grounding.sh"
+
+# Load lens registry from lenses/*.json (built-in + user overrides).
+# Populates PP_LENS_{COUNT,IDS,HATS,FOCUS,COLOR,ENABLED}.
+pp_load_lenses
 
 input=$(cat)
 
@@ -378,8 +386,9 @@ fi
 PP_LAST_PARALLEL="${PP_CACHE_DIR}/pp-last-parallel-${session_id}.txt"
 PP_LOCK="/tmp/pp-fetch-${session_id}.lock"
 
-# Per-lens cache files — populated by parallel run, read by display + hook
-LENS_NAMES=("UX_DESIGN" "ENGINEERING" "SECURITY" "PERF_FINOPS" "PRODUCT_BIZ")
+# Per-lens cache files are populated by the parallel run below and read by the
+# display + hook. Lens metadata lives in $PP_LENS_IDS/HATS/FOCUS/COLOR — loaded
+# from lenses/*.json at the top of this file.
 
 transcript_path=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
 
@@ -544,23 +553,13 @@ PLAN
       file_contents=""
       if [ -n "$candidate_file" ] && [ "$candidate_file" != "NONE" ] \
           && [ -n "$cwd" ] && [ "$cwd" != "-" ] && [ -d "$cwd" ]; then
-        # Resolve to absolute path and enforce repo containment.
+        # Resolve + enforce repo containment via lib/grounding.sh.
         # Reject any path outside cwd (no absolute-path fallback — closes a path-traversal vector).
-        repo_real=$(cd "$cwd" 2>/dev/null && pwd -P)
-        file_real=$(cd "$cwd" 2>/dev/null && realpath "$candidate_file" 2>/dev/null)
-        if [ -n "$repo_real" ] && [ -n "$file_real" ]; then
-          case "$file_real" in
-            "$repo_real"/*)
-              if [ -f "$file_real" ] && [ -r "$file_real" ]; then
-                file_contents=$(head -c 5000 "$file_real" 2>/dev/null)
-              fi
-              ;;
-            *)
-              candidate_file="NONE"  # silently reject paths outside repo
-              ;;
-          esac
+        file_real=$(pp_contain_path "$cwd" "$candidate_file")
+        if [ -n "$file_real" ] && [ -f "$file_real" ] && [ -r "$file_real" ]; then
+          file_contents=$(head -c 5000 "$file_real" 2>/dev/null)
         else
-          candidate_file="NONE"
+          candidate_file="NONE"  # silently reject paths outside repo
         fi
       fi
 
@@ -632,18 +631,13 @@ GROUND
       )
 
       if [ -n "$grounded" ] && command -v llm >/dev/null 2>&1; then
-        # === PARALLEL 5-AGENT FAN-OUT ===
-        # Run all 5 lenses in parallel subshells. Each writes to its own cache.
-        for lens_idx in 0 1 2 3 4 5 6; do
-          case $lens_idx in
-            0) lens_group="UX_DESIGN"; lens_hats="UX, VISUAL, A11Y"; lens_focus="user experience, visual hierarchy, accessibility, micro-interactions, information architecture, design system consistency" ;;
-            1) lens_group="ENGINEERING"; lens_hats="ARCH, FRONTEND, BACKEND, DEVOPS"; lens_focus="code structure, coupling, test coverage, build/deploy, refactor opportunities, technical debt" ;;
-            2) lens_group="SECURITY"; lens_hats="SECURITY"; lens_focus="secrets in commits, untracked sensitive files, attack surface, auth/authz, data exposure, dependency vulnerabilities" ;;
-            3) lens_group="PERF_FINOPS"; lens_hats="PERF, FINOPS"; lens_focus="latency hot paths, bundle size, cache hit rate, model/API cost, idle resources, scaling limits" ;;
-            4) lens_group="PRODUCT_BIZ"; lens_hats="PRODUCT, BIZ, MARKET, RESEARCH"; lens_focus="user value gaps, scope drift, pricing/monetization angle, competitor positioning, research validity, missing product surface" ;;
-            5) lens_group="STRATEGIC_FOUNDER"; lens_hats="STRATEGY, FOCUS, OPPORTUNITY"; lens_focus="opportunity cost of current work, what NOT to build, competitive positioning, 80/20 focus discipline, time-to-revenue, kill criteria for stalled efforts" ;;
-            6) lens_group="COGNITIVE_FLOW"; lens_hats="FLOW, FOCUS, REST"; lens_focus="cognitive load signals, context-switch cost, deep-work windows, break timing, burnout markers, decision fatigue, working-memory overload from too many open threads" ;;
-          esac
+        # === PARALLEL N-AGENT FAN-OUT ===
+        # Run all loaded lenses in parallel subshells. Each writes to its own cache.
+        # Lens metadata comes from $PP_LENS_IDS/HATS/FOCUS (loaded from lenses/*.json).
+        for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
+          lens_group="${PP_LENS_IDS[$lens_idx]}"
+          lens_hats="${PP_LENS_HATS[$lens_idx]}"
+          lens_focus="${PP_LENS_FOCUS[$lens_idx]}"
           PP_CACHE_LENS="${PP_CACHE_DIR}/cc-monitor-${session_id}-lens${lens_idx}.txt"
 
           # === Escalation check: if this lens has 3+ consecutive drops, escalate to deep mode ===
@@ -655,11 +649,10 @@ GROUND
           [ "$lens_streak" -ge 3 ] && [ "${PP_ENABLE_ESCALATION:-1}" = "1" ] && is_escalated=1
 
           # Rotate the "deep" slot (gpt-5.5) AND the "wildcard" slot (broad allowance)
-          # Both rotate every cycle through 5 positions. Offset wildcard so they don't
-          # always coincide (deep stays focused; wildcard is the broader one).
-          # FIX (review): rotate through all 7 lenses, not 5
-          deep_slot=$(( ($(date +%s) / PP_PARALLEL_INTERVAL_S) % 7 ))
-          wildcard_slot=$(( (deep_slot + 2) % 7 ))
+          # Both rotate every cycle through PP_LENS_COUNT positions. Offset wildcard so
+          # they don't always coincide (deep stays focused; wildcard is the broader one).
+          deep_slot=$(( ($(date +%s) / PP_PARALLEL_INTERVAL_S) % PP_LENS_COUNT ))
+          wildcard_slot=$(( (deep_slot + 2) % PP_LENS_COUNT ))
           if [ "$lens_idx" -eq "$deep_slot" ]; then
             agent_model="$PP_MODEL_DEEP"
           else
@@ -683,26 +676,20 @@ GROUND
                 inv_file=$(echo "$inv_output" | grep '^FILE:' | head -1 | sed 's/^FILE:[[:space:]]*//')
                 inv_grep=$(echo "$inv_output" | grep '^GREP:' | head -1 | sed 's/^GREP:[[:space:]]*//')
 
-                # File read with containment
+                # File read with containment (via lib/grounding.sh)
                 if [ -n "$inv_file" ] && [ "$inv_file" != "NONE" ] && [ -d "$cwd" ]; then
-                  inv_repo_real=$(cd "$cwd" 2>/dev/null && pwd -P)
-                  inv_file_real=$(cd "$cwd" 2>/dev/null && realpath "$inv_file" 2>/dev/null)
-                  case "$inv_file_real" in
-                    "$inv_repo_real"/*)
-                      [ -f "$inv_file_real" ] && [ -r "$inv_file_real" ] && \
-                        lens_evidence="ESCALATED FILE READ ($inv_file):
+                  inv_file_real=$(pp_contain_path "$cwd" "$inv_file")
+                  if [ -n "$inv_file_real" ] && [ -f "$inv_file_real" ] && [ -r "$inv_file_real" ]; then
+                    lens_evidence="ESCALATED FILE READ ($inv_file):
 $(head -c 3000 "$inv_file_real" 2>/dev/null)
 
-" ;;
-                  esac
+"
+                  fi
                 fi
 
-                # Grep results — validated for safety + bounded
-                # FIX (review C4): reject overly broad/short patterns to prevent ReDoS + tree-walk
+                # Grep results — validated for safety + bounded via lib/grounding.sh
                 if [ -n "$inv_grep" ] && [ "$inv_grep" != "NONE" ] && [ -d "$cwd" ] \
-                    && [ ${#inv_grep} -ge 4 ] && [ ${#inv_grep} -le 100 ] \
-                    && echo "$inv_grep" | grep -Eq '[a-zA-Z0-9_]{3,}' \
-                    && ! echo "$inv_grep" | grep -qE '^(\.|\.\*|\^|\$|\^.\*\$)$'; then
+                    && pp_safe_grep_pattern "$inv_grep"; then
                   inv_hits=$(grep -rn --include='*.ts' --include='*.tsx' --include='*.js' \
                              --include='*.py' --include='*.sh' --include='*.tex' \
                              --exclude-dir={node_modules,.git,dist,build,coverage,.next,.turbo} \
@@ -738,13 +725,13 @@ $lens_evidence"
             # SILENT → don't overwrite (keep previous valid observation)
           ) &
         done
-        wait  # all 7 analysts to complete
+        wait  # all PP_LENS_COUNT analysts to complete
 
         # === SELF-CRITIQUE PASS (gpt-5, ~$0.025/call) ===
-        # Reviews all 7 observations against grounded facts; drops weak/hallucinated/redundant ones.
+        # Reviews all lens observations against grounded facts; drops weak/hallucinated/redundant ones.
         # FIX (advisor #1): truncate per-lens output to bound token cost on big observations.
         critique_input=""
-        for ci in 0 1 2 3 4 5 6; do
+        for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
           cf="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}.txt"
           if [ -f "$cf" ] && [ -s "$cf" ]; then
             obs_short=$(head -1 "$cf" | head -c 500)   # cap each lens at 500 chars
@@ -753,7 +740,7 @@ $lens_evidence"
         done
 
         if [ -n "$critique_input" ]; then
-          critique_sys="You are reviewing 7 advisor observations against grounded facts. For EACH lens line, decide PASS or DROP. DROP if: hallucinated (cites file/symbol not in grounded facts), stale (referring to fixed issues), redundant (same angle as another lens), low-value (vague, generic, no concrete action). PASS if: specific, verifiable, actionable, technically grounded. Output format: ONE line per lens, exactly: lensN: PASS  or  lensN: DROP — REASON  (where REASON is one short phrase explaining why). No preamble."
+          critique_sys="You are reviewing ${PP_LENS_COUNT} advisor observations against grounded facts. For EACH lens line, decide PASS or DROP. DROP if: hallucinated (cites file/symbol not in grounded facts), stale (referring to fixed issues), redundant (same angle as another lens), low-value (vague, generic, no concrete action). PASS if: specific, verifiable, actionable, technically grounded. Output format: ONE line per lens, exactly: lensN: PASS  or  lensN: DROP — REASON  (where REASON is one short phrase explaining why). No preamble."
           critique_data="GROUNDED FACTS:
 ${grounded:0:3000}
 
@@ -764,7 +751,7 @@ $critique_input"
 
           # Apply verdicts + 1-retry auto-correction loop + streak tracking for escalation
           if [ -n "$critique_output" ]; then
-            for ci in 0 1 2 3 4 5 6; do
+            for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
               verdict=$(echo "$critique_output" | grep -E "^lens${ci}:" | head -1)
               verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}-verdict.txt"
               streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${ci}-streak.txt"
@@ -782,16 +769,12 @@ $critique_input"
                   # === 1-RETRY AUTO-CORRECTION ===
                   # Re-run analyst with critique reason as feedback. One shot.
                   drop_reason=$(echo "$verdict" | sed 's/^lens[0-9]*:[[:space:]]*//;s/^DROP[[:space:]]*-[[:space:]]*//')
-                  # Re-derive this lens's prompt from same case mapping
-                  case $ci in
-                    0) rlens_group="UX_DESIGN"; rlens_hats="UX, VISUAL, A11Y"; rlens_focus="user experience, visual hierarchy, accessibility, micro-interactions" ;;
-                    1) rlens_group="ENGINEERING"; rlens_hats="ARCH, FRONTEND, BACKEND, DEVOPS"; rlens_focus="code structure, coupling, test coverage, refactor opportunities" ;;
-                    2) rlens_group="SECURITY"; rlens_hats="SECURITY"; rlens_focus="secrets, untracked sensitive files, attack surface, auth/authz" ;;
-                    3) rlens_group="PERF_FINOPS"; rlens_hats="PERF, FINOPS"; rlens_focus="latency, bundle size, cache hits, API cost" ;;
-                    4) rlens_group="PRODUCT_BIZ"; rlens_hats="PRODUCT, BIZ, MARKET, RESEARCH"; rlens_focus="user value gaps, scope drift, monetization, research validity" ;;
-                    5) rlens_group="STRATEGIC_FOUNDER"; rlens_hats="STRATEGY, FOCUS, OPPORTUNITY"; rlens_focus="opportunity cost, what NOT to build, 80/20 focus, kill criteria" ;;
-                    6) rlens_group="COGNITIVE_FLOW"; rlens_hats="FLOW, FOCUS, REST"; rlens_focus="cognitive load, context-switch cost, deep-work windows, burnout markers" ;;
-                  esac
+                  # Re-derive this lens's prompt from the shared registry (lenses/*.json).
+                  # Uses the SAME long-form focus as the primary path — no drift between
+                  # primary and retry prompts.
+                  rlens_group="${PP_LENS_IDS[$ci]}"
+                  rlens_hats="${PP_LENS_HATS[$ci]}"
+                  rlens_focus="${PP_LENS_FOCUS[$ci]}"
 
                   retry_sys="You are the ${rlens_group} lens. Your previous observation was DROPPED by the critique pass with reason: ${drop_reason}. Try a DIFFERENT angle, file, or pattern. Same constraints: pick a HAT from ${rlens_hats}, focus on ${rlens_focus}, output exactly HAT: hook|||body (hook 40-70 chars, body 80-180 chars ending in a verb). Only cite paths/symbols visible in the grounded facts. If you still cannot find a valid different observation, output SILENT."
 
@@ -824,12 +807,14 @@ $critique_input"
   fi
 fi
 
-# Resolve monitor: rotate through 7 lenses based on time slot (30s per lens)
-# Plus 1 tip slot = 8 total slots, 4-min full cycle
+# Resolve monitor: rotate through PP_LENS_COUNT lenses based on time slot (30s per lens)
+# Plus 1 tip slot = (PP_LENS_COUNT + 1) total slots; with the default 7 lenses that's
+# an 8-slot, 4-minute full cycle.
 mon_topic=""
 mon_body=""
-lens_slot=$(( ($(date +%s) / 30) % 8 ))
-if [ "$lens_slot" -lt 7 ]; then
+_pp_slot_total=$((PP_LENS_COUNT + 1))
+lens_slot=$(( ($(date +%s) / 30) % _pp_slot_total ))
+if [ "$lens_slot" -lt "$PP_LENS_COUNT" ]; then
   PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-lens${lens_slot}.txt"
   if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
     mon=$(head -1 "$PP_CACHE_DISPLAY")
@@ -851,11 +836,11 @@ fi
 AURORA_PALETTE=("$TURQUOISE" "$LAVENDER" "$SKY" "$BRONZE")
 aurora_hue="${AURORA_PALETTE[$tick]}"
 
-# Display slot: 0=lens0..4=lens4, 5=tip. Already resolved above for monitor.
-# Use lens_slot for the same rotation so display stays coherent.
+# Display slot: 0..(PP_LENS_COUNT-1) = lens, PP_LENS_COUNT = tip slot.
+# Already resolved above for monitor; use lens_slot so display stays coherent.
 slot="$lens_slot"
 # Map to 0 (tip) or non-zero (monitor) for downstream code that uses slot
-if [ "$lens_slot" -eq 7 ]; then slot=0; else slot=1; fi
+if [ "$lens_slot" -eq "$PP_LENS_COUNT" ]; then slot=0; else slot=1; fi
 info_topic_line=""
 info_body_line=""
 

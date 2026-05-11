@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "ENGINEERING",
+  "display_order": 2,
+  "hats": ["ARCH", "FRONTEND", "BACKEND", "DEVOPS"],
+  "focus": "code structure, coupling, test coverage, build/deploy, refactor opportunities, technical debt",
+  "color_hex": "#f59e0b",
+  "deep_priority": 1,
+  "enabled": true,
+  "extras": {}
+}

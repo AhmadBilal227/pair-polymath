@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["UX", "VISUAL", "A11Y"],
+  "focus": "user experience, visual hierarchy, accessibility, micro-interactions, information architecture, design system consistency",
+  "color_hex": "#c0a8e8",
+  "deep_priority": 1,
+  "enabled": true,
+  "extras": {}
+}

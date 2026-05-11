@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "STRATEGIC_FOUNDER",
+  "display_order": 6,
+  "hats": ["STRATEGY", "FOCUS", "OPPORTUNITY"],
+  "focus": "opportunity cost of current work, what NOT to build, competitive positioning, 80/20 focus discipline, time-to-revenue, kill criteria for stalled efforts",
+  "color_hex": "#eab308",
+  "deep_priority": 1,
+  "enabled": true,
+  "extras": {}
+}

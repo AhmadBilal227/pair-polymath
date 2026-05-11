@@ -12,7 +12,12 @@
 PP_AUDIT_LOG="${PP_AUDIT_LOG:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/install.log}"
 
 audit_log() {
-  local action="$1" command="$2" exit_code="${3:-0}" stderr_tail="${4:-}"
+  # NB: the local was named `command` previously, which shadows the bash
+  # builtin used at line 37. Under strict bash 5 (Ubuntu CI), `command -v jq`
+  # was interpreted as the *variable* "command" (with content from $2), making
+  # the `if command -v jq` branch behave unpredictably and tripping `set -u`
+  # downstream. Renamed to `cmd` to remove the collision entirely.
+  local action="$1" cmd="$2" exit_code="${3:-0}" stderr_tail="${4:-}"
   # Dry-run produces zero FS changes — including no audit-log writes.
   # The installer's [DRY-RUN] stdout lines are the audit trail in this mode.
   if [ "${PP_DRY_RUN:-0}" = "1" ]; then
@@ -38,20 +43,20 @@ audit_log() {
     entry=$(jq -cn \
       --arg ts "$ts" \
       --arg action "$action" \
-      --arg command "$command" \
+      --arg command "$cmd" \
       --argjson exit_code "$exit_code" \
       --arg stderr_tail "$stderr_tail" \
       '{ts:$ts, action:$action, command:$command, exit_code:$exit_code, stderr_tail:$stderr_tail}' \
       2>/dev/null) || entry=""
   fi
-  if [ -z "$entry" ]; then
+  if [ -z "${entry:-}" ]; then
     # Fallback when jq isn't available yet (very early in install) OR jq failed.
     # Review fix B1 (debugger): strip ALL control chars (U+0000-U+001F) before
     # the JSON escape chain. Bare tabs/CRs/etc. in stderr payloads otherwise
     # break parsers. We lose some debug context but keep the log parseable.
     # We allow nothing through; \n already collapsed via tr, others stripped.
     local esc_cmd esc_stderr
-    esc_cmd=$(printf '%s' "$command" \
+    esc_cmd=$(printf '%s' "$cmd" \
       | tr -d '\000-\037' \
       | sed 's/\\/\\\\/g; s/"/\\"/g')
     esc_stderr=$(printf '%s' "$stderr_tail" \

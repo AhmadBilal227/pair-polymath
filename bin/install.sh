@@ -13,11 +13,13 @@ set -u
 PP_DRY_RUN=0
 PP_YES=0
 PP_NO_SUDO=0
+PP_VERBOSE=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) PP_DRY_RUN=1 ;;
     --yes|-y) PP_YES=1 ;;
     --no-sudo) PP_NO_SUDO=1 ;;
+    --verbose|-v) PP_VERBOSE=1 ;;
     --non-interactive) PP_YES=1; PP_NO_SUDO=1 ;;
     -h|--help)
       cat <<'HELP'
@@ -37,6 +39,9 @@ Flags:
                         rootless environments. If a dep install needs sudo,
                         print the exact command + exit 1.
   --non-interactive     Alias for --yes --no-sudo. Useful for CI.
+  --verbose, -v         Stream dep-install output (pip3, brew, apt) directly to
+                        the terminal instead of capturing to the audit log. Use
+                        this when a step is failing and you need to SEE why.
   --help, -h            This message.
 
 Audit log:
@@ -103,6 +108,15 @@ _pp_run() {
     return 0
   fi
 
+  # --verbose: stream stderr+stdout directly to terminal, no capture.
+  # Use this when an install step is failing and you need to SEE why.
+  if [ "$PP_VERBOSE" = "1" ]; then
+    local rc=0
+    "$@" || rc=$?
+    audit_log "$action" "$cmd_str" "$rc" "verbose mode — see terminal"
+    return "$rc"
+  fi
+
   local stderr_tmp
   stderr_tmp=$(mktemp 2>/dev/null) || stderr_tmp="/tmp/pp-stderr-$$"
   local rc=0
@@ -110,6 +124,19 @@ _pp_run() {
   local stderr_tail=""
   if [ -s "$stderr_tmp" ]; then
     stderr_tail=$(tail -c 500 "$stderr_tmp")
+  fi
+  # CRITICAL UX FIX: on failure, SHOW the captured stderr to the user.
+  # Previously stderr went to a tmp file → audit log only, and the user saw
+  # only "install failed" with no diagnostic. That's how a real install on
+  # a fresh device hit "pip3 install --user llm" failing under PEP 668 with
+  # zero actionable feedback (the install log is at $CLAUDE_DIR/pair-polymath/
+  # install.log but most users don't know to look there).
+  if [ "$rc" -ne 0 ] && [ -n "$stderr_tail" ]; then
+    printf '\n  \033[2m--- stderr (last 500 bytes) ---\033[0m\n' >&2
+    printf '%s\n' "$stderr_tail" >&2
+    printf '  \033[2m--- end stderr ---\033[0m\n' >&2
+    printf '  \033[2mFull audit log: %s\033[0m\n' "$PP_AUDIT_LOG" >&2
+    printf '  \033[2mTip: re-run with --verbose to see live install output.\033[0m\n' >&2
   fi
   rm -f "$stderr_tmp"
   audit_log "$action" "$cmd_str" "$rc" "$stderr_tail"
@@ -128,6 +155,13 @@ _pp_eval() {
     return 0
   fi
 
+  if [ "$PP_VERBOSE" = "1" ]; then
+    local rc=0
+    eval "$cmd_str" || rc=$?
+    audit_log "$action" "$cmd_str" "$rc" "verbose mode — see terminal"
+    return "$rc"
+  fi
+
   local stderr_tmp
   stderr_tmp=$(mktemp 2>/dev/null) || stderr_tmp="/tmp/pp-stderr-$$"
   local rc=0
@@ -135,6 +169,14 @@ _pp_eval() {
   local stderr_tail=""
   if [ -s "$stderr_tmp" ]; then
     stderr_tail=$(tail -c 500 "$stderr_tmp")
+  fi
+  # Same UX fix as _pp_run — surface stderr on failure
+  if [ "$rc" -ne 0 ] && [ -n "$stderr_tail" ]; then
+    printf '\n  \033[2m--- stderr (last 500 bytes) ---\033[0m\n' >&2
+    printf '%s\n' "$stderr_tail" >&2
+    printf '  \033[2m--- end stderr ---\033[0m\n' >&2
+    printf '  \033[2mFull audit log: %s\033[0m\n' "$PP_AUDIT_LOG" >&2
+    printf '  \033[2mTip: re-run with --verbose to see live install output.\033[0m\n' >&2
   fi
   rm -f "$stderr_tmp"
   audit_log "$action" "$cmd_str" "$rc" "$stderr_tail"
@@ -353,7 +395,113 @@ else
   fi
 fi
 
-PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+# === OS detection + LLM install strategy selection ===
+# Detect the platform we're on so we pick the *native* install path instead
+# of a guess-and-fallback chain. A real new-device install on Ubuntu 24.04
+# failed silently here pre-fix: pip3 hit PEP 668's "externally-managed-
+# environment" but the user only saw "install failed". OS-aware selection
+# prefers pipx on PEP-668-locked Linux, brew on macOS, and pip3 elsewhere.
+PP_OS="unknown"
+PP_OS_VERSION=""
+case "$(uname -s 2>/dev/null)" in
+  Darwin)
+    PP_OS="macos"
+    PP_OS_VERSION=$(sw_vers -productVersion 2>/dev/null || echo "?")
+    ;;
+  Linux)
+    if [ -r /etc/os-release ]; then
+      # /etc/os-release is the freedesktop.org standard. Sets $ID + $VERSION_ID.
+      # shellcheck disable=SC1091
+      . /etc/os-release
+      PP_OS="${ID:-linux}"
+      PP_OS_VERSION="${VERSION_ID:-?}"
+    else
+      PP_OS="linux"
+    fi
+    ;;
+esac
+
+# PEP 668 detection: modern Debian/Ubuntu drop a marker file that signals
+# pip3 must NOT install into the system Python. The file's presence is the
+# authoritative signal — version-string parsing isn't reliable across forks.
+PP_PEP668=0
+for marker in /usr/lib/python3*/EXTERNALLY-MANAGED /Library/Frameworks/Python.framework/Versions/*/lib/python3.*/EXTERNALLY-MANAGED; do
+  if [ -e "$marker" ]; then
+    PP_PEP668=1
+    break
+  fi
+done
+
+printf '  Detected: %s %s' "$PP_OS" "$PP_OS_VERSION"
+[ "$PP_PEP668" = "1" ] && printf ' (PEP 668 — externally-managed-environment)'
+printf '\n'
+audit_log "os-detect" "uname=$PP_OS version=$PP_OS_VERSION pep668=$PP_PEP668" 0 ""
+
+# Pick the LLM install command per OS + PEP 668 status.
+# Each branch is explicit so the user sees what we're about to do.
+PIP_INSTALL_LLM=""
+case "$PP_OS" in
+  macos)
+    # Homebrew is the canonical macOS path. brew has an llm formula.
+    if command -v brew >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="brew install llm"
+    elif command -v pipx >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+    elif command -v pip3 >/dev/null 2>&1; then
+      # macOS system python doesn't enforce PEP 668, so --user works.
+      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+    fi
+    ;;
+  ubuntu|debian|linuxmint|pop)
+    # PEP 668 is enforced on Ubuntu 23.04+, Debian 12+, Mint 22+, Pop_OS 24+.
+    # pipx is the official recommended path. apt-get install pipx is one
+    # command; then pipx install llm. Otherwise fall back to pip3 --user
+    # with --break-system-packages where PEP 668 applies (we surface this
+    # decision rather than papering over it).
+    if command -v pipx >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+    elif [ "$PP_PEP668" = "1" ]; then
+      # No pipx and PEP 668 enforced. Best path: install pipx via apt, then
+      # use it. Falls through to apt-get if user consents.
+      PIP_INSTALL_LLM="sudo apt-get update && sudo apt-get install -y pipx && pipx ensurepath && pipx install 'llm>=0.20,<1.0'"
+    elif command -v pip3 >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+    fi
+    ;;
+  fedora|rhel|centos|rocky|almalinux)
+    if command -v pipx >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+    elif command -v dnf >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="sudo dnf install -y pipx && pipx install 'llm>=0.20,<1.0'"
+    elif command -v pip3 >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+    fi
+    ;;
+  arch|manjaro)
+    if command -v pipx >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+    elif command -v pacman >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="sudo pacman -S --noconfirm python-pipx && pipx install 'llm>=0.20,<1.0'"
+    fi
+    ;;
+  alpine)
+    if command -v pipx >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+    elif command -v apk >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="sudo apk add --no-cache pipx && pipx install 'llm>=0.20,<1.0'"
+    fi
+    ;;
+  *)
+    # Unknown OS — best-effort cascade.
+    if command -v pipx >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pipx install 'llm>=0.20,<1.0'"
+    elif command -v brew >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="brew install llm"
+    elif command -v pip3 >/dev/null 2>&1; then
+      PIP_INSTALL_LLM="pip3 install --user 'llm>=0.20,<1.0'"
+    fi
+    ;;
+esac
 
 check_or_install jq "$PKG_INSTALL_JQ"
 check_or_install llm "$PIP_INSTALL_LLM"

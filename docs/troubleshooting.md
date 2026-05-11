@@ -27,6 +27,45 @@ export PATH="$HOME/.local/bin:$PATH"
 
 …and restart your shell.
 
+## `✗ install failed` immediately after the "Install via 'pip3 install --user llm…'?" prompt
+
+On Ubuntu 24.04+, Debian 12+, Pop_OS 24+, and similar modern Linux distros, `pip3 install --user` is blocked by **PEP 668 / externally-managed-environment** by default. The installer in v0.2.0 swallowed pip's actual stderr and only printed "install failed" — a real diagnostic gap.
+
+**Fixed in the next release** — the installer now:
+
+1. **Detects your OS** (`macos`, `ubuntu`, `debian`, `fedora`, `arch`, `alpine`, …) and the PEP 668 marker, then **picks the native install path**:
+   - macOS → `brew install llm`
+   - Ubuntu/Debian/PEP-668 → `pipx install llm` (installs pipx via apt first if needed)
+   - Fedora/RHEL → `pipx` via `dnf`
+   - Arch/Manjaro → `pipx` via `pacman`
+   - Alpine → `pipx` via `apk`
+2. **Shows pip's actual stderr** on failure (last 500 bytes), with the full audit log path so you know where to look.
+3. **`--verbose`** / `-v` flag streams the install output directly to your terminal so you see every line in real time.
+
+If you're stuck on an older release, manually install `llm` with pipx:
+
+```bash
+# Ubuntu 24.04+
+sudo apt-get install -y pipx && pipx ensurepath && pipx install llm
+
+# macOS
+brew install llm
+# or
+pipx install llm
+```
+
+Then re-run `./bin/install.sh` — it'll detect llm is now present and skip the install step.
+
+## `install.log` — where to look when something fails silently
+
+`$CLAUDE_DIR/pair-polymath/install.log` is a JSONL audit trail of every significant install action. Each line: `{ts, action, command, exit_code, stderr_tail}`. Tail it to debug:
+
+```bash
+tail -20 ~/.claude/pair-polymath/install.log | jq .
+```
+
+If `exit_code: 1` and `stderr_tail` mentions `externally-managed-environment`, that's PEP 668 — see above.
+
 ## `✗ openai key not set`
 
 ```bash

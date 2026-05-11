@@ -457,3 +457,56 @@ teardown() {
   PP_SECRET_DIR_PATTERNS_EXTRA="VAULT" run pp_is_secret_file "vault/key.txt"
   [ "$status" -eq 0 ]
 }
+
+# === Round-4 R4-3: dir-walk must not include the leaf basename ===
+# A relative path that is JUST a basename (no parent dirs) must not be
+# rejected by the dir-component walk. The leaf is already checked against
+# file patterns separately; the dir walk's job is parent components only.
+
+@test "secret-file: regular file named 'private' (not inside a private dir) is ACCEPTED" {
+  run pp_is_secret_file "private"
+  [ "$status" -ne 0 ]
+}
+
+@test "secret-file: regular file named '.aws' (not inside an .aws dir) is ACCEPTED" {
+  run pp_is_secret_file ".aws"
+  [ "$status" -ne 0 ]
+}
+
+@test "secret-file: regular file named '.ssh' (not inside a .ssh dir) is ACCEPTED" {
+  run pp_is_secret_file ".ssh"
+  [ "$status" -ne 0 ]
+}
+
+@test "secret-file: foo/private/bar.txt — 'private' as parent dir IS rejected" {
+  run pp_is_secret_file "foo/private/bar.txt"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: regular file named '.private_key' STILL rejected (basename pattern match)" {
+  run pp_is_secret_file ".private_key"
+  [ "$status" -eq 0 ]
+}
+
+# === Round-4 R4-1: pp_is_secret_dir_component escape-hatch parity ===
+# PP_SECRET_DIR_PATTERNS='' should also disable _EXTRA, matching the
+# behavior of pp_is_secret_file's PP_SECRET_FILE_PATTERNS=''.
+
+@test "dir-component: PP_SECRET_DIR_PATTERNS='' also ignores _EXTRA (true off switch)" {
+  PP_SECRET_DIR_PATTERNS="" \
+    PP_SECRET_DIR_PATTERNS_EXTRA="vault" \
+    run pp_is_secret_dir_component "vault"
+  [ "$status" -ne 0 ]
+}
+
+# === Round-4 R4-4: whitespace detection via [:space:] not just space ===
+
+@test "secret-file: tab-only PP_SECRET_FILE_PATTERNS treated as whitespace, uses defaults" {
+  PP_SECRET_FILE_PATTERNS=$'\t\t' run pp_is_secret_file "config.env"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret-file: newline-only PP_SECRET_DIR_PATTERNS treated as whitespace, uses defaults" {
+  PP_SECRET_DIR_PATTERNS=$'\n\n' run pp_is_secret_file "secrets/config.json"
+  [ "$status" -eq 0 ]
+}

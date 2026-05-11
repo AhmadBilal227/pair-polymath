@@ -78,20 +78,31 @@ pp_is_secret_dir_component() {
   set -f
 
   local dir_defaults="secrets private .secrets .credentials .keys .aws .ssh"
-  local dir_patterns
+  local dir_patterns dir_extra
   if [ "${PP_SECRET_DIR_PATTERNS+set}" = "set" ]; then
     dir_patterns="$PP_SECRET_DIR_PATTERNS"
+    if [ -z "$dir_patterns" ]; then
+      # Round-4 R4-1: parity with pp_is_secret_file Fix G3 — explicit empty
+      # PP_SECRET_DIR_PATTERNS disables _EXTRA too (a true off switch).
+      dir_extra=""
+    else
+      dir_extra="${PP_SECRET_DIR_PATTERNS_EXTRA:-}"
+    fi
   else
     dir_patterns="$dir_defaults"
+    dir_extra="${PP_SECRET_DIR_PATTERNS_EXTRA:-}"
   fi
-  case "${dir_patterns// /}" in
+  # Round-4 R4-4: whitespace-only via [:space:], not just literal space.
+  local _trimmed_dir
+  _trimmed_dir=$(printf '%s' "$dir_patterns" | tr -d '[:space:]')
+  case "$_trimmed_dir" in
     '')
       if [ "${PP_SECRET_DIR_PATTERNS+set}" = "set" ] && [ -n "$dir_patterns" ]; then
         dir_patterns="$dir_defaults"
+        dir_extra="${PP_SECRET_DIR_PATTERNS_EXTRA:-}"
       fi
       ;;
   esac
-  local dir_extra="${PP_SECRET_DIR_PATTERNS_EXTRA:-}"
 
   # Lowercase patterns (Fix G4 parity) and the component.
   local comp_lc patterns_lc extra_lc
@@ -212,7 +223,11 @@ pp_is_secret_file() {
 
   # Whitespace-only is almost certainly user error — fall back to defaults
   # with a stderr warning. (Genuine empty-string still disables.)
-  case "${file_patterns// /}" in
+  # Round-4 R4-4: strip ALL whitespace via tr ([:space:]), not just literal
+  # space via ${var// /}. Tabs and newlines were previously slipping through.
+  local _trimmed_file _trimmed_dir
+  _trimmed_file=$(printf '%s' "$file_patterns" | tr -d '[:space:]')
+  case "$_trimmed_file" in
     '')
       if [ "${PP_SECRET_FILE_PATTERNS+set}" = "set" ] && [ -n "$file_patterns" ]; then
         printf 'pp_is_secret_file: PP_SECRET_FILE_PATTERNS is whitespace-only; using defaults\n' >&2
@@ -221,7 +236,8 @@ pp_is_secret_file() {
       fi
       ;;
   esac
-  case "${dir_patterns// /}" in
+  _trimmed_dir=$(printf '%s' "$dir_patterns" | tr -d '[:space:]')
+  case "$_trimmed_dir" in
     '')
       if [ "${PP_SECRET_DIR_PATTERNS+set}" = "set" ] && [ -n "$dir_patterns" ]; then
         printf 'pp_is_secret_file: PP_SECRET_DIR_PATTERNS is whitespace-only; using defaults\n' >&2
@@ -255,37 +271,53 @@ pp_is_secret_file() {
     esac
   done
 
-  # === Check 2: any path component matches a secret-directory glob ===
+  # === Check 2: any PARENT-DIR component matches a secret-directory glob ===
   # Fix G2: skip dir-component walk for absolute paths. They may include
   # macOS/Linux system dirs (/private, /etc, etc.) that share names with
   # default secret-dir patterns. Callers should pass a relative path; this
   # is documented in the function contract above. pp_contain_path passes
   # the relative cand_rel already.
+  #
+  # Round-4 R4-3: walk only PARENT directories, not the path itself. Before
+  # this fix, a relative input that was just a basename (e.g. "private",
+  # "secrets", ".aws") false-rejected because the loop's first iteration
+  # treated the leaf as a dir component. The leaf basename is already
+  # checked against file patterns in Check 1; the dir walk's only job is
+  # PARENT components. Strip the leaf via `dirname` and walk what's left.
   case "$path" in
     /*) ;;  # Absolute — skip dir walk
     *)
-      local rest="$path"
-      local comp comp_lc
-      while [ -n "$rest" ] && [ "$rest" != "/" ] && [ "$rest" != "." ]; do
-        comp="${rest##*/}"
-        if [ -n "$comp" ]; then
-          comp_lc=$(printf '%s' "$comp" | tr '[:upper:]' '[:lower:]')
-          for p in $dir_patterns_lc $dir_extra_lc; do
-            # shellcheck disable=SC2254  # intentional glob expansion
-            case "$comp_lc" in
-              $p)
-                [ "$_pp_isf_saved_f" -eq 1 ] || set +f
-                return 0
-                ;;
+      local rest_dir
+      rest_dir="$(dirname -- "$path")"
+      case "$rest_dir" in
+        .|/|"")
+          # No parent dirs to walk (leaf-only path or root) — nothing to check.
+          ;;
+        *)
+          local rest="$rest_dir"
+          local comp comp_lc
+          while [ -n "$rest" ] && [ "$rest" != "/" ] && [ "$rest" != "." ]; do
+            comp="${rest##*/}"
+            if [ -n "$comp" ]; then
+              comp_lc=$(printf '%s' "$comp" | tr '[:upper:]' '[:lower:]')
+              for p in $dir_patterns_lc $dir_extra_lc; do
+                # shellcheck disable=SC2254  # intentional glob expansion
+                case "$comp_lc" in
+                  $p)
+                    [ "$_pp_isf_saved_f" -eq 1 ] || set +f
+                    return 0
+                    ;;
+                esac
+              done
+            fi
+            # Strip last component. If no '/' remains, we've walked off the front.
+            case "$rest" in
+              */*) rest="${rest%/*}" ;;
+              *)   rest="" ;;
             esac
           done
-        fi
-        # Strip last component. If no '/' remains, we've walked off the front.
-        case "$rest" in
-          */*) rest="${rest%/*}" ;;
-          *)   rest="" ;;
-        esac
-      done
+          ;;
+      esac
       ;;
   esac
 

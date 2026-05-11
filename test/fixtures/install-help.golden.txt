@@ -14,6 +14,9 @@ Flags:
                         rootless environments. If a dep install needs sudo,
                         print the exact command + exit 1.
   --non-interactive     Alias for --yes --no-sudo. Useful for CI.
+  --verbose, -v         Stream dep-install output (pip3, brew, apt) directly to
+                        the terminal instead of capturing to the audit log. Use
+                        this when a step is failing and you need to SEE why.
   --help, -h            This message.
 
 Audit log:

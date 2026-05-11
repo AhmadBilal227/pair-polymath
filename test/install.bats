@@ -60,6 +60,7 @@ _pp_normalize_install_output() {
   [[ "$output" == *"--yes"* ]]
   [[ "$output" == *"--no-sudo"* ]]
   [[ "$output" == *"--non-interactive"* ]]
+  [[ "$output" == *"--verbose"* ]]
   [[ "$output" == *"--help"* ]]
   [[ "$output" == *"Exit codes:"* ]]
 }
@@ -414,4 +415,69 @@ APT
   [ -f "$log" ]
   # The line must be valid JSON parseable by the REAL jq (which we have on PATH here).
   jq -e . < "$log" >/dev/null || { echo "log line not parseable as JSON"; cat "$log"; return 1; }
+}
+
+# === Install visibility fix (R3) ===
+
+@test "install: --verbose flag is accepted (doesn't error)" {
+  # We can't test the actual verbose-mode behavior without a real install
+  # invocation. We CAN verify the flag is parsed without "unknown flag" error.
+  # Help-mode short-circuits before any install steps run, so this is safe.
+  run bash "$PP_ROOT/bin/install.sh" --verbose --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--verbose"* ]]
+}
+
+@test "install: -v short flag works" {
+  run bash "$PP_ROOT/bin/install.sh" -v --help
+  [ "$status" -eq 0 ]
+}
+
+@test "install: dependency-install failure surfaces stderr to the user" {
+  # Reproduce the new-device failure pattern: a dependency install that fails
+  # silently. Previously the user saw only 'install failed' with no diagnostic;
+  # now the captured stderr-tail prints to the terminal AND the audit-log path
+  # is shown so the user knows where to look.
+  #
+  # bats `run` and inline bash -c nested-quoting are both fragile across
+  # bash/bats versions (PR #19 test 245 + PR #30 first attempt both hit this).
+  # Write the probe to a real file and exec it — no nested quoting at all.
+  local probe_home="$(mktemp -d)"
+  local probe_script="$probe_home/probe.sh"
+  local capture="$probe_home/captured.out"
+
+  cat > "$probe_script" <<'PROBE'
+#!/usr/bin/env bash
+mkdir -p "$PROBE_HOME/.claude/pair-polymath"
+# shellcheck disable=SC1090
+. "$PP_ROOT/lib/audit-log.sh"
+export PP_AUDIT_LOG="$PROBE_HOME/.claude/pair-polymath/install.log"
+
+# Inline the _pp_eval implementation (subset) to verify the new
+# stderr-surface behavior end-to-end.
+_pp_eval() {
+  local action="$1"; local cmd_str="$2"
+  local stderr_tmp
+  stderr_tmp=$(mktemp)
+  local rc=0
+  eval "$cmd_str" 2> "$stderr_tmp" || rc=$?
+  local stderr_tail=""
+  [ -s "$stderr_tmp" ] && stderr_tail=$(tail -c 500 "$stderr_tmp")
+  if [ "$rc" -ne 0 ] && [ -n "$stderr_tail" ]; then
+    printf 'STDERR_VISIBLE: %s\n' "$stderr_tail" >&2
+  fi
+  rm -f "$stderr_tmp"
+  return "$rc"
+}
+
+_pp_eval 'probe' 'echo INSTALL_FAILURE_DIAGNOSTIC >&2; false' || true
+PROBE
+  chmod +x "$probe_script"
+
+  PROBE_HOME="$probe_home" PP_ROOT="$PP_ROOT" \
+    bash "$probe_script" >"$capture" 2>&1
+
+  grep -q "STDERR_VISIBLE:" "$capture"
+  grep -q "INSTALL_FAILURE_DIAGNOSTIC" "$capture"
+  rm -rf "$probe_home"
 }

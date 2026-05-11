@@ -10,6 +10,73 @@ PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/budget.sh"
 
+# _pp_set_user_env_var KEY VALUE
+# Atomically set KEY=VALUE in $CLAUDE_DIR/pair-polymath/config/user.env,
+# preserving every other line. Symlink-aware (writes through to the link
+# target so dotfile-managed configs aren't replaced with regular files).
+# Fails loudly on real grep / mkdir errors (review fixes H1+H2+M1+M2).
+# Returns 0 on success, 1 on any error (with stderr message).
+_pp_set_user_env_var() {
+  local key="$1" value="$2"
+  local user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
+  local cfg_dir
+  cfg_dir="$(dirname "$user_env")"
+
+  # Fail loudly if we cannot create the config dir (review fix M2)
+  if ! mkdir -p "$cfg_dir" 2>/dev/null; then
+    printf 'polymath: cannot create config dir %s\n' "$cfg_dir" >&2
+    return 1
+  fi
+
+  [ -f "$user_env" ] || : > "$user_env"
+
+  # Create tmp in the SAME directory so the eventual mv stays atomic within
+  # the same filesystem (review fix H2). Cross-FS mv is a copy + delete with
+  # a race window.
+  local tmp
+  tmp=$(mktemp "${user_env}.XXXXXX") || {
+    printf 'polymath: mktemp failed\n' >&2
+    return 1
+  }
+
+  # Strip any existing KEY=... line. grep exit semantics with `-v`:
+  #   0 = at least one line did NOT match (kept) → normal
+  #   1 = no lines did NOT match (file empty after filter) → also normal
+  #   2+ = real read error → must not proceed (review fix H1: previously we
+  #        would silently truncate user.env to just our new line)
+  local grep_rc=0
+  grep -v "^${key}=" "$user_env" > "$tmp" || grep_rc=$?
+  case "$grep_rc" in
+    0|1) ;;
+    *)
+      rm -f "$tmp"
+      printf 'polymath: failed to read %s (grep exit %s); user.env left intact\n' "$user_env" "$grep_rc" >&2
+      return 1
+      ;;
+  esac
+
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+
+  # Symlink-preserving write: if user_env is a symlink (e.g. dotfile manager
+  # mapped it elsewhere), write THROUGH the link to the real target.
+  # Otherwise atomic rename within the same filesystem (review fix M1).
+  if [ -L "$user_env" ]; then
+    if ! cat "$tmp" > "$user_env"; then
+      rm -f "$tmp"
+      printf 'polymath: could not write through symlink %s\n' "$user_env" >&2
+      return 1
+    fi
+    rm -f "$tmp"
+  else
+    if ! mv "$tmp" "$user_env"; then
+      rm -f "$tmp"
+      printf 'polymath: could not move tmp into place at %s\n' "$user_env" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
 cmd="${1:-status}"
 
 case "$cmd" in
@@ -64,27 +131,12 @@ case "$cmd" in
     ;;
 
   disable)
-    # Toggle PP_EXTERNAL_LLM=0 in user.env (atomic tmp+mv). Idempotent.
-    user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
-    mkdir -p "$(dirname "$user_env")" 2>/dev/null || true
-    [ -f "$user_env" ] || : > "$user_env"
-    tmp=$(mktemp) || { printf 'polymath: mktemp failed\n' >&2; exit 1; }
-    # Strip any existing PP_EXTERNAL_LLM=… line, then append the disable line.
-    grep -v '^PP_EXTERNAL_LLM=' "$user_env" > "$tmp"
-    printf 'PP_EXTERNAL_LLM=0\n' >> "$tmp"
-    mv "$tmp" "$user_env"
+    _pp_set_user_env_var PP_EXTERNAL_LLM 0 || exit 1
     printf 'LLM cycle disabled. Status-only mode active; new cycles take effect within 5 min.\n'
     ;;
 
   enable)
-    # Toggle PP_EXTERNAL_LLM=1 (the default). Atomic tmp+mv. Idempotent.
-    user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
-    mkdir -p "$(dirname "$user_env")" 2>/dev/null || true
-    [ -f "$user_env" ] || : > "$user_env"
-    tmp=$(mktemp) || { printf 'polymath: mktemp failed\n' >&2; exit 1; }
-    grep -v '^PP_EXTERNAL_LLM=' "$user_env" > "$tmp"
-    printf 'PP_EXTERNAL_LLM=1\n' >> "$tmp"
-    mv "$tmp" "$user_env"
+    _pp_set_user_env_var PP_EXTERNAL_LLM 1 || exit 1
     printf 'LLM cycle enabled. New cycles take effect within 5 min.\n'
     ;;
 

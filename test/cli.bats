@@ -116,3 +116,50 @@ EOF
   ! [[ "$output" == *"will add: disable"* ]]
   ! [[ "$output" == *"will add: enable"* ]]
 }
+
+# Regression for review fix M1: symlinked user.env must keep its symlink.
+# Without the fix, mv replaces the symlink with a regular file in the .claude
+# tree, silently breaking dotfile-manager setups.
+@test "polymath disable: preserves symlink to dotfile-managed user.env" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  # Store the real file under a "dotfiles" directory and symlink user.env to it
+  mkdir -p "$HOME/dotfiles"
+  printf 'PP_MODEL=gpt-5\n' > "$HOME/dotfiles/user.env"
+  ln -s "$HOME/dotfiles/user.env" "$CLAUDE_DIR/pair-polymath/config/user.env"
+
+  bash "$PP_ROOT/bin/polymath" disable >/dev/null
+
+  # Symlink must still exist
+  [ -L "$CLAUDE_DIR/pair-polymath/config/user.env" ]
+  # And its target must be the unchanged dotfile path
+  resolved=$(readlink "$CLAUDE_DIR/pair-polymath/config/user.env")
+  [ "$resolved" = "$HOME/dotfiles/user.env" ]
+  # And the disable line was written THROUGH the symlink to the real file
+  grep -q '^PP_EXTERNAL_LLM=0$' "$HOME/dotfiles/user.env"
+  grep -q '^PP_MODEL=gpt-5$' "$HOME/dotfiles/user.env"
+}
+
+# Regression for review fix H1: read errors must not silently destroy user.env.
+@test "polymath disable: unreadable user.env aborts with clear error" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  printf 'PP_MODEL=gpt-5\n' > "$CLAUDE_DIR/pair-polymath/config/user.env"
+  # Pre-write something to make sure we don't silently nuke it
+  chmod 000 "$CLAUDE_DIR/pair-polymath/config/user.env"
+
+  run bash "$PP_ROOT/bin/polymath" disable
+  # Root would still be able to read; running as non-root, grep exit > 1.
+  # If we DO run as root in CI, this test should still find user.env intact
+  # because the disable succeeded.
+  chmod 644 "$CLAUDE_DIR/pair-polymath/config/user.env"
+
+  if [ "$status" -ne 0 ]; then
+    # Expected non-root path: failure + clear stderr, original file untouched
+    [[ "$output" == *"failed to read"* ]] || [[ "$output" == *"left intact"* ]]
+    grep -q '^PP_MODEL=gpt-5$' "$CLAUDE_DIR/pair-polymath/config/user.env"
+  else
+    # Root path: disable succeeded; line was added
+    grep -q '^PP_EXTERNAL_LLM=0$' "$CLAUDE_DIR/pair-polymath/config/user.env"
+  fi
+}

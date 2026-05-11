@@ -26,7 +26,7 @@ audit_log() {
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
   # Use jq to build the JSON safely (escapes embedded quotes / newlines).
-  local entry
+  local entry=""
   if command -v jq >/dev/null 2>&1; then
     entry=$(jq -cn \
       --arg ts "$ts" \

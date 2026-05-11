@@ -1116,3 +1116,40 @@ EOF
   [[ "$output" == *"Unknown models seen"* ]]
   [[ "$output" == *"claude-3.5-sonnet"* ]]
 }
+
+# ─── self-test ──────────────────────────────────────────────────────────────
+# Flag-parsing + dep-check paths only. The real LLM call is NOT exercised in
+# CI (would burn ~$0.0001 per push × every PR). Manual maintainer probe with
+# `polymath self-test --yes` verifies the spend path before release.
+
+@test "polymath self-test --help: prints usage + exits 0" {
+  run bash "$PP_ROOT/bin/polymath" self-test --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"end-to-end LLM probe"* ]]
+  [[ "$output" == *"\$0.0001"* ]]
+}
+
+@test "polymath self-test: unknown flag → exit 2" {
+  run bash "$PP_ROOT/bin/polymath" self-test --nope
+  [ "$status" -eq 2 ]
+}
+
+@test "polymath self-test: non-interactive stdin without --yes → exit 1" {
+  PATH=/usr/bin:/bin run bash -c "echo '' | bash '$PP_ROOT/bin/polymath' self-test"
+  # Either refuses on non-TTY OR no llm CLI → both should exit non-zero with a clear message
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Refusing"* ]] || [[ "$output" == *"not on PATH"* ]] || [[ "$output" == *"not configured"* ]]
+}
+
+@test "polymath self-test: missing llm CLI → exit 1 with clear message" {
+  PATH=/usr/bin:/bin run bash -c "bash '$PP_ROOT/bin/polymath' self-test --yes </dev/null"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"llm CLI not on PATH"* ]]
+}
+
+@test "polymath help: lists self-test as available" {
+  run bash "$PP_ROOT/bin/polymath" help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"polymath self-test"* ]]
+  ! [[ "$output" == *"will add: self-test"* ]]
+}

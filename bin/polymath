@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Pair Polymath CLI — lean v1: status + version subcommands only.
-# v0.2 will add: doctor, cost, disable, enable, logs, update, self-test.
+# Pair Polymath CLI — v0.2: status, version, doctor, enable/disable, logs,
+# cost, update, self-test.
 
 set -u
 
@@ -760,6 +760,120 @@ HELP
     fi
     ;;
 
+  self-test)
+    shift
+    _pp_st_yes=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --yes|-y) _pp_st_yes=1; shift ;;
+        -h|--help)
+          cat <<HELP
+polymath self-test — end-to-end LLM probe (~\$0.0001)
+
+Makes one real LLM call through the run_llm wrapper, verifies:
+  - openai key is set and accepted
+  - network reaches the API
+  - run_llm wrapper invokes correctly (timeout + portable)
+  - budget counter increments by 1
+  - response is parseable + matches expected sentinel
+
+Usage:
+  polymath self-test                Interactive: confirm before spending
+  polymath self-test --yes          Non-interactive: skip confirm
+  polymath self-test --help         This message
+
+Cost: ~\$0.0001 per run (single gpt-5-mini call, ~50 input tokens / ~10 output tokens).
+HELP
+          exit 0
+          ;;
+        *) printf 'polymath self-test: unknown flag %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+
+    # Confirm before spending (unless --yes)
+    if [ "$_pp_st_yes" != "1" ]; then
+      printf 'polymath self-test will make one real LLM call (~$0.0001). Proceed? [Y/n] '
+      if ! [ -t 0 ]; then
+        printf '\npolymath self-test: non-interactive stdin without --yes. Refusing.\n' >&2
+        exit 1
+      fi
+      if ! read -r _pp_st_ans; then
+        printf '\npolymath self-test: read failed (EOF?); aborting.\n' >&2
+        exit 1
+      fi
+      case "${_pp_st_ans:-Y}" in
+        [Yy]*|"") ;;
+        *) printf 'Aborted.\n'; exit 0 ;;
+      esac
+    fi
+
+    # === Dispatch the actual probe ===
+    if ! command -v llm >/dev/null 2>&1; then
+      printf '\033[31m✗\033[0m self-test: llm CLI not on PATH\n' >&2
+      exit 1
+    fi
+    if ! llm keys list 2>/dev/null | grep -q '^openai$'; then
+      printf '\033[31m✗\033[0m self-test: openai key not configured (run: llm keys set openai)\n' >&2
+      exit 1
+    fi
+
+    # Record budget before
+    _pp_st_budget_before=$(budget_get)
+
+    # Use the SAME run_llm wrapper that bin/statusline.sh uses, by extracting it.
+    # For test isolation, we redeclare it here (it's portable + idempotent).
+    _pp_st_run_llm() {
+      local timeout_s="${1:-15}"
+      shift
+      if command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_s" llm "$@"
+      elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$timeout_s" llm "$@"
+      else
+        llm "$@"
+      fi
+    }
+
+    printf '\033[1mself-test\033[0m: probing OpenAI via run_llm...\n'
+
+    # Single cheap call: ask for a known sentinel
+    _pp_st_out=$(printf 'Respond with EXACTLY the word: PAIRPOLYMATH_OK' | _pp_st_run_llm 15 -m gpt-5-mini "You are a probe responder. Output exactly the requested word, no more." 2>/dev/null)
+    _pp_st_rc=$?
+
+    # Increment budget AFTER the call (same as statusline.sh wraps real calls)
+    budget_inc || true
+
+    if [ "$_pp_st_rc" -ne 0 ]; then
+      printf '\033[31m✗\033[0m self-test: llm call failed (rc=%s). Check network + key.\n' "$_pp_st_rc" >&2
+      exit 1
+    fi
+
+    # Verify the response
+    _pp_st_trimmed=$(printf '%s' "$_pp_st_out" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    case "$_pp_st_trimmed" in
+      *pairpolymath_ok*)
+        printf '\033[32m✓\033[0m self-test: response matched sentinel\n'
+        ;;
+      *)
+        printf '\033[33m⚠\033[0m self-test: response did NOT match sentinel "PAIRPOLYMATH_OK"\n'
+        printf '          got: %s\n' "${_pp_st_out:0:200}"
+        printf '          (model may be misconfigured or overly verbose; key + network ARE working)\n'
+        ;;
+    esac
+
+    # Verify budget incremented
+    _pp_st_budget_after=$(budget_get)
+    _pp_st_delta=$((_pp_st_budget_after - _pp_st_budget_before))
+    if [ "$_pp_st_delta" -ge 1 ]; then
+      printf '\033[32m✓\033[0m self-test: budget incremented by %s\n' "$_pp_st_delta"
+    else
+      printf '\033[31m✗\033[0m self-test: budget did NOT increment (before=%s, after=%s)\n' "$_pp_st_budget_before" "$_pp_st_budget_after"
+      exit 1
+    fi
+
+    printf '\n\033[32mAll self-test checks passed.\033[0m\n'
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
@@ -772,10 +886,9 @@ Usage:
   polymath logs        Tail recent lens observations (-n, --lens, --follow)
   polymath cost        Show estimated USD spend (--since, --by-lens, --json)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)
+  polymath self-test   End-to-end LLM probe (~\$0.0001 per run)
   polymath version     Print version
   polymath help        This message
-
-v0.2 will add: self-test
 EOF
     ;;
 

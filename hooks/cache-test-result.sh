@@ -21,12 +21,13 @@ case "$command" in
     cache="${HOME}/.claude/cache/cc-test-${session_id}.cache"
     mkdir -p "${HOME}/.claude/cache" 2>/dev/null
     is_error=$(echo "$input" | jq -r '.tool_response.is_error // false' 2>/dev/null)
-    output=$(echo "$input" | jq -r '.tool_response.content // ""' 2>/dev/null | head -c 1500)
+    # Keep the failure TAIL (where errors surface) rather than the banner head.
+    output=$(echo "$input" | jq -r '.tool_response.content // ""' 2>/dev/null | tail -c 1500)
     cat > "$cache" <<DAT
 TIMESTAMP: $(date +%s)
 COMMAND: $command
 ERROR: $is_error
-OUTPUT (first 1500 chars):
+OUTPUT (last 1500 chars):
 $output
 DAT
     ;;

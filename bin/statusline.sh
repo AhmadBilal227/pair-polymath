@@ -4,6 +4,13 @@
 # Designed for refreshInterval: 2 in settings.json.
 # Spec: ~/.claude/specs/2026-05-11-claude-code-statusline-design.md
 
+# Pair Polymath — load config + libs
+_pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/config.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/budget.sh"
+
 input=$(cat)
 
 # --- Animation tick (4-frame, 2s per frame) ---
@@ -65,25 +72,7 @@ run_llm() {
   fi
 }
 
-# FIX (review C6): single shared budget increment with atomic mkdir lock.
-# All inv/retry/critique increments share ONE lock against the shared budget file.
-# Prevents cross-lens read-modify-write race that would lose increments.
-# Defined in parent shell so background subshells inherit it.
-budget_inc() {
-  local lock="${MON_BUDGET_FILE}.inc.lock"
-  local attempts=0
-  # Bounded busy-wait (50 attempts × 20ms = 1s max)
-  while ! mkdir "$lock" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    [ "$attempts" -gt 50 ] && return 1
-    sleep 0.02 2>/dev/null || sleep 1
-  done
-  local cur
-  cur=$(cat "$MON_BUDGET_FILE" 2>/dev/null || echo 0)
-  echo $((cur + 1)) > "$MON_BUDGET_FILE"
-  rmdir "$lock" 2>/dev/null
-  return 0
-}
+# budget_inc + budget_reserve live in lib/budget.sh (sourced at top of file).
 
 # --- Extract JSON fields (single jq call, portable while-read loop) ---
 F=()
@@ -119,6 +108,11 @@ input_tokens="${F[11]:-0}"
 session_id="${F[12]:-default}"
 limit_7d="${F[13]:--1}"
 limit_7d_reset="${F[14]:-0}"
+
+# Canonicalize session_id: fall back to env if JSON had nothing usable.
+# Runtime assert non-empty — should never trip given the default above.
+session_id="${session_id:-${SESSION_ID:-default}}"
+[ -z "$session_id" ] && { echo "" ; exit 0 ; }
 
 # --- Git branch + dirty marker ---
 branch=""
@@ -177,9 +171,10 @@ if [ "$pct" -gt 0 ]; then
 fi
 
 # 6. Cost — AMBER bold (visual anchor). The $ sign is its own indicator.
-cost_cents=$(awk "BEGIN { printf \"%d\", $cost * 100 }" 2>/dev/null || echo 0)
+# Use awk -v for safe interpolation (cost is untrusted JSON; never inline into program).
+cost_cents=$(awk -v c="$cost" 'BEGIN { printf "%d", c * 100 }' 2>/dev/null || echo 0)
 if [ "$cost_cents" -ge 1 ]; then
-  cost_fmt=$(awk "BEGIN { printf \"%.2f\", $cost }")
+  cost_fmt=$(awk -v c="$cost" 'BEGIN { printf "%.2f", c }')
   line="${line} ${BOLD}${AMBER}\$${cost_fmt}${R}"
 fi
 
@@ -198,7 +193,7 @@ fi
 
 # 9. Burn rate (>$10/hr) — crimson, the /hr suffix is the indicator
 if [ "$duration_ms" -gt 60000 ] && [ "$cost_cents" -gt 0 ] 2>/dev/null; then
-  hourly_int=$(awk "BEGIN { printf \"%d\", $cost * 3600000 / $duration_ms }" 2>/dev/null || echo 0)
+  hourly_int=$(awk -v c="$cost" -v d="$duration_ms" 'BEGIN { if (d > 0) printf "%d", c * 3600000 / d; else printf "0" }' 2>/dev/null || echo 0)
   if [ "$hourly_int" -ge 10 ]; then
     line="${line} ${SOFT_CRIMSON}\$${hourly_int}/hr${R}"
   fi
@@ -260,7 +255,7 @@ fi
 # 12. CPU load — only at critical (>5.0). Saves space; line 2 needs the room.
 load_1m=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
 if [ -n "$load_1m" ]; then
-  load_int=$(awk "BEGIN { printf \"%d\", $load_1m * 10 }")
+  load_int=$(awk -v l="$load_1m" 'BEGIN { printf "%d", l * 10 }')
   if [ "$load_int" -ge 50 ]; then
     line="${line} ${SUBTLE}cpu${R} ${SOFT_CRIMSON}${load_1m}${R}"
   fi
@@ -373,16 +368,13 @@ fi
 
 # === Line 4: LLM monitor — pair-programmer watching the transcript ===
 # Reads last ~6KB of transcript, asks LLM to surface 1 actionable observation.
-# Refresh: 5min. Model: gpt-5.5. Daily call cap: 30 (~$0.60-1.50/day with gpt-5.5).
-# Dial back: set MON_MODEL="gpt-5-mini" (~20× cheaper) or raise MON_MAX_DAILY.
-MON_MODEL="gpt-5-mini"        # routine lens analysts (cheap, ~$0.005/call)
-MON_MODEL_DEEP="gpt-5.5"      # rotating "deep" slot — 1 lens per cycle gets the strong model
-MON_MODEL_CRITIQUE="gpt-5"    # self-critique pass — balanced reasoning, half the cost of 5.5
-MON_PARALLEL_S=300            # 5 minutes between parallel 7-agent runs
-MON_MAX_DAILY=3500            # worst-case 23 reserved per cycle (1p + 7a + 1c + 7r + 7e). Cap binds at ~152 cycles/day. Real spend $13-27/day depending on retry storms.
-MON_BUDGET_FILE="${HOME}/.claude/cache/cc-monitor-budget-$(date +%Y%m%d).txt"
-MON_LAST_PARALLEL="${HOME}/.claude/cache/cc-monitor-last-parallel-${session_id}.txt"
-MON_LOCK="/tmp/cc-monitor-fetch-${session_id}.lock"
+# Refresh: PP_PARALLEL_INTERVAL_S. Models + cap come from config/default.env (override
+# in ~/.claude/pair-polymath/config/user.env). Worst-case 23 calls reserved per cycle
+# (1p + 7a + 1c + 7r + 7e). Cap binds at ~152 cycles/day at PP_MAX_DAILY_CALLS=3500.
+# PP_MODEL, PP_MODEL_DEEP, PP_MODEL_CRITIQUE, PP_PARALLEL_INTERVAL_S, PP_MAX_DAILY_CALLS
+# all sourced from config. PP_BUDGET_FILE comes from lib/budget.sh.
+PP_LAST_PARALLEL="${PP_CACHE_DIR}/pp-last-parallel-${session_id}.txt"
+PP_LOCK="/tmp/pp-fetch-${session_id}.lock"
 
 # Per-lens cache files — populated by parallel run, read by display + hook
 LENS_NAMES=("UX_DESIGN" "ENGINEERING" "SECURITY" "PERF_FINOPS" "PRODUCT_BIZ")
@@ -390,41 +382,40 @@ LENS_NAMES=("UX_DESIGN" "ENGINEERING" "SECURITY" "PERF_FINOPS" "PRODUCT_BIZ")
 transcript_path=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
 
 # Active/passive mode: detect idle terminal via transcript mtime.
-# If >30min since last activity → passive mode, skip LLM generation.
+# If > PP_IDLE_THRESHOLD_S since last activity → passive mode, skip LLM generation.
 # Display cycle still shows last cached observations.
-MON_IDLE_THRESHOLD_S=1800
 session_idle_s=0
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
   session_idle_s=$(($(date +%s) - $(stat -f %m "$transcript_path" 2>/dev/null || echo $(date +%s))))
 fi
 is_active=1
-[ "$session_idle_s" -gt "$MON_IDLE_THRESHOLD_S" ] && is_active=0
+[ "$session_idle_s" -gt "${PP_IDLE_THRESHOLD_S:-1800}" ] && is_active=0
 
-# Check if 5-min parallel cycle is due
-last_parallel=$(cat "$MON_LAST_PARALLEL" 2>/dev/null || echo 0)
+# Check if parallel cycle is due
+last_parallel=$(cat "$PP_LAST_PARALLEL" 2>/dev/null || echo 0)
 parallel_age=$(($(date +%s) - last_parallel))
 
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
     && [ "$is_active" -eq 1 ] \
-    && [ "$parallel_age" -gt "$MON_PARALLEL_S" ]; then
-  mon_lock_age=$(($(date +%s) - $(stat -f %m "$MON_LOCK" 2>/dev/null || echo 0)))
-  calls_today=$(cat "$MON_BUDGET_FILE" 2>/dev/null || echo 0)
-  # Need at least 6 call-budget headroom for one parallel run (1 planner + 5 analysts)
-  if { [ ! -f "$MON_LOCK" ] || [ "$mon_lock_age" -gt 300 ]; } \
-      && [ "$((calls_today + 23))" -le "$MON_MAX_DAILY" ]; then
-    touch "$MON_LOCK"
-    echo "$(date +%s)" > "$MON_LAST_PARALLEL"
+    && [ "$parallel_age" -gt "$PP_PARALLEL_INTERVAL_S" ]; then
+  mon_lock_age=$(($(date +%s) - $(stat -f %m "$PP_LOCK" 2>/dev/null || echo 0)))
+  calls_today=$(budget_get)
+  # Need worst-case 23 call-budget headroom for one parallel run
+  if { [ ! -f "$PP_LOCK" ] || [ "$mon_lock_age" -gt 300 ]; } \
+      && [ "$((calls_today + 23))" -le "$PP_MAX_DAILY_CALLS" ]; then
+    touch "$PP_LOCK"
+    echo "$(date +%s)" > "$PP_LAST_PARALLEL"
     (
       # FIX (review C2+C5): single trap covering ALL locks. Don't let later trap-EXIT calls
       # in this subshell override this. Includes per-lens inv/retry/inc locks via glob cleanup.
       trap '
-        rm -f "$MON_LOCK" 2>/dev/null
-        rmdir "${MON_BUDGET_FILE}.reserve.lock" 2>/dev/null
-        rmdir "${MON_BUDGET_FILE}.crit.lock" 2>/dev/null
-        rmdir "${MON_BUDGET_FILE}.inc.lock" 2>/dev/null
+        rm -f "$PP_LOCK" 2>/dev/null
+        rmdir "${PP_BUDGET_FILE}.reserve.lock" 2>/dev/null
+        rmdir "${PP_BUDGET_FILE}.crit.lock" 2>/dev/null
+        rmdir "${PP_BUDGET_FILE}.inc.lock" 2>/dev/null
         for _li in 0 1 2 3 4 5 6; do
-          rmdir "${MON_BUDGET_FILE}.inv.lock.${_li}" 2>/dev/null
-          rmdir "${MON_BUDGET_FILE}.retry.lock.${_li}" 2>/dev/null
+          rmdir "${PP_BUDGET_FILE}.inv.lock.${_li}" 2>/dev/null
+          rmdir "${PP_BUDGET_FILE}.retry.lock.${_li}" 2>/dev/null
         done
       ' EXIT INT TERM HUP
 
@@ -511,23 +502,15 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       prev_observations=$(printf "%s\n%s" "$prev_session" "$prev_project" | sort -u | head -25)
 
 
-      # === Reserve budget BEFORE any LLM call (planner + 5 analysts = 6 total) ===
-      # Single atomic reservation prevents the race where parallel analysts each
-      # increment independently and skip counting the planner. Must wrap BOTH the
-      # planner and the analyst fan-out so an exhausted budget skips everything.
-      RESERVE_LOCK="${MON_BUDGET_FILE}.reserve.lock"
-      can_run=0
-      # FIX (review C2): removed redundant `trap EXIT` — the one at line 397 already covers RESERVE_LOCK.
+      # === Reserve budget BEFORE any LLM call (planner + 7 analysts + critique + retries) ===
+      # Single atomic reservation prevents the race where parallel analysts each increment
+      # independently and skip counting the planner. Must wrap BOTH planner and analyst
+      # fan-out so an exhausted budget skips everything.
       # FIX (review C1): reserve WORST-CASE 23 calls (base 9 + 7 retries + 7 escalation invs)
-      # so the daily cap can't be bypassed by drop storms. Excess unused calls aren't refunded —
-      # this caps spend on the safe side.
-      if mkdir "$RESERVE_LOCK" 2>/dev/null; then
-        cur=$(cat "$MON_BUDGET_FILE" 2>/dev/null || echo 0)
-        if [ $((cur + 23)) -le "$MON_MAX_DAILY" ]; then
-          echo $((cur + 23)) > "$MON_BUDGET_FILE"
-          can_run=1
-        fi
-        rmdir "$RESERVE_LOCK"
+      # so the daily cap can't be bypassed by drop storms. Excess unused calls aren't refunded.
+      can_run=0
+      if budget_reserve 23; then
+        can_run=1
       fi
 
       if [ "$can_run" -eq 1 ]; then
@@ -660,7 +643,7 @@ GROUND
             5) lens_group="STRATEGIC_FOUNDER"; lens_hats="STRATEGY, FOCUS, OPPORTUNITY"; lens_focus="opportunity cost of current work, what NOT to build, competitive positioning, 80/20 focus discipline, time-to-revenue, kill criteria for stalled efforts" ;;
             6) lens_group="COGNITIVE_FLOW"; lens_hats="FLOW, FOCUS, REST"; lens_focus="cognitive load signals, context-switch cost, deep-work windows, break timing, burnout markers, decision fatigue, working-memory overload from too many open threads" ;;
           esac
-          MON_CACHE_LENS="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${lens_idx}.txt"
+          PP_CACHE_LENS="${PP_CACHE_DIR}/cc-monitor-${session_id}-lens${lens_idx}.txt"
 
           # === Escalation check: if this lens has 3+ consecutive drops, escalate to deep mode ===
           # Deep mode = extra lens-specific evidence-gathering (mini-planner picks files + greps)
@@ -674,12 +657,12 @@ GROUND
           # Both rotate every cycle through 5 positions. Offset wildcard so they don't
           # always coincide (deep stays focused; wildcard is the broader one).
           # FIX (review): rotate through all 7 lenses, not 5
-          deep_slot=$(( ($(date +%s) / MON_PARALLEL_S) % 7 ))
+          deep_slot=$(( ($(date +%s) / PP_PARALLEL_INTERVAL_S) % 7 ))
           wildcard_slot=$(( (deep_slot + 2) % 7 ))
           if [ "$lens_idx" -eq "$deep_slot" ]; then
-            agent_model="$MON_MODEL_DEEP"
+            agent_model="$PP_MODEL_DEEP"
           else
-            agent_model="$MON_MODEL"
+            agent_model="$PP_MODEL"
           fi
           if [ "$lens_idx" -eq "$wildcard_slot" ]; then
             relevance_directive="WILDCARD AGENT — you have 20% allowance for broader strategic observations. You may surface something the user could miss but should know, even if not directly tied to USER'S RECENT MESSAGES. Still ground it in the codebase facts you can see."
@@ -746,7 +729,7 @@ $lens_evidence"
             # Validate + write per-lens cache
             if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
               if echo "$lens_suggestion" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
-                echo "$lens_suggestion" > "$MON_CACHE_LENS"
+                echo "$lens_suggestion" > "$PP_CACHE_LENS"
                 # Append to histories (session + project) — appends are atomic on POSIX
                 echo "$lens_suggestion" >> "$HIST_FILE_SESSION"
                 echo "$lens_suggestion" >> "$HIST_FILE_PROJECT"
@@ -777,7 +760,7 @@ ${grounded:0:3000}
 
 OBSERVATIONS TO JUDGE:
 $critique_input"
-          critique_output=$(printf "%s" "$critique_data" | run_llm 30 -m "$MON_MODEL_CRITIQUE" -s "$critique_sys" 2>/dev/null)
+          critique_output=$(printf "%s" "$critique_data" | run_llm 30 -m "$PP_MODEL_CRITIQUE" -s "$critique_sys" 2>/dev/null)
 
           # Atomic budget increment via shared lock (FIX review C6)
           budget_inc
@@ -815,7 +798,7 @@ $critique_input"
 
                   retry_sys="You are the ${rlens_group} lens. Your previous observation was DROPPED by the critique pass with reason: ${drop_reason}. Try a DIFFERENT angle, file, or pattern. Same constraints: pick a HAT from ${rlens_hats}, focus on ${rlens_focus}, output exactly HAT: hook|||body (hook 40-70 chars, body 80-180 chars ending in a verb). Only cite paths/symbols visible in the grounded facts. If you still cannot find a valid different observation, output SILENT."
 
-                  retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$MON_MODEL" -s "$retry_sys" 2>/dev/null)
+                  retry_result=$(printf "%s" "$grounded" | run_llm 45 -m "$PP_MODEL" -s "$retry_sys" 2>/dev/null)
 
                   # Atomic budget increment via shared lock (FIX review C6)
                   budget_inc
@@ -841,7 +824,7 @@ $critique_input"
         tail -100 "$HIST_FILE_PROJECT" > "${HIST_FILE_PROJECT}.tmp" 2>/dev/null && mv "${HIST_FILE_PROJECT}.tmp" "$HIST_FILE_PROJECT"
       fi  # grounded && llm available
       fi  # can_run — gates BOTH planner and analyst fan-out
-      rm -f "$MON_LOCK"
+      rm -f "$PP_LOCK"
     ) >/dev/null 2>&1 &
   fi
 fi
@@ -852,9 +835,9 @@ mon_topic=""
 mon_body=""
 lens_slot=$(( ($(date +%s) / 30) % 8 ))
 if [ "$lens_slot" -lt 7 ]; then
-  MON_CACHE_DISPLAY="${HOME}/.claude/cache/cc-monitor-${session_id}-lens${lens_slot}.txt"
-  if [ -f "$MON_CACHE_DISPLAY" ] && [ -s "$MON_CACHE_DISPLAY" ]; then
-    mon=$(head -1 "$MON_CACHE_DISPLAY")
+  PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-lens${lens_slot}.txt"
+  if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
+    mon=$(head -1 "$PP_CACHE_DISPLAY")
     if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
       mon_topic="${mon%%|||*}"
       mon_body="${mon#*|||}"

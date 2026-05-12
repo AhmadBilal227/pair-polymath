@@ -1,0 +1,7 @@
+UX_DESIGN|||||||
+ENGINEERING|||||||
+SECURITY|||||||
+PERF_FINOPS|||||||
+PRODUCT_BIZ|||||||
+STRATEGIC_FOUNDER|||||||
+COGNITIVE_FLOW|||||||

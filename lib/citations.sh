@@ -12,10 +12,19 @@
 #     stdin: nothing
 #     reads: $grounded  (the assembled grounded blob from statusline.sh)
 #     writes (globals):
-#       $_pp_valid_paths   — newline-separated paths from
-#                            GIT STATUS / GIT RECENT FILES / RECENT COMMITS /
-#                            RECENT DIFF SCOPE / CWD TOP-LEVEL / CWD LISTING /
-#                            RECENT TOOL CALLS sections
+#       $_pp_valid_paths   — newline-separated paths from path-bearing sections
+#                            statusline.sh ACTUALLY emits in production:
+#                            GIT STATUS / RECENT DIFF SCOPE / CWD TOP-LEVEL /
+#                            RECENT TOOL CALLS / OPEN PRS / RECENT CI RUNS.
+#                            (R2 fix: prior list included GIT RECENT FILES and
+#                            CWD LISTING — sections statusline.sh never emits —
+#                            and pulled from RECENT COMMITS which is SHA+subject
+#                            and not actually path-rich. We deliberately exclude
+#                            FILE READ — that's for symbols; USER RECENT
+#                            MESSAGES + TRANSCRIPT TAIL — free text, possibly
+#                            hallucinated paths; PREVIOUS OBSERVATIONS —
+#                            semantically circular, would let last cycle's bad
+#                            citations pass this cycle's check.)
 #       $_pp_valid_symbols — newline-separated identifiers from FILE READ
 #                            (matching [A-Za-z_][A-Za-z0-9_]{2,}, stopwords filtered)
 #     both capped at 200 entries (memory + prompt-token guard).
@@ -48,9 +57,17 @@ pp_extract_citations() {
   # === Paths ===
   # Extract the path-bearing sections via awk (Bash 3.2 has no associative
   # arrays for "section -> include?", but awk does). We include any line that
-  # falls between a path-bearing header (GIT STATUS, GIT RECENT FILES,
-  # RECENT COMMITS, RECENT DIFF SCOPE, CWD TOP-LEVEL, CWD LISTING,
-  # RECENT TOOL CALLS) and the next `=== ` header.
+  # falls between a path-bearing header and the next `=== ` header.
+  #
+  # Section names MUST match exactly what bin/statusline.sh emits in the
+  # grounded blob (search statusline.sh for `=== ` markers around lines
+  # 680-720). Header format examples:
+  #   `=== GIT STATUS (uncommitted) ===`
+  #   `=== RECENT DIFF SCOPE ===`
+  #   `=== CWD TOP-LEVEL ===`
+  #   `=== RECENT TOOL CALLS (last 15) ===`
+  #   `=== OPEN PRS (gh, cached 10min) ===`
+  #   `=== RECENT CI RUNS (gh, cached 5min) ===`
   #
   # The section-extraction awk script is small enough that LC_ALL=C inline
   # is portable + cheap. Output is then fed to grep -oE for the actual
@@ -61,12 +78,11 @@ pp_extract_citations() {
       # Header line. Decide whether we want the BODY that follows.
       include = 0
       if (index($0, "GIT STATUS")        > 0) include = 1
-      if (index($0, "GIT RECENT FILES")  > 0) include = 1
-      if (index($0, "RECENT COMMITS")    > 0) include = 1
       if (index($0, "RECENT DIFF SCOPE") > 0) include = 1
       if (index($0, "CWD TOP-LEVEL")     > 0) include = 1
-      if (index($0, "CWD LISTING")       > 0) include = 1
       if (index($0, "RECENT TOOL CALLS") > 0) include = 1
+      if (index($0, "OPEN PRS")          > 0) include = 1
+      if (index($0, "RECENT CI RUNS")    > 0) include = 1
       next
     }
     include == 1 { print }

@@ -19,25 +19,30 @@ PP_MEMORY_DIR="${PP_MEMORY_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/memor
 # Same salt persists forever per HOME — uninstalling pair-polymath does NOT
 # delete this file (allows memory across reinstalls).
 #
-# RACE-SAFE: parallel callers each write to a per-PID tmp then `ln`
-# (hardlink, atomic create-or-fail) into the canonical name. Losers
-# clean up their tmp; the winner's bytes are the single source of truth.
+# RACE-SAFE (R3.14): generate the random bytes locally, then write via shell
+# noclobber (`set -C; > sf`). bash's noclobber redirect uses open(2) with
+# O_EXCL | O_CREAT, which is atomic per POSIX and unaffected by the link(2)
+# atomicity quirks observed on overlayfs (CI flake in test 329, where the
+# previous `mktemp + ln` pattern occasionally let two parallel writers BOTH
+# observe a successful "ln" against an empty sf, producing torn salts).
+# Losers' `>` fails cleanly; their bytes are discarded and they fall through
+# to read the winner's bytes via `cat`.
 pp_memory_get_salt() {
   local sf="$PP_MEMORY_DIR/.salt"
   if [ ! -s "$sf" ]; then
     mkdir -p "$PP_MEMORY_DIR" 2>/dev/null || return 1
     chmod 700 "$PP_MEMORY_DIR" 2>/dev/null || true
-    local tmp="$sf.$$.tmp"
-    LC_ALL=C dd if=/dev/urandom bs=16 count=1 2>/dev/null \
-      | od -An -tx1 | LC_ALL=C tr -d ' \n' > "$tmp"
-    chmod 600 "$tmp" 2>/dev/null || true
-    # Atomic create-or-keep: ln fails if target exists → loser's tmp is
-    # cleaned up; winner's salt is the canonical one. No torn reads.
-    if ln "$tmp" "$sf" 2>/dev/null; then
-      rm -f "$tmp"
-    else
-      rm -f "$tmp"   # someone else won
-    fi
+    local bytes
+    bytes=$(LC_ALL=C dd if=/dev/urandom bs=16 count=1 2>/dev/null \
+              | od -An -tx1 | LC_ALL=C tr -d ' \n')
+    [ -z "$bytes" ] && return 1
+    # Atomic create-or-fail via shell noclobber. Subshell so `set -C`
+    # doesn't leak to the caller. `|| true` is required: under `set -e`
+    # (bats enables it), the subshell's non-zero exit on EEXIST would
+    # propagate out of this function and prevent the fall-through `cat`
+    # from reading the winner's bytes. Losing the race must NOT be fatal.
+    ( set -C; printf '%s' "$bytes" > "$sf" ) 2>/dev/null || true
+    chmod 600 "$sf" 2>/dev/null || true
   fi
   local salt
   salt=$(cat "$sf" 2>/dev/null) || return 1

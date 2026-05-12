@@ -72,8 +72,10 @@ _pp_memory_summarize_for_eviction() {
   [ -z "$response" ] && return 1
 
   # Strip accidental code fences. Parse expecting a single JSON object.
+  # F11: shared awk helper from patterns.sh — tolerant of trailing whitespace
+  # and mixed-case `json` markers.
   local cleaned
-  cleaned=$(printf '%s' "$response" | LC_ALL=C sed -E 's/^```(json)?$//; s/^```$//')
+  cleaned=$(printf '%s' "$response" | _pp_memory_strip_code_fence)
 
   # Validate required fields. Empty/malformed → 1 (caller aborts).
   local title evidence lens_ids conf type evicted

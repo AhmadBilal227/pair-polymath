@@ -48,3 +48,39 @@ teardown() { rm -rf "$SANDBOX"; }
   [ "$status" -eq 0 ]
   pp_memory_unlock "$SANDBOX/proj"
 }
+
+@test "lock: F6 — _pp_memory_increment_maint_counter_locked increments + reports" {
+  mkdir -p "$SANDBOX/proj"
+  # Seed a DB with the cycle_state schema (mirrors what pp_memory_db_init creates).
+  sqlite3 "$SANDBOX/proj/observations.sqlite" "CREATE TABLE cycle_state(key TEXT PRIMARY KEY, value TEXT);"
+  out1=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 100)
+  [ "$out1" = "1" ]
+  out2=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 100)
+  [ "$out2" = "2" ]
+}
+
+@test "lock: F6 — counter resets and emits TRIGGER at threshold" {
+  mkdir -p "$SANDBOX/proj"
+  sqlite3 "$SANDBOX/proj/observations.sqlite" "CREATE TABLE cycle_state(key TEXT PRIMARY KEY, value TEXT); INSERT INTO cycle_state VALUES('maintenance_cycle_counter','11');"
+  out=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 12)
+  [ "$out" = "TRIGGER" ]
+  cur=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  [ "$cur" = "0" ]
+}
+
+@test "lock: F6 — non-existent DB returns NOOP without crashing" {
+  mkdir -p "$SANDBOX/proj"
+  out=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 12)
+  [ "$out" = "NOOP" ]
+}
+
+@test "lock: F6 — non-numeric threshold falls back to default" {
+  mkdir -p "$SANDBOX/proj"
+  sqlite3 "$SANDBOX/proj/observations.sqlite" "CREATE TABLE cycle_state(key TEXT PRIMARY KEY, value TEXT); INSERT INTO cycle_state VALUES('maintenance_cycle_counter','11');"
+  out=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 'evil; DROP TABLE cycle_state')
+  # Default threshold is 12, current value 11 → +1 = 12 → TRIGGER.
+  [ "$out" = "TRIGGER" ]
+  # Table must still exist.
+  cur=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  [ "$cur" = "0" ]
+}

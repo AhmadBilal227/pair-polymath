@@ -127,6 +127,142 @@ teardown() { rm -rf "$SANDBOX"; }
   [ ! -f "$PROJ/patterns.jsonl" ]
 }
 
+@test "integration: F1 — pp_memory_top_patterns output formats into RECURRING PATTERNS block" {
+  # Seed obs + extract patterns through the same flow statusline uses.
+  _ins() { PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "$1" "$2" TOPIC "$3" "$4" "[]" "[]" sess; }
+  _ins o1 ENG "n+1 in users.ts"  "iterates with per-row SELECT in users.ts:42"
+  _ins o2 PERF "n+1 in users.ts" "iterates with per-row SELECT in users.ts:42"
+  _ins o3 ARCH "n+1 elsewhere"   "iterates with per-row SELECT in orders.ts:7"
+  pp_memory_extract_patterns "$SANDBOX/repo"
+  [ -f "$PROJ/patterns.jsonl" ]
+  # Mirror the statusline MEMORY_BLOCK assembly. We can't shell out to
+  # statusline.sh here (it pulls in too much env); the relevant piece is the
+  # jq pipeline that turns top_patterns output into a text block.
+  pat_json=$(pp_memory_top_patterns "$SANDBOX/repo" 5)
+  [ "$pat_json" != "[]" ]
+  pat_block=$(printf '%s' "$pat_json" | jq -r '
+    if length == 0 then ""
+    else map("[conf=\(.confidence)] \(.title) (\(.lens_ids | join(",")))") | join("\n")
+    end')
+  [ -n "$pat_block" ]
+  # The assembled MEMORY_BLOCK gets the header prepended when pat_block is
+  # non-empty.
+  memory_block=$(printf '\n## RECURRING PATTERNS\n%s\n' "$pat_block")
+  [[ "$memory_block" == *"## RECURRING PATTERNS"* ]]
+  [[ "$memory_block" == *"recurring pattern across recent cycles"* ]]
+  [[ "$memory_block" == *"[conf=0.7]"* ]]
+}
+
+@test "integration: F1 — empty patterns.jsonl yields empty pattern block" {
+  pat_json=$(pp_memory_top_patterns "$SANDBOX/repo" 5)
+  [ "$pat_json" = "[]" ]
+  pat_block=$(printf '%s' "$pat_json" | jq -r '
+    if length == 0 then "" else map(.title) | join("\n") end')
+  [ -z "$pat_block" ]
+}
+
+@test "integration: F7 — fresh project DB init is idempotent on repeated calls" {
+  FRESH="$SANDBOX/fresh-repo"
+  mkdir -p "$FRESH"
+  ( cd "$FRESH" && git init -q && git remote add origin https://github.com/test/fresh.git )
+  FRESH_PROJ=$(pp_memory_project_dir "$FRESH")
+  # Repeatedly init — must not error.
+  pp_memory_db_init "$FRESH_PROJ"
+  pp_memory_db_init "$FRESH_PROJ"
+  pp_memory_db_init "$FRESH_PROJ"
+  [ -f "$FRESH_PROJ/observations.sqlite" ]
+  # Insert must succeed on first try without manual init.
+  pp_memory_insert "$FRESH" "o-first" ENG TOPIC "hook" "body" "[]" "[]" sess
+  rows=$(sqlite3 "$FRESH_PROJ/observations.sqlite" "SELECT COUNT(*) FROM observations;")
+  [ "$rows" = "1" ]
+}
+
+@test "integration: F8 — concurrent pp_memory_extract_patterns produces no interleaved JSONL lines" {
+  # Seed enough obs to fire the extractor.
+  for i in 1 2 3 4 5; do
+    PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" \
+      "o-concur-$i" ENG TOPIC "hook$i" "body$i with token" "[]" "[]" sess
+  done
+  # Two concurrent extracts.
+  pp_memory_extract_patterns "$SANDBOX/repo" &
+  pid1=$!
+  pp_memory_extract_patterns "$SANDBOX/repo" &
+  pid2=$!
+  wait "$pid1"
+  wait "$pid2"
+  [ -f "$PROJ/patterns.jsonl" ]
+  # Every line must parse as JSON — no torn / interleaved writes.
+  bad=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    printf '%s' "$line" | jq -e . >/dev/null 2>&1 || bad=$((bad + 1))
+  done < "$PROJ/patterns.jsonl"
+  [ "$bad" = "0" ]
+}
+
+@test "integration: F6 — concurrent maint-counter increments are atomic under lock" {
+  # Reset and verify the counter increments by exactly N for N concurrent
+  # invocations of the locked helper (no double-counting, no lost updates).
+  pp_memory_sqlite "$DB" \
+    "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');"
+  # Run 12 concurrent invocations with threshold high enough to not trigger.
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    pp_memory_with_lock "$PROJ" _pp_memory_increment_maint_counter_locked "$PROJ" 100 \
+      > "$SANDBOX/out-$i.txt" 2>/dev/null &
+  done
+  wait
+  # Final counter value must equal exactly 12.
+  final=$(pp_memory_sqlite "$DB" \
+    "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  [ "$final" = "12" ]
+}
+
+@test "integration: F6 — atomic counter triggers maintenance exactly once at threshold" {
+  pp_memory_sqlite "$DB" \
+    "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');"
+  trigger_count=0
+  # 24 concurrent invocations against threshold 12: counter should hit
+  # threshold exactly twice → 2 TRIGGER results.
+  for i in $(seq 1 24); do
+    pp_memory_with_lock "$PROJ" _pp_memory_increment_maint_counter_locked "$PROJ" 12 \
+      > "$SANDBOX/trig-$i.txt" 2>/dev/null &
+  done
+  wait
+  trigger_count=$(grep -l '^TRIGGER$' "$SANDBOX"/trig-*.txt 2>/dev/null | wc -l | tr -d ' ')
+  [ "$trigger_count" = "2" ]
+  # Counter should land back at 0 (last trigger reset it).
+  final=$(pp_memory_sqlite "$DB" \
+    "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  [ "$final" = "0" ]
+}
+
+@test "integration: F11 — code fence stripper handles json fences + trailing whitespace" {
+  fence='```'
+  in_lower=$(printf '%sjson\n{"patterns": []}\n%s' "$fence" "$fence")
+  in_upper=$(printf '%sJSON  \n{"patterns": []}\n%s  ' "$fence" "$fence")
+  in_no_fence='{"patterns": []}'
+  out1=$(printf '%s' "$in_lower" | _pp_memory_strip_code_fence)
+  [ "$out1" = '{"patterns": []}' ]
+  out2=$(printf '%s' "$in_upper" | _pp_memory_strip_code_fence)
+  [ "$out2" = '{"patterns": []}' ]
+  out3=$(printf '%s' "$in_no_fence" | _pp_memory_strip_code_fence)
+  [ "$out3" = '{"patterns": []}' ]
+}
+
+@test "integration: F12 — pp_memory_top_patterns ranks high-conf recent > low-conf recent" {
+  # 3 patterns with same recency, different confidence.
+  mkdir -p "$PROJ"
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '{"id":"p-a","extracted_at":"%s","title":"low-conf","evidence_obs_ids":[],"lens_ids":[],"confidence":0.1}\n' "$now" > "$PROJ/patterns.jsonl"
+  printf '{"id":"p-b","extracted_at":"%s","title":"high-conf","evidence_obs_ids":[],"lens_ids":[],"confidence":0.9}\n' "$now" >> "$PROJ/patterns.jsonl"
+  printf '{"id":"p-c","extracted_at":"%s","title":"mid-conf","evidence_obs_ids":[],"lens_ids":[],"confidence":0.5}\n' "$now" >> "$PROJ/patterns.jsonl"
+  out=$(pp_memory_top_patterns "$SANDBOX/repo" 3)
+  first=$(printf '%s' "$out" | jq -r '.[0].title')
+  third=$(printf '%s' "$out" | jq -r '.[2].title')
+  [ "$first" = "high-conf" ]
+  [ "$third" = "low-conf" ]
+}
+
 @test "integration: inject-time redaction strips secrets from retrieved body" {
   # Insert with redaction DISABLED so the secret reaches the store.
   prefix="sk"

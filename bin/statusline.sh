@@ -769,6 +769,14 @@ GROUND
       # placeholder renders to empty).
       MEMORY_BLOCK=""
       if [ "${PP_MEMORY_ENABLE:-0}" = "1" ] && [ -n "$cwd" ] && [ "$cwd" != "-" ]; then
+        # F7: lazy DB init — idempotent CREATE TABLE IF NOT EXISTS. This
+        # guarantees the FIRST cycle on a fresh project has a DB before
+        # any retrieval/insert, so reads don't silently no-op and the
+        # maintenance counter has a cycle_state row to read from.
+        _pp_mem_init_proj=$(pp_memory_project_dir "$cwd" 2>/dev/null)
+        if [ -n "$_pp_mem_init_proj" ]; then
+          pp_memory_db_init "$_pp_mem_init_proj" 2>/dev/null || true
+        fi
         # Query: synthesize from cwd basename + recent file paths + recent
         # commits — same grounding signals the analysts see. Truncated so
         # we don't blow out the FTS5 query parser.
@@ -778,7 +786,19 @@ GROUND
           "$git_recent_files" | head -c 500)
         _pp_mem_k="${PP_MEMORY_ACTIVATION_K:-15}"
         _pp_mem_body_max="${PP_MEMORY_INJECT_BODY_CHARS:-240}"
+
+        # Top patterns (extracted themes) — small N to leave token budget for obs.
+        # Patterns are recency-weighted-confidence-ranked (see pp_memory_top_patterns).
+        _pp_mem_pat_n="${PP_MEMORY_PATTERN_INJECT_K:-5}"
+        _pp_mem_patterns_json=$(pp_memory_top_patterns "$cwd" "$_pp_mem_pat_n" 2>/dev/null || printf '[]')
+        # Format each pattern as: "[conf=0.XX] TITLE (lens_ids)". Empty if no patterns.
+        _pp_mem_pat_block=$(printf '%s' "$_pp_mem_patterns_json" | jq -r '
+          if length == 0 then ""
+          else map("[conf=\(.confidence)] \(.title) (\(.lens_ids | join(",")))") | join("\n")
+          end' 2>/dev/null || printf '')
+
         _pp_mem_json=$(pp_memory_top_k "$cwd" "$_pp_mem_k" "$_pp_mem_query" 2>/dev/null)
+        _pp_mem_formatted=""
         if [ -n "$_pp_mem_json" ] && [ "$_pp_mem_json" != "[]" ]; then
           # Format as "[LENS] HOOK — body (truncated)" lines, one per obs.
           # Defense-in-depth: redact each body at INJECT time (per the
@@ -787,7 +807,6 @@ GROUND
           # Iterate by index via jq so we don't have to invent a separator
           # that's guaranteed-absent from hook/body strings.
           _pp_mem_count=$(printf '%s' "$_pp_mem_json" | jq 'length' 2>/dev/null || echo 0)
-          _pp_mem_formatted=""
           _pp_mem_i=0
           while [ "$_pp_mem_i" -lt "$_pp_mem_count" ]; do
             _pp_mem_lens=$(printf '%s' "$_pp_mem_json" | jq -r --argjson i "$_pp_mem_i" '.[$i].lens_id // "?"' 2>/dev/null)
@@ -798,10 +817,18 @@ GROUND
             _pp_mem_formatted="${_pp_mem_formatted}[${_pp_mem_lens}] ${_pp_mem_hook} — ${_pp_mem_body}"$'\n'
             _pp_mem_i=$((_pp_mem_i + 1))
           done
-          if [ -n "$_pp_mem_formatted" ]; then
-            MEMORY_BLOCK=$(printf '\n=== ACTIVATED MEMORY (top-%s relevant past observations) ===\n%s' \
-              "$_pp_mem_k" "$_pp_mem_formatted")
-          fi
+        fi
+
+        # Assemble: patterns section (if any) + obs section (if any). Both
+        # optional; if neither, MEMORY_BLOCK stays empty.
+        if [ -n "$_pp_mem_pat_block" ] && [ -n "$_pp_mem_formatted" ]; then
+          MEMORY_BLOCK=$(printf '\n## RECURRING PATTERNS\n%s\n\n## RECENT OBSERVATIONS (top-%s)\n%s' \
+            "$_pp_mem_pat_block" "$_pp_mem_k" "$_pp_mem_formatted")
+        elif [ -n "$_pp_mem_pat_block" ]; then
+          MEMORY_BLOCK=$(printf '\n## RECURRING PATTERNS\n%s\n' "$_pp_mem_pat_block")
+        elif [ -n "$_pp_mem_formatted" ]; then
+          MEMORY_BLOCK=$(printf '\n=== ACTIVATED MEMORY (top-%s relevant past observations) ===\n%s' \
+            "$_pp_mem_k" "$_pp_mem_formatted")
         fi
       fi
       export MEMORY_BLOCK
@@ -1077,6 +1104,12 @@ $critique_input"
         # Periodically run maintenance (activation recompute + eviction +
         # pattern extraction) under the maintenance lock.
         if [ "${PP_MEMORY_ENABLE:-0}" = "1" ]; then
+          # F7: lazy init — defensive even if memory-injection branch was
+          # skipped (e.g. cwd was empty there). Idempotent.
+          _pp_mem_post_proj=$(pp_memory_project_dir "$cwd" 2>/dev/null)
+          if [ -n "$_pp_mem_post_proj" ]; then
+            pp_memory_db_init "$_pp_mem_post_proj" 2>/dev/null || true
+          fi
           # Build current cycle's obs JSON from the per-lens cache files.
           # Each cache line is "HAT: hook|||body" — we parse the SAME way
           # PP_EVAL_MODE does. obs_id is derived from session + lens + ts so
@@ -1118,21 +1151,22 @@ $critique_input"
           # Periodic maintenance: every Nth cycle, recompute activation +
           # evict + extract patterns under the maintenance lock. Counter
           # lives in cycle_state (DB-resident, survives statusline restarts).
+          # F6: the increment + threshold check + reset is now an atomic
+          # operation under pp_memory_with_lock so two concurrent statuslines
+          # cannot both trigger maintenance on the same cycle.
+          # F10: validate the every-N knob — non-numeric, zero, or negative
+          # values default to 12 instead of triggering on every cycle (or
+          # never, depending on shell coercion).
           _pp_mem_maint_every="${PP_MEMORY_MAINTENANCE_EVERY_N:-12}"
+          if ! [[ "$_pp_mem_maint_every" =~ ^[1-9][0-9]*$ ]]; then
+            _pp_mem_maint_every=12
+          fi
           _pp_mem_proj=$(pp_memory_project_dir "$cwd" 2>/dev/null)
           if [ -n "$_pp_mem_proj" ] && [ -f "$_pp_mem_proj/observations.sqlite" ]; then
-            _pp_mem_cyc=$(pp_memory_sqlite "$_pp_mem_proj/observations.sqlite" \
-              "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';" 2>/dev/null)
-            [ -z "$_pp_mem_cyc" ] && _pp_mem_cyc=0
-            _pp_mem_cyc=$((_pp_mem_cyc + 1))
-            pp_memory_sqlite "$_pp_mem_proj/observations.sqlite" \
-              "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','$_pp_mem_cyc');" \
-              2>/dev/null || true
-            if [ "$_pp_mem_cyc" -ge "$_pp_mem_maint_every" ]; then
-              # Reset counter, run maintenance under lock.
-              pp_memory_sqlite "$_pp_mem_proj/observations.sqlite" \
-                "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');" \
-                2>/dev/null || true
+            _pp_mem_maint_result=$(pp_memory_with_lock "$_pp_mem_proj" \
+              _pp_memory_increment_maint_counter_locked "$_pp_mem_proj" "$_pp_mem_maint_every" \
+              2>/dev/null || printf '')
+            if [ "$_pp_mem_maint_result" = "TRIGGER" ]; then
               pp_memory_with_lock "$_pp_mem_proj" pp_memory_recompute_scores "$cwd" 2>/dev/null || true
               pp_memory_evict "$cwd" 2>/dev/null || true
               pp_memory_extract_patterns "$cwd" 2>/dev/null || true

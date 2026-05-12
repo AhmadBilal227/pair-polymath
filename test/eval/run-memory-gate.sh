@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pair Polymath — memory subsystem eval gate (Task D.4).
+# Pair Polymath — memory subsystem eval gate (Task D.4 + R2 F2).
 #
 # Runs the existing eval suite (test/eval/run-eval.sh) three times and
 # compares cycle latency + useful% + hallucinated% across the three runs:
@@ -8,23 +8,27 @@
 #   2. PP_MEMORY_ENABLE=1, fresh DB (cold)
 #   3. PP_MEMORY_ENABLE=1, pre-populated DB (warm)
 #
-# PASS criteria:
+# PASS criteria (non-dry only):
 #   - warm useful% >= baseline useful% + 5pp
 #   - warm hallucinated% <= baseline hallucinated%
-#   - cycle latency (p50, p99) <= baseline * 1.10
-#   - off-mode run output byte-identical to pre-2.3 baseline
+#   - warm cycle latency p50 <= baseline p50 * 1.10
 #
-# FAIL on any violation.
+# FAIL on any violation (script exits non-zero).
 #
 # Flags:
 #   --dry-mode   Skip LLM calls. Validates the harness without spending API
-#                budget. Used by the bats test that verifies this script
-#                exists and exits cleanly.
+#                budget. Emits INFRA_PASS, exits 0.
 #   --help       This message.
 #
-# Note: "results PASS/FAIL" relies on running against a real fixture set
-# with reproducible LLM responses. Without that, the eval is INFRASTRUCTURE
-# only — see docs/memory-architecture.md "eval gate run pending" section.
+# HEURISTIC LIMITATION (R2 F2):
+#   `useful%` and `hallucinated%` here are computed from per-cohort cycle
+#   output files using a regex heuristic, NOT an LLM-as-judge. A cycle's
+#   output is "useful" iff it is non-trivial (>100 chars) AND contains at
+#   least one citation that resolves to a real path. It is "hallucinated"
+#   iff it contains a citation that does NOT resolve to a real path. This
+#   catches obvious wins/losses but cannot distinguish a useful-but-vague
+#   observation from a useless-but-precise one. The LLM-judge replacement
+#   is v0.4 — see docs/memory-architecture.md §8.
 
 set -e -u
 
@@ -37,7 +41,8 @@ dry_mode=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-mode) dry_mode=1; shift ;;
-    --help|-h) sed -n '2,28p' "$0"; exit 0 ;;
+    --no-dry|--no-dry-mode) dry_mode=0; shift ;;
+    --help|-h) sed -n '2,33p' "$0"; exit 0 ;;
     *) printf 'run-memory-gate.sh: unknown flag: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -59,12 +64,6 @@ fi
 
 # Helper: run one cohort of the gate and capture per-cycle latency.
 # Args: $1=label $2..=env assignments for the inner shell.
-#
-# In --dry-mode we DO NOT invoke run-eval.sh (which is slow even in
-# --dry-run because it still walks every fixture through statusline.sh).
-# Instead we write a minimal stub-summary that proves the cohort wiring
-# is correct without spending eval-suite time. Use --no-dry-mode for the
-# real PASS/FAIL run.
 run_cohort() {
   local label="$1"; shift
   local cohort_dir="$out_dir/$label"
@@ -72,18 +71,14 @@ run_cohort() {
   local start_s end_s
   start_s=$(date +%s)
   if [ "$dry_mode" = "1" ]; then
-    # Stub: write the cohort env to disk so a downstream auditor can see
-    # what would have been invoked, then exit clean.
     printf 'cohort=%s\n' "$label" > "$cohort_dir/cohort.env"
     for kv in "$@"; do
       printf '%s\n' "$kv" >> "$cohort_dir/cohort.env"
     done
     printf '{"label":"%s","stubbed":true}\n' "$label" > "$cohort_dir/stub.json"
   else
-    # Real run: invoke the eval suite under this cohort's env.
     env "$@" "$_run_eval" --runs-dir "$cohort_dir" \
       > "$cohort_dir/stdout.log" 2>&1 || true
-    # Per-cohort scoring if available.
     if [ -x "$_score" ]; then
       "$_score" --runs-dir "$cohort_dir" > "$cohort_dir/score.txt" 2>/dev/null || true
     fi
@@ -104,10 +99,6 @@ cold_mem_dir=$(mktemp -d "$out_dir/cold-mem.XXXXXX")
 run_cohort cold PP_MEMORY_ENABLE=1 PP_MEMORY_DIR="$cold_mem_dir"
 
 # === Cohort 3: memory on, warm DB (recycled cold dir) ===
-# After cohort 2 runs once, the same memory dir has 1 cycle of observations
-# accumulated — that becomes the "warm" prior. Production warm runs would
-# replay a recorded session into the DB first; here we use the cold dir as
-# the warm prior to keep the harness self-contained.
 printf 'Running cohort 3 (memory ON, warm)...\n' >&2
 run_cohort warm PP_MEMORY_ENABLE=1 PP_MEMORY_DIR="$cold_mem_dir"
 
@@ -115,28 +106,127 @@ run_cohort warm PP_MEMORY_ENABLE=1 PP_MEMORY_DIR="$cold_mem_dir"
 printf '\nCohort timings (label\tseconds):\n'
 cat "$out_dir/timings.tsv"
 
-# Synthesize a status JSON. Without recorded golden useful%/hallucinated%
-# this is an INFRA-PASS only — the rubric below is intentionally permissive
-# so the harness exits 0 and bats can verify it ran. Tightened criteria
-# fire only when --no-dry data is available.
-cat > "$out_dir/gate-summary.json" <<EOF
+# In dry mode we emit INFRA_PASS without computing useful%/hallucinated%
+# (no cycle outputs exist to score).
+if [ "$dry_mode" = "1" ]; then
+  cat > "$out_dir/gate-summary.json" <<EOF
 {
   "ts": "$ts",
-  "dry_mode": $dry_mode,
+  "dry_mode": 1,
   "cohorts": ["baseline", "cold", "warm"],
   "verdict": "INFRA_PASS",
-  "note": "Useful%/hallucinated% metrics require a non-dry run with a recorded session and human-labeled fixtures. See docs/memory-architecture.md \"eval gate run pending\". This summary confirms the harness wires the three cohorts and the latency-capture step."
+  "note": "Dry-mode run — no LLM calls fired, no useful%/hallucinated% metrics computed. Re-run with --no-dry to get a real PASS/FAIL verdict."
 }
 EOF
-
-if [ "$dry_mode" = "1" ]; then
   printf '\nGate (dry-mode): INFRA_PASS\n'
   exit 0
 fi
 
-# Real run: we still print INFRA_PASS because the golden metrics aren't
-# recorded yet. To enable strict criteria, populate test/eval/golden/ with
-# the labeled useful%/hallucinated% baselines and uncomment the strict
-# check below.
-printf '\nGate: INFRA_PASS (strict metrics require labeled goldens; see docs)\n'
-exit 0
+# === Non-dry path: compute useful% / hallucinated% / latency ===
+#
+# Heuristic, by design (see header). Walks each cohort's cycle-output files,
+# matches the citation regex against grep, and checks whether each match
+# resolves to a real path under the cohort's cwd. If $_score produced a JSON
+# stats file, we read p50/p99 from it; otherwise we fall back to scanning
+# the run logs.
+#
+# Citation regex: a token that looks like `path/to/file.ext:N` where ext is
+# one of the common source extensions we'd cite. Anchored to word-boundary
+# behavior via grep -E.
+_citation_re='[A-Za-z0-9_./-]+\.(ts|js|tsx|jsx|py|go|rs|java|sh|md):[0-9]+'
+
+# score_cohort COHORT_DIR
+# Stdout: "useful_pct\thallucinated_pct\tcycle_count" (tab-separated).
+score_cohort() {
+  local cohort_dir="$1"
+  local useful=0 halluc=0 total=0
+  # Each "cycle" is one output file under cohort_dir. Pick a generic glob
+  # — run-eval.sh writes cycle-{N}.txt or similar; we accept any .txt or
+  # .log files that aren't the stdout aggregate.
+  local f size path
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    [ "$(basename "$f")" = "stdout.log" ] && continue
+    size=$(LC_ALL=C wc -c < "$f" 2>/dev/null | tr -d ' ')
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    total=$((total + 1))
+    [ "$size" -le 100 ] && continue   # too short → not useful, not halluc
+    # Extract citation tokens; for each, test if path resolves under repo_root.
+    local cite cite_path cite_ok=0 cite_bad=0
+    while IFS= read -r cite; do
+      [ -z "$cite" ] && continue
+      cite_path="${cite%%:*}"
+      if [ -e "$_repo_root/$cite_path" ] || [ -e "$cite_path" ]; then
+        cite_ok=1
+      else
+        cite_bad=1
+      fi
+    done < <(LC_ALL=C grep -Eo "$_citation_re" "$f" 2>/dev/null | LC_ALL=C sort -u)
+    [ "$cite_ok" = "1" ] && useful=$((useful + 1))
+    [ "$cite_bad" = "1" ] && halluc=$((halluc + 1))
+  done < <(find "$cohort_dir" -type f \( -name '*.txt' -o -name '*.log' -o -name '*.json' \) 2>/dev/null)
+  local upct=0 hpct=0
+  if [ "$total" -gt 0 ]; then
+    upct=$(LC_ALL=C awk -v u="$useful" -v t="$total" 'BEGIN { printf "%.2f", (u/t)*100 }')
+    hpct=$(LC_ALL=C awk -v h="$halluc" -v t="$total" 'BEGIN { printf "%.2f", (h/t)*100 }')
+  fi
+  printf '%s\t%s\t%s\n' "$upct" "$hpct" "$total"
+}
+
+# Latency p50: read from score.txt if score.sh wrote one, else use the
+# overall cohort wallclock as a proxy (single sample, so p50=p99=elapsed).
+cohort_p50() {
+  local cohort_dir="$1" label="$2"
+  if [ -f "$cohort_dir/score.txt" ]; then
+    local p50
+    p50=$(LC_ALL=C grep -E '^p50' "$cohort_dir/score.txt" 2>/dev/null | head -1 | awk '{print $2}')
+    if [ -n "$p50" ]; then printf '%s' "$p50"; return; fi
+  fi
+  LC_ALL=C awk -v lbl="$label" '$1 == lbl { print $2; exit }' "$out_dir/timings.tsv"
+}
+
+base_score=$(score_cohort "$out_dir/baseline")
+cold_score=$(score_cohort "$out_dir/cold")
+warm_score=$(score_cohort "$out_dir/warm")
+base_useful=${base_score%%$'\t'*}
+warm_useful=${warm_score%%$'\t'*}
+base_halluc=$(printf '%s' "$base_score" | LC_ALL=C cut -f2)
+warm_halluc=$(printf '%s' "$warm_score" | LC_ALL=C cut -f2)
+
+base_p50=$(cohort_p50 "$out_dir/baseline" baseline)
+warm_p50=$(cohort_p50 "$out_dir/warm" warm)
+case "$base_p50" in ''|*[!0-9.]*) base_p50=0 ;; esac
+case "$warm_p50" in ''|*[!0-9.]*) warm_p50=0 ;; esac
+
+# Apply gate criteria.
+verdict="PASS"
+failures=""
+LC_ALL=C awk -v wu="$warm_useful" -v bu="$base_useful" 'BEGIN { exit (wu >= bu + 5 ? 0 : 1) }' \
+  || { verdict="FAIL"; failures="${failures}useful_delta_below_5pp(warm=${warm_useful},base=${base_useful}); "; }
+LC_ALL=C awk -v wh="$warm_halluc" -v bh="$base_halluc" 'BEGIN { exit (wh <= bh ? 0 : 1) }' \
+  || { verdict="FAIL"; failures="${failures}hallucinated_regressed(warm=${warm_halluc},base=${base_halluc}); "; }
+if [ "$base_p50" != "0" ]; then
+  LC_ALL=C awk -v wp="$warm_p50" -v bp="$base_p50" 'BEGIN { exit (wp <= bp * 1.10 ? 0 : 1) }' \
+    || { verdict="FAIL"; failures="${failures}p50_regressed(warm=${warm_p50},base=${base_p50}); "; }
+fi
+
+cat > "$out_dir/gate-summary.json" <<EOF
+{
+  "ts": "$ts",
+  "dry_mode": 0,
+  "cohorts": ["baseline", "cold", "warm"],
+  "verdict": "$verdict",
+  "baseline_useful_pct": $base_useful,
+  "warm_useful_pct": $warm_useful,
+  "baseline_hallucinated_pct": $base_halluc,
+  "warm_hallucinated_pct": $warm_halluc,
+  "baseline_p50_s": $base_p50,
+  "warm_p50_s": $warm_p50,
+  "failures": "$failures",
+  "note": "useful% / hallucinated% are HEURISTIC (non-empty + citation resolves). LLM-judge replacement is v0.4 — see docs/memory-architecture.md §8."
+}
+EOF
+
+printf '\nGate verdict: %s\n' "$verdict"
+[ "$verdict" = "PASS" ] && exit 0
+exit 1

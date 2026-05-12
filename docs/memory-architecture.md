@@ -90,7 +90,7 @@ Every `PP_MEMORY_MAINTENANCE_EVERY_N` cycles (default 12 = once per hour at 5-mi
 
 ## 4. Configuration
 
-Every knob is overrideable in `~/.claude/pair-polymath/config/user.env`.
+Every knob is overrideable in `~/.claude/pair-polymath/config/user.env`. Environment variables exported in the parent shell take precedence over `config/default.env` (e.g. `PP_MEMORY_ENABLE=1 polymath …` for one-shot debugging works because `config/default.env` uses `${VAR:-default}` expansion). For a persistent toggle, use `polymath memory enable` — that writes to `user.env`.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -105,7 +105,8 @@ Every knob is overrideable in `~/.claude/pair-polymath/config/user.env`.
 | `PP_MEMORY_EVICT_BATCH_SIZE` | `50` | Rows deleted per eviction sweep. |
 | `PP_MEMORY_PATTERN_BATCH_SIZE` | `200` | Recent obs fed to pattern extractor. |
 | `PP_MEMORY_PATTERNS_MAX` | `1000` | Cap on `patterns.jsonl` line count (FIFO rotation when exceeded). |
-| `PP_MEMORY_MAINTENANCE_EVERY_N` | `12` | Cycles between maintenance runs (12 × 5min = 1h). |
+| `PP_MEMORY_PATTERN_INJECT_K` | `5` | Extracted patterns injected into `MEMORY_BLOCK` per cycle. |
+| `PP_MEMORY_MAINTENANCE_EVERY_N` | `12` | Cycles between maintenance runs (12 × 5min = 1h). Non-numeric or non-positive values fall back to 12. |
 | `PP_MEMORY_LLM_BIN` | (unset) | Override LLM binary for patterns + eviction (test/fixture path). |
 | `PP_MEMORY_LLM_MODEL` | `gpt-5-mini` | Model used when calling `llm` for patterns/eviction. |
 | `PP_MEMORY_LLM_TIMEOUT_S` | `60` | Timeout for memory LLM calls. |
@@ -152,12 +153,17 @@ Override active project: `PP_MEMORY_CLI_CWD=/path/to/repo polymath memory status
 2. `PP_MEMORY_ENABLE=1`, fresh DB (cold)
 3. `PP_MEMORY_ENABLE=1`, pre-populated DB (warm)
 
-PASS criteria (when labeled goldens exist):
+PASS criteria (non-dry only):
 - warm `useful%` ≥ baseline `useful%` + 5pp
 - warm `hallucinated%` ≤ baseline `hallucinated%`
-- cycle latency p50/p99 ≤ baseline × 1.10
-- off-mode output byte-identical to pre-2.3 baseline
+- warm cycle latency p50 ≤ baseline × 1.10
 
-**Status as of Task D ship:** harness present + `--dry-mode` validated, **labeled goldens not yet recorded → real PASS/FAIL pending**. The infrastructure works; the next step is to record useful%/hallucinated% goldens against the v0.2 eval fixtures and re-run with `--no-dry`.
+`--dry-mode` skips LLM calls and unconditionally emits `INFRA_PASS` so CI can keep the harness alive without spending API budget. `--no-dry` runs the eval suite three times and emits `PASS` or `FAIL`.
 
-Run it: `test/eval/run-memory-gate.sh --dry-mode`.
+**Current useful% / hallucinated% are HEURISTIC, not LLM-judged.** A cycle's output is scored "useful" iff it is non-trivial (>100 chars) AND contains at least one citation matching `path/to/file.ext:N` that resolves to a real file under the repo. It is scored "hallucinated" iff it contains a citation that does NOT resolve. This catches obvious wins and obvious losses but cannot distinguish a useful-but-vague observation from a useless-but-precise one. **LLM-judge replacement is v0.4** — gated until we have labeled fixtures to validate the judge against.
+
+Off-mode byte-identicality is enforced separately by `test/memory/eval-gate.bats` (and by the prompt-loader's sentinel-block strip in `lib/prompt-loader.sh`), not by this gate script.
+
+**Status as of Task D R2 ship:** harness operational with a heuristic verdict. Real PASS/FAIL fires on `--no-dry`. Labeled goldens for v0.4 LLM-judge are TBD.
+
+Run it: `test/eval/run-memory-gate.sh --dry-mode` (or `--no-dry` for real verdict).

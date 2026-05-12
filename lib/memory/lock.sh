@@ -72,3 +72,43 @@ pp_memory_with_lock() {
   pp_memory_unlock "$proj_dir"
   return "$rc"
 }
+
+# _pp_memory_increment_maint_counter_locked PROJ_DIR THRESHOLD
+# Run under pp_memory_with_lock. Reads cycle_state.maintenance_cycle_counter,
+# increments by 1, and writes it back. If the new value >= THRESHOLD, ALSO
+# resets the counter to 0 atomically (inside the same lock + same SQL run)
+# and emits "TRIGGER" on stdout. Otherwise emits the new value.
+#
+# F6: was previously a read-modify-write OUTSIDE any lock in bin/statusline.sh,
+# so two concurrent statuslines could both observe N-1, both write N, both
+# trigger maintenance. The maintenance functions themselves take the lock,
+# but the cycle counter decision happened before that. Pulling it inside
+# pp_memory_with_lock serializes the decision atomically.
+_pp_memory_increment_maint_counter_locked() {
+  local proj_dir="$1" threshold="$2"
+  local db="$proj_dir/observations.sqlite"
+  [ -f "$db" ] || { printf 'NOOP'; return 0; }
+  # Validate threshold so we don't interpolate hostile values into SQL.
+  case "$threshold" in
+    ''|*[!0-9]*) threshold=12 ;;
+  esac
+  local cur
+  cur=$(sqlite3 -cmd "PRAGMA trusted_schema = 1;" "$db" \
+    "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';" 2>/dev/null)
+  case "$cur" in
+    ''|*[!0-9]*) cur=0 ;;
+  esac
+  local nxt=$((cur + 1))
+  if [ "$nxt" -ge "$threshold" ]; then
+    sqlite3 -cmd "PRAGMA trusted_schema = 1;" "$db" \
+      "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');" \
+      2>/dev/null || return 1
+    printf 'TRIGGER'
+  else
+    sqlite3 -cmd "PRAGMA trusted_schema = 1;" "$db" \
+      "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','$nxt');" \
+      2>/dev/null || return 1
+    printf '%s' "$nxt"
+  fi
+  return 0
+}

@@ -91,5 +91,45 @@ pp_render_prompt() {
     _pp_template="${_pp_template//\$\{$_pp_key\}/$_pp_value}"
   done
 
+  # Sentinel-block stripping (F3): templates wrap optional content in
+  # <!-- MEMORY_BLOCK_START --> ... <!-- MEMORY_BLOCK_END -->. After
+  # substitution:
+  #   - If the content between sentinels is empty/whitespace-only, delete
+  #     the ENTIRE block including the sentinel lines AND the trailing
+  #     newline after the END sentinel. This makes off-mode (empty
+  #     MEMORY_BLOCK) render byte-identical to pre-2.3 templates that
+  #     never had the placeholder.
+  #   - If non-empty, strip ONLY the two sentinel comment lines (and their
+  #     own terminating newlines), leaving content in place.
+  # awk state machine on lines so we don't depend on GNU sed -z.
+  _pp_template=$(printf '%s' "$_pp_template" | LC_ALL=C awk '
+    BEGIN { in_block = 0; buf = ""; nonblank = 0 }
+    /^[[:space:]]*<!--[[:space:]]*MEMORY_BLOCK_START[[:space:]]*-->[[:space:]]*$/ {
+      in_block = 1; buf = ""; nonblank = 0; next
+    }
+    /^[[:space:]]*<!--[[:space:]]*MEMORY_BLOCK_END[[:space:]]*-->[[:space:]]*$/ {
+      if (in_block) {
+        if (nonblank) {
+          # Emit body (sentinels themselves are skipped — body keeps its own
+          # newlines, so output is "${lens_…}\n<body>\nOUTPUT FORMAT…").
+          printf "%s", buf
+        }
+        # Empty body: emit nothing — the block + sentinels + their newlines
+        # all disappear. Off-mode then matches pre-2.3 byte-for-byte.
+        in_block = 0; buf = ""; nonblank = 0
+        next
+      }
+      print; next
+    }
+    {
+      if (in_block) {
+        buf = buf $0 "\n"
+        if ($0 ~ /[^[:space:]]/) nonblank = 1
+      } else {
+        print
+      }
+    }
+  ')
+
   printf '%s' "$_pp_template"
 }

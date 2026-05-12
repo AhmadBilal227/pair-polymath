@@ -941,17 +941,27 @@ HELP
         printf '  Project dir:      %s\n' "$_pp_mem_proj"
         if [ -f "$_pp_mem_db" ]; then
           _pp_mem_size=$(stat -f %z "$_pp_mem_db" 2>/dev/null || stat -c %s "$_pp_mem_db" 2>/dev/null || echo 0)
-          _pp_mem_rows=$(pp_memory_sqlite "$_pp_mem_db" "SELECT COUNT(*) FROM observations;" 2>/dev/null)
           printf '  DB path:          %s\n' "$_pp_mem_db"
           printf '  Size (bytes):     %s\n' "$_pp_mem_size"
-          printf '  Observations:     %s\n' "$_pp_mem_rows"
-          if [ "${_pp_mem_rows:-0}" -gt 0 ]; then
-            printf '  Top-5 by activation:\n'
-            pp_memory_sqlite -separator ' | ' "$_pp_mem_db" "
-              SELECT printf('    [%s] %s (act=%.3f)', lens_id, hook, activation_score)
-                FROM observations
-               ORDER BY (activation_score IS NULL), activation_score DESC, obs_id ASC
-               LIMIT 5;" 2>/dev/null
+          # F13: detect schema before querying. A DB file that exists but
+          # has no observations table (corrupt, half-initialized, or from a
+          # future schema version) used to crash with "no such table" once
+          # the SELECT ran. PRAGMA table_info returns nothing for a missing
+          # table and is a free read — no schema mutation.
+          _pp_mem_has_obs=$(pp_memory_sqlite "$_pp_mem_db" "PRAGMA table_info(observations);" 2>/dev/null | head -1)
+          if [ -z "$_pp_mem_has_obs" ]; then
+            printf '  Schema:           DB uninitialized (no observations table)\n'
+          else
+            _pp_mem_rows=$(pp_memory_sqlite "$_pp_mem_db" "SELECT COUNT(*) FROM observations;" 2>/dev/null)
+            printf '  Observations:     %s\n' "$_pp_mem_rows"
+            if [ "${_pp_mem_rows:-0}" -gt 0 ]; then
+              printf '  Top-5 by activation:\n'
+              pp_memory_sqlite -separator ' | ' "$_pp_mem_db" "
+                SELECT printf('    [%s] %s (act=%.3f)', lens_id, hook, activation_score)
+                  FROM observations
+                 ORDER BY (activation_score IS NULL), activation_score DESC, obs_id ASC
+                 LIMIT 5;" 2>/dev/null
+            fi
           fi
         else
           printf '  DB:               (not yet initialized)\n'

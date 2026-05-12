@@ -39,6 +39,8 @@ fi
 . "$PP_ROOT/lib/memory/schema.sh"
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/memory/redact.sh"
+# shellcheck disable=SC1091
+. "$PP_ROOT/lib/memory/lock.sh"
 
 # _pp_memory_patterns_is_number VAL
 # Numeric guard (matches the shape used in store.sh / activation.sh).
@@ -126,9 +128,28 @@ _pp_memory_rotate_patterns_jsonl() {
   chmod 600 "$path" 2>/dev/null || true
 }
 
-# pp_memory_extract_patterns CWD
-# Cluster recent observations and append discovered patterns to JSONL.
-pp_memory_extract_patterns() {
+# _pp_memory_strip_code_fence
+# Read stdin, strip a leading ```(json)? fence line and a trailing ``` fence
+# line if present. More robust than the sed pattern it replaces — that one
+# (`sed -E 's/^```$//'`) requires the fence to be the ONLY content on its
+# line; a trailing `\n` or whitespace would slip through. (F11.)
+_pp_memory_strip_code_fence() {
+  LC_ALL=C awk '
+    NR==1 && /^[[:space:]]*```([Jj][Ss][Oo][Nn])?[[:space:]]*$/ { next }
+    { buf[++n] = $0 }
+    END {
+      end = n
+      if (n > 0 && buf[n] ~ /^[[:space:]]*```[[:space:]]*$/) end = n - 1
+      for (i = 1; i <= end; i++) print buf[i]
+    }
+  '
+}
+
+# _pp_memory_extract_patterns_inner CWD
+# Body of pp_memory_extract_patterns. Runs under pp_memory_with_lock so the
+# patterns.jsonl append/rotate is serialized against eviction's own append
+# (F8 — concurrent invocations would otherwise interleave lines).
+_pp_memory_extract_patterns_inner() {
   local cwd="$1"
   local proj_dir
   proj_dir=$(pp_memory_project_dir "$cwd") || return 1
@@ -171,6 +192,28 @@ pp_memory_extract_patterns() {
   _pp_memory_patterns_is_number "$arr_len" || return 0
   [ "$arr_len" -eq 0 ] && return 0
 
+  # Defense-in-depth (F4): re-redact each body at extraction-input time so a
+  # secret stored before a redaction-pattern upgrade still gets stripped
+  # before reaching the LLM. Hook and topic are usually short/structured;
+  # body is the high-leverage field. This is intentionally a second pass —
+  # the at-store-time redaction already ran when PP_MEMORY_REDACT=1.
+  if [ "${PP_MEMORY_REDACT:-1}" = "1" ]; then
+    local _pp_pat_redacted_rows _pp_pat_idx _pp_pat_body _pp_pat_redacted
+    _pp_pat_redacted_rows='[]'
+    _pp_pat_idx=0
+    while [ "$_pp_pat_idx" -lt "$arr_len" ]; do
+      _pp_pat_body=$(printf '%s' "$rows_json" | jq -r --argjson i "$_pp_pat_idx" '.[$i].body // ""')
+      _pp_pat_redacted=$(pp_memory_redact_body "$_pp_pat_body")
+      _pp_pat_redacted_rows=$(printf '%s' "$rows_json" | jq -c \
+        --argjson acc "$_pp_pat_redacted_rows" \
+        --argjson i "$_pp_pat_idx" \
+        --arg b "$_pp_pat_redacted" \
+        '$acc + [(.[$i] + {body:$b})]')
+      _pp_pat_idx=$((_pp_pat_idx + 1))
+    done
+    rows_json="$_pp_pat_redacted_rows"
+  fi
+
   # Load extraction prompt. Absence is non-fatal — without a prompt we can't
   # call the LLM, so we silently noop (matches the no-llm path).
   local sys_prompt
@@ -188,8 +231,9 @@ pp_memory_extract_patterns() {
   [ -z "$response" ] && return 0
 
   # Parse the response. Strip any accidental code fence the model added.
+  # F11: awk-based stripper tolerates trailing whitespace + mixed-case `json`.
   local cleaned
-  cleaned=$(printf '%s' "$response" | LC_ALL=C sed -E 's/^```(json)?$//; s/^```$//')
+  cleaned=$(printf '%s' "$response" | _pp_memory_strip_code_fence)
   # Verify it's a JSON object with a patterns array. `|| true` so callers
   # under `set -e` don't propagate jq's parse-error rc (5) out of the
   # function — we want to handle it as "no patterns" below.
@@ -256,9 +300,26 @@ pp_memory_extract_patterns() {
   return 0
 }
 
+# pp_memory_extract_patterns CWD
+# Public entry. Acquires the maintenance lock and delegates so the JSONL
+# append + rotate cannot interleave with eviction's own JSONL append (F8).
+pp_memory_extract_patterns() {
+  local cwd="$1"
+  local proj_dir
+  proj_dir=$(pp_memory_project_dir "$cwd") || return 1
+  # Be tolerant of callers that didn't init the DB first (lazy init).
+  pp_memory_db_init "$proj_dir" 2>/dev/null || true
+  pp_memory_with_lock "$proj_dir" _pp_memory_extract_patterns_inner "$cwd"
+}
+
 # pp_memory_top_patterns CWD K
-# Stdout: JSON array of last K patterns from JSONL, most recent first.
-# No tac — macOS BSD doesn't ship it. Reverse via awk array.
+# Stdout: JSON array of top-K patterns from JSONL, re-ranked by
+#   score = confidence * exp(-0.05 * days_since(extracted_at))
+# F12: pure recency-order surfaced low-confidence eviction summaries and
+# suspected-injection placeholders ahead of solid high-conf patterns. The
+# rerank keeps recency a factor (k=0.05/day → half-life ~14d) but lets
+# confidence dominate when both are recent. No tac — BSD-missing — so we
+# reverse via awk + sort via jq.
 pp_memory_top_patterns() {
   local cwd="$1" k="${2:-10}"
   local proj_dir
@@ -272,11 +333,26 @@ pp_memory_top_patterns() {
     printf '[]'
     return 1
   fi
-  # Last K lines, reversed (most recent first) via awk, wrapped in JSON array.
+  # Read entire file → jq slurp into array → compute score → sort desc → take K.
+  # Score: confidence * 1/(1 + 0.05 * days). 1/(1+kt) is bounded in (0,1],
+  # monotonically decreasing, and never collapses to 0 — so identical
+  # confidences still sort by recency (more-recent ⇒ smaller denominator
+  # ⇒ larger score). jq pre-1.6 lacks exp(); 1/(1+kt) needs only +,*,/.
+  # _age is also kept as a stable tiebreaker (smaller age first) for
+  # numerically-identical scores (e.g. multi-decimal precision quirks).
   local out
-  out=$(tail -n "$k" "$jsonl" 2>/dev/null \
-    | LC_ALL=C awk 'NF { a[++n]=$0 } END { for (i=n; i>=1; i--) print a[i] }' \
-    | jq -cs '.' 2>/dev/null || true)
+  out=$(LC_ALL=C awk 'NF' "$jsonl" 2>/dev/null \
+    | jq -cs '
+        map(. + {
+          _age:   ((now - ((.extracted_at // "1970-01-01T00:00:00Z") | fromdateiso8601)) / 86400),
+          _score: ((.confidence // 0)
+                   / (1 + 0.05 * ((now - ((.extracted_at // "1970-01-01T00:00:00Z")
+                                           | fromdateiso8601)) / 86400)))
+        })
+        | sort_by([-(._score), ._age])
+        | map(del(._score, ._age))
+        | .[:'"$k"']
+      ' 2>/dev/null || true)
   if [ -z "$out" ]; then
     printf '[]'
   else

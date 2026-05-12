@@ -134,11 +134,29 @@ for fix in $fixtures; do
   input_resolved="$sandbox/input.json"
   cwd_state_dir=""
   if [ -d "$fix_dir/cwd-state" ]; then
-    cwd_state_dir="$fix_dir/cwd-state"
+    # Copy the fixture's cwd-state into the sandbox and init it as its own
+    # git repo. Otherwise `git -C $cwd rev-parse` walks UP and finds the
+    # surrounding worktree's git dir, leaking the host repo's files into
+    # grounded facts (the planner picks pair-polymath bash code instead
+    # of the fixture's intended file). Found while establishing the
+    # post-Phase-2.1 baseline: all 7 lenses returned malformed output
+    # because the grounded context was confused by the host's files.
+    cwd_state_dir="$sandbox/cwd"
+    cp -r "$fix_dir/cwd-state" "$cwd_state_dir"
+    (cd "$cwd_state_dir" && \
+       git init -q 2>/dev/null && \
+       git add -A 2>/dev/null && \
+       git -c user.email=fixture@local -c user.name=fixture commit -q -m "fixture state" 2>/dev/null) || true
   elif [ -f "$fix_dir/cwd-state.txt" ]; then
-    # Treat cwd-state.txt as a single-file project — point cwd at the fixture
-    # dir directly and copy it in.
-    cwd_state_dir="$fix_dir"
+    # Legacy single-file fixture support. Same isolation pattern: copy to
+    # sandbox + git init so cwd doesn't inherit the host's git tree.
+    cwd_state_dir="$sandbox/cwd"
+    mkdir -p "$cwd_state_dir"
+    cp "$fix_dir/cwd-state.txt" "$cwd_state_dir/"
+    (cd "$cwd_state_dir" && \
+       git init -q 2>/dev/null && \
+       git add -A 2>/dev/null && \
+       git -c user.email=fixture@local -c user.name=fixture commit -q -m "fixture state" 2>/dev/null) || true
   fi
 
   # Rewrite @TRANSCRIPT@ / @CWD@ placeholders. R1 code-reviewer H2 + GPT

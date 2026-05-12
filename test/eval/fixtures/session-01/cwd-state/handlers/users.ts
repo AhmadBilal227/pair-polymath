@@ -1,5 +1,3 @@
-// handlers/users.ts — minimal repro of the n+1 the user is debugging.
-// Real fixture would include schema.prisma + a test file; kept tiny here.
 
 import { prisma } from '../lib/db';
 

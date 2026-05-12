@@ -43,12 +43,17 @@ _pp_memory_evict_is_number() {
 }
 
 # _pp_memory_db_size PATH
-# Stdout: file size in bytes (BSD/GNU stat fallback).
+# Stdout: file size in bytes. GNU-first ordering because BSD `stat -f`
+# on Linux EXITS 1 but ALSO LEAKS filesystem-info to STDOUT (not just stderr,
+# which `2>/dev/null` suppresses). The captured string then fails numeric
+# validation, eviction silently no-ops, and the DB grows unbounded.
+# R3.8 — fix by trying GNU first; BSD fallback only fires on macOS where
+# GNU stat is absent and exits cleanly to stderr.
 _pp_memory_db_size() {
   local f="$1"
   [ -f "$f" ] || { printf '0'; return 0; }
-  stat -f %z "$f" 2>/dev/null \
-    || stat -c %s "$f" 2>/dev/null \
+  stat -c %s "$f" 2>/dev/null \
+    || stat -f %z "$f" 2>/dev/null \
     || printf '0'
 }
 
@@ -81,8 +86,20 @@ _pp_memory_summarize_for_eviction() {
   local title evidence lens_ids conf type evicted
   title=$(printf '%s' "$cleaned" | jq -r '.title // ""' 2>/dev/null || true)
   [ -z "$title" ] && return 1
+  # R3.3 — defang title before it lands in patterns.jsonl PERMANENTLY. The
+  # LLM-emitted title gets re-injected into every future analyst prompt, so a
+  # single crafted observation can pivot into long-lived prompt injection
+  # unless validated here. Rejection (status 1) means we abort the eviction
+  # entirely rather than persist an unsafe summary — the bodies stay in the
+  # DB to be retried next cycle.
+  title=$(pp_memory_sanitize_title "$title") || return 1
+  [ -z "$title" ] && return 1
   evidence=$(printf '%s' "$cleaned" | jq -c '.evidence_obs_ids // []' 2>/dev/null || true)
   [ -z "$evidence" ] && evidence='[]'
+  # R3.4 — same set-membership defang as patterns.sh. The `rows` arg passed
+  # to this function IS the input that went to the LLM, so use it as the
+  # ground-truth allowlist.
+  evidence=$(_pp_memory_filter_valid_evidence "$rows" "$evidence")
   lens_ids=$(printf '%s' "$cleaned" | jq -c '.lens_ids // []' 2>/dev/null || true)
   [ -z "$lens_ids" ] && lens_ids='[]'
   conf=$(printf '%s' "$cleaned" | jq -r '.confidence // 0.5' 2>/dev/null || true)

@@ -105,10 +105,16 @@ pp_memory_recompute_scores() {
   # last_seen_ts, fall back to ts (NOT NULL per schema), final fallback to
   # 'now' so a fully-corrupt row at least scores deterministically instead of
   # ranking bottom forever.
+  # R3.1: sqlite3's `log()` is base-10 on macOS 3.43 + Ubuntu 3.45 (verified
+  # empirically against `SELECT log(2.718281828)` returning 0.434, not 1.0).
+  # Spec wants natural log to match the shell awk formula in
+  # pp_memory_activation_score (line 69). Use `ln()` explicitly — both target
+  # builds support it as natural log. If a future build lacks `ln()`, the
+  # statement errors loudly (we'd rather see that than silently score wrong).
   pp_memory_sqlite "$db" <<SQL
 UPDATE observations
 SET activation_score =
-  log(COALESCE(use_count, 0) + 1)
+  ln(COALESCE(use_count, 0) + 1)
   - $decay * (julianday('now') - COALESCE(julianday(last_seen_ts), julianday(ts), julianday('now')))
   + 0.6 * COALESCE(act_count, 0)
   + 0.4 * COALESCE(signal_retention, 0);

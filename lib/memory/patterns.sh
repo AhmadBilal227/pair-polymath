@@ -128,6 +128,35 @@ _pp_memory_rotate_patterns_jsonl() {
   chmod 600 "$path" 2>/dev/null || true
 }
 
+# _pp_memory_filter_valid_evidence INPUT_ROWS_JSON EVIDENCE_JSON
+# R3.4 — defangs LLM-supplied evidence_obs_ids by intersecting against the
+# set of obs_ids that were actually passed as input. The LLM can hallucinate
+# or be primed (via crafted body content) into emitting attacker-controlled
+# tokens; those would otherwise land in patterns.jsonl PERMANENTLY and
+# re-surface in every future analyst prompt via pp_memory_top_patterns.
+#
+# Inputs:
+#   $1 INPUT_ROWS_JSON   JSON array of {obs_id, ...} — the input the LLM saw
+#   $2 EVIDENCE_JSON     JSON array of strings — the LLM's claimed evidence
+# Output (stdout):       JSON array of strings — evidence ∩ input.obs_ids
+_pp_memory_filter_valid_evidence() {
+  local input_rows="$1" evidence="$2"
+  # Both inputs may be missing / empty; emit '[]' as a safe default.
+  [ -z "$input_rows" ] && { printf '[]'; return 0; }
+  [ -z "$evidence" ] && { printf '[]'; return 0; }
+  # Build the valid set from INPUT_ROWS_JSON. If parse fails, treat as empty.
+  local valid_set
+  valid_set=$(printf '%s' "$input_rows" \
+    | jq -c '[.[] | .obs_id // empty] | unique' 2>/dev/null) || valid_set='[]'
+  [ -z "$valid_set" ] && valid_set='[]'
+  # Intersect. `IN($valid_set[])` in jq is the standard membership filter.
+  # If EVIDENCE isn't a parseable JSON array, treat as empty.
+  printf '%s' "$evidence" \
+    | jq -c --argjson valid "$valid_set" \
+        '[.[] | select(. as $x | $valid | index($x))]' 2>/dev/null \
+    || printf '[]'
+}
+
 # _pp_memory_strip_code_fence
 # Read stdin, strip a leading ```(json)? fence line and a trailing ``` fence
 # line if present. More robust than the sed pattern it replaces — that one
@@ -262,7 +291,17 @@ _pp_memory_extract_patterns_inner() {
   for i in $(seq 0 $((plen - 1))); do
     title=$(printf '%s' "$patterns_arr" | jq -r ".[$i].title // \"\"")
     [ -z "$title" ] && continue
+    # R3.3 — sanitize title (length cap, control-char strip, role-override
+    # rejection, secret redaction). On rejection, skip THIS pattern but keep
+    # processing siblings — pattern-extraction emits a batch, so one bad
+    # title shouldn't sink the whole cycle.
+    title=$(pp_memory_sanitize_title "$title") || continue
+    [ -z "$title" ] && continue
     evidence=$(printf '%s' "$patterns_arr" | jq -c ".[$i].evidence_obs_ids // []")
+    # R3.4 — only retain evidence_obs_ids that were actually in the input
+    # batch we sent to the LLM. The LLM (or a primed-via-injection LLM) can
+    # otherwise stash attacker-controlled strings here.
+    evidence=$(_pp_memory_filter_valid_evidence "$rows_json" "$evidence")
     lens_ids=$(printf '%s' "$patterns_arr" | jq -c ".[$i].lens_ids // []")
     confidence=$(printf '%s' "$patterns_arr" | jq -r ".[$i].confidence // 0.5")
     _pp_memory_patterns_is_number "$confidence" || confidence=0.5

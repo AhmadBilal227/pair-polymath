@@ -451,6 +451,44 @@ EOF
 # running traps before unwinding). What we CAN verify is the user-visible
 # guarantee: a subshell that runs through `pp_memory_with_lock`, receives
 # INT during a pure-shell tight loop, and dies — leaves the lockdir gone.
+
+# R3.6 — _pp_signals_safe_cited_path fallback hardening.
+@test "safe_cited_path: R3.6 — rejects '..' anywhere" {
+  out=$(_pp_signals_safe_cited_path "src/../etc/passwd" "$SANDBOX/repo")
+  [ -z "$out" ]
+}
+
+@test "safe_cited_path: R3.6 — rejects leading '/'" {
+  out=$(_pp_signals_safe_cited_path "/etc/passwd" "$SANDBOX/repo")
+  [ -z "$out" ]
+}
+
+@test "safe_cited_path: R3.6 — rejects tilde-prefixed path" {
+  out=$(_pp_signals_safe_cited_path '~/passwd' "$SANDBOX/repo")
+  [ -z "$out" ]
+}
+
+@test "safe_cited_path: R3.6 — rejects '.' component" {
+  out=$(_pp_signals_safe_cited_path "src/./file.ts" "$SANDBOX/repo")
+  [ -z "$out" ]
+}
+
+@test "safe_cited_path: R3.6 — rejects empty path component (double slash)" {
+  out=$(_pp_signals_safe_cited_path "src//file.ts" "$SANDBOX/repo")
+  [ -z "$out" ]
+}
+
+@test "safe_cited_path: R3.6 — accepts ordinary relative path when file is deleted" {
+  out=$(_pp_signals_safe_cited_path "src/foo.ts" "$SANDBOX/repo")
+  [ "$out" = "src/foo.ts" ]
+}
+
+@test "safe_cited_path: R3.6 — accepts hidden file (leading dot on component)" {
+  # .hidden is fine; only EXACTLY "." or empty are rejected.
+  out=$(_pp_signals_safe_cited_path ".github/workflows/ci.yml" "$SANDBOX/repo")
+  [ "$out" = ".github/workflows/ci.yml" ]
+}
+
 @test "lock: trap installed by pp_memory_with_lock cleans up on INT" {
   # Tight-loop function: stays in bash (no sleep child) so the INT trap
   # can interrupt it cleanly.

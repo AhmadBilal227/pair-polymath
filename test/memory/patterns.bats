@@ -49,7 +49,7 @@ _ins() {
 }
 
 @test "patterns: empty obs set → no extraction, no JSONL file" {
-  _fixture_emit '{"patterns":[{"title":"unused","evidence_obs_ids":["x"],"lens_ids":["A"],"confidence":0.5}]}'
+  _fixture_emit '{"patterns":[{"title":"unused placeholder pattern for fixture","evidence_obs_ids":["x"],"lens_ids":["A"],"confidence":0.5}]}'
   pp_memory_extract_patterns "$SANDBOX/repo"
   [ ! -f "$PROJ/patterns.jsonl" ]
 }
@@ -168,10 +168,31 @@ _ins() {
 
 @test "patterns: confidence preserved as numeric in JSONL" {
   _ins o1 ENG "h" "b"
-  _fixture_emit '{"patterns":[{"title":"x","evidence_obs_ids":["o1"],"lens_ids":["ENG"],"confidence":0.72}]}'
+  _fixture_emit '{"patterns":[{"title":"non-trivial title for confidence-preservation","evidence_obs_ids":["o1"],"lens_ids":["ENG"],"confidence":0.72}]}'
   pp_memory_extract_patterns "$SANDBOX/repo"
   conf=$(head -1 "$PROJ/patterns.jsonl" | jq '.confidence')
   [ "$conf" = "0.72" ]
+}
+
+@test "patterns: R3.4 — evidence_obs_ids filtered to input set (drops attacker tokens)" {
+  _ins o-real-1 ENG "real-hook-1" "body 1"
+  _ins o-real-2 PERF "real-hook-2" "body 2"
+  # LLM emits one valid obs_id AND one attacker-controlled string.
+  _fixture_emit '{"patterns":[{"title":"Pattern using real obs ids plus one fake","evidence_obs_ids":["o-real-1","ATTACKER_TOKEN_NOT_IN_INPUT","o-real-2"],"lens_ids":["ENG"],"confidence":0.7}]}'
+  pp_memory_extract_patterns "$SANDBOX/repo"
+  ev=$(head -1 "$PROJ/patterns.jsonl" | jq -c '.evidence_obs_ids')
+  # Real ids survive, attacker token does not.
+  [[ "$ev" == *"o-real-1"* ]]
+  [[ "$ev" == *"o-real-2"* ]]
+  [[ "$ev" != *"ATTACKER_TOKEN"* ]]
+}
+
+@test "patterns: R3.4 — all-fake evidence becomes empty array (pattern still persists)" {
+  _ins o-real ENG "h" "b"
+  _fixture_emit '{"patterns":[{"title":"Pattern with all-attacker evidence array","evidence_obs_ids":["FAKE-1","FAKE-2"],"lens_ids":["ENG"],"confidence":0.7}]}'
+  pp_memory_extract_patterns "$SANDBOX/repo"
+  ev=$(head -1 "$PROJ/patterns.jsonl" | jq -c '.evidence_obs_ids')
+  [ "$ev" = "[]" ]
 }
 
 @test "patterns: invalid PP_MEMORY_PATTERN_BATCH_SIZE rejected" {

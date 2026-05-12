@@ -84,3 +84,34 @@ teardown() { rm -rf "$SANDBOX"; }
   cur=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
   [ "$cur" = "0" ]
 }
+
+@test "lock: R3.5 — pp_memory_with_lock preserves caller's INT trap" {
+  mkdir -p "$SANDBOX/proj"
+  _R3_NOOP() { :; }
+  trap 'echo CALLER_INT_FIRED >&2' INT
+  caller_before=$(trap -p INT)
+  pp_memory_with_lock "$SANDBOX/proj" _R3_NOOP
+  caller_after=$(trap -p INT)
+  trap - INT
+  [ "$caller_before" = "$caller_after" ]
+}
+
+@test "lock: R3.5 — pp_memory_with_lock preserves caller's TERM trap" {
+  mkdir -p "$SANDBOX/proj"
+  _R3_NOOP() { :; }
+  trap 'echo CALLER_TERM_FIRED >&2' TERM
+  caller_before=$(trap -p TERM)
+  pp_memory_with_lock "$SANDBOX/proj" _R3_NOOP
+  caller_after=$(trap -p TERM)
+  trap - TERM
+  [ "$caller_before" = "$caller_after" ]
+}
+
+@test "lock: R3.5 — no caller trap → no trap after pp_memory_with_lock" {
+  mkdir -p "$SANDBOX/proj"
+  _R3_NOOP() { :; }
+  trap - INT TERM
+  pp_memory_with_lock "$SANDBOX/proj" _R3_NOOP
+  [ -z "$(trap -p INT)" ]
+  [ -z "$(trap -p TERM)" ]
+}

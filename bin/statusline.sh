@@ -821,14 +821,23 @@ GROUND
 
         # Assemble: patterns section (if any) + obs section (if any). Both
         # optional; if neither, MEMORY_BLOCK stays empty.
+        # R3.2: build the inner content first, then wrap in the
+        # [BACKGROUND MEMORY — UNTRUSTED] fence via _pp_memory_wrap_inject_block.
+        # The wrapper returns empty on empty input, so the F3 sentinel strip
+        # in lib/prompt-loader.sh still elides the block byte-identically in
+        # off-mode.
+        _pp_mem_inner=""
         if [ -n "$_pp_mem_pat_block" ] && [ -n "$_pp_mem_formatted" ]; then
-          MEMORY_BLOCK=$(printf '\n## RECURRING PATTERNS\n%s\n\n## RECENT OBSERVATIONS (top-%s)\n%s' \
+          _pp_mem_inner=$(printf '\n## RECURRING PATTERNS\n%s\n\n## RECENT OBSERVATIONS (top-%s)\n%s' \
             "$_pp_mem_pat_block" "$_pp_mem_k" "$_pp_mem_formatted")
         elif [ -n "$_pp_mem_pat_block" ]; then
-          MEMORY_BLOCK=$(printf '\n## RECURRING PATTERNS\n%s\n' "$_pp_mem_pat_block")
+          _pp_mem_inner=$(printf '\n## RECURRING PATTERNS\n%s\n' "$_pp_mem_pat_block")
         elif [ -n "$_pp_mem_formatted" ]; then
-          MEMORY_BLOCK=$(printf '\n=== ACTIVATED MEMORY (top-%s relevant past observations) ===\n%s' \
+          _pp_mem_inner=$(printf '\n## RECENT OBSERVATIONS (top-%s)\n%s' \
             "$_pp_mem_k" "$_pp_mem_formatted")
+        fi
+        if [ -n "$_pp_mem_inner" ]; then
+          MEMORY_BLOCK=$(_pp_memory_wrap_inject_block "$_pp_mem_inner")
         fi
       fi
       export MEMORY_BLOCK

@@ -66,6 +66,22 @@ _assert_close() {
   _assert_close "$diff" "1.7047"
 }
 
+@test "activation: SQL recompute matches shell formula (R3.1 — log()→ln())" {
+  # R3.1 regression: SQL was using log() which is base-10 in both macOS 3.43
+  # and Ubuntu 3.45 sqlite3 (verified empirically). Shell awk log() is natural
+  # log. This made SQL-side scores diverge from spec by a factor of ln(10).
+  # Acceptance: shell-formula score for (use=1, days=0, act=0, ret=0, k=0.5)
+  # must equal SQL-recompute score for a row with the same values, modulo
+  # julianday() sub-second drift.
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-r31" "ENG" "T" "h" "b" "[]" "[]" "s"
+  shell_score=$(pp_memory_activation_score 1 0 0 0 0.5)
+  pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo"
+  sql_score=$(sqlite3 "$PROJ/observations.sqlite" \
+    "SELECT printf('%.4f', activation_score) FROM observations WHERE obs_id='o-r31';")
+  # 0.01 tolerance covers julianday('now') drift (< 1ms = < 1e-8 day-fraction).
+  _assert_close "$sql_score" "$shell_score" "0.01"
+}
+
 @test "activation: pp_memory_recompute_scores writes scores for all rows" {
   PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-stale" "ENG" "T" "h" "b" "[]" "[]" "s"
   PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-fresh" "ENG" "T" "h" "b" "[]" "[]" "s"

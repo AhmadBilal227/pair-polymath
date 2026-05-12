@@ -85,7 +85,10 @@ _pp_signals_is_number() {
 _pp_signals_mtime() {
   local f="$1"
   [ -e "$f" ] || return 1
-  stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null
+  # R3.8 — GNU first. BSD `stat -f %m` on Linux exits 1 BUT also dumps
+  # filesystem-info to stdout (not just stderr), poisoning the captured
+  # value. Swapped ordering: GNU `stat -c %Y` first (also works on BusyBox).
+  stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null
 }
 
 # _pp_signals_date_plus_30min ISO_TS
@@ -174,11 +177,34 @@ _pp_signals_safe_cited_path() {
     printf '%s' "$resolved"
     return 0
   fi
-  # Fallback: only when input is clearly safe (no `..`, no leading `/`).
+  # Fallback: only when input is clearly safe. realpath-based containment is
+  # impossible because the file has been deleted; defend with string-shape
+  # rules instead.
+  # R3.6 — additional rejections beyond `..` / leading `/`:
+  #   - tilde (~ expansion leaks the user's home if downstream tools do
+  #     pathname expansion before quoting)
+  #   - any path component that is exactly `.` or empty (e.g. `a//b`, `a/./b`)
+  #     so we reject normalize-ambiguous shapes that bypass naive prefix matches
   case "$pp_pth" in
     ''|/*) return 0 ;;
     *..*)  return 0 ;;
+    '~'*|*/'~'*) return 0 ;;
   esac
+  # Reject empty / `.` components anywhere in the path. awk -F/ splits on
+  # the literal slash and walks each component. Sets `bad` if any component
+  # is empty or exactly `.`; END block returns the verdict. (Setting `bad`
+  # + exiting in the main block goes to END which lets us return a clean
+  # status — a bare `exit 1` is overridden by an END that re-exits.)
+  if ! printf '%s' "$pp_pth" | LC_ALL=C awk -F/ '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "" || $i == ".") { bad = 1; exit }
+      }
+    }
+    END { exit (bad ? 1 : 0) }
+  '; then
+    return 0
+  fi
   printf '%s' "$pp_pth"
 }
 

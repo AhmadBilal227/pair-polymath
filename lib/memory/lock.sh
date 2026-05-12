@@ -11,12 +11,15 @@ pp_memory_lock() {
   local timeout_s="${PP_MEMORY_LOCK_TIMEOUT_S:-30}"
   local waited=0
   while ! mkdir "$lockdir" 2>/dev/null; do
-    # Stale-takeover only when we can verify mtime. If both BSD-stat and
-    # GNU-stat fail (busybox / no coreutils), we MUST NOT take over —
+    # Stale-takeover only when we can verify mtime. If both GNU-stat and
+    # BSD-stat fail (busybox / no coreutils), we MUST NOT take over —
     # falling through to the timeout-based wait is the safe default.
+    # R3.8 — GNU first; BSD `stat -f` on Linux leaks fs-info to stdout on
+    # failure and would poison `$mtime` to a non-numeric, breaking stale
+    # detection silently.
     local mtime=""
-    mtime=$(stat -f %m "$lockdir" 2>/dev/null) || \
-    mtime=$(stat -c %Y "$lockdir" 2>/dev/null)
+    mtime=$(stat -c %Y "$lockdir" 2>/dev/null) || \
+    mtime=$(stat -f %m "$lockdir" 2>/dev/null)
     if [ -n "$mtime" ]; then
       local age=$(( $(date +%s) - mtime ))
       if [ "$age" -gt "$stale_s" ]; then
@@ -62,13 +65,33 @@ pp_memory_with_lock() {
     return 2
   }
   pp_memory_lock "$proj_dir" || return 1
-  # Install signal traps that always release the lock. EXIT only fires
-  # inside subshells (bash function return doesn't), so we still call the
-  # explicit unlock below — INT/TERM are the ones we genuinely need.
-  trap 'pp_memory_unlock "$proj_dir"' INT TERM
+  # R3.5 (revised after GPT meta-review): run the inner function inside a
+  # subshell so the trap scope is naturally isolated from the caller. The
+  # earlier `trap -p` save+restore approach was brittle — bash's trap -p
+  # output is quoting-fragile and eval'ing it back can mis-parse handlers
+  # that contain semicolons or newlines, especially across bash versions.
+  #
+  # Subshell semantics are safe for every current caller: all inner functions
+  # (recompute_scores, extract_patterns_inner, evict_inner, signals taggers,
+  # increment_maint_counter_locked) communicate via side effects (SQLite
+  # writes, filesystem) or stdout — none mutate parent-shell variables.
+  #
+  # The subshell's INT/TERM trap releases the lock if the inner function is
+  # killed mid-flight. The unconditional pp_memory_unlock after the subshell
+  # is the happy-path release. unlock is idempotent (rmdir on missing dir
+  # is a noop) so a double-release is harmless.
   local rc=0
-  "$@" || rc=$?
-  trap - INT TERM
+  # The `|| _rc=$?` is critical under `set -e` (bats enables it): without
+  # it, a failing inner function would let set -e abort the subshell at the
+  # call-site, skipping our explicit `exit $_rc` and losing the real status.
+  # Using `|| _rc=$?` defangs set -e for that one call site only.
+  (
+    trap 'pp_memory_unlock "$proj_dir"; exit 130' INT TERM
+    _rc=0
+    "$@" || _rc=$?
+    exit "$_rc"
+  )
+  rc=$?
   pp_memory_unlock "$proj_dir"
   return "$rc"
 }

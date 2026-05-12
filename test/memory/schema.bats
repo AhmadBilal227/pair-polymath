@@ -15,7 +15,9 @@ teardown() { rm -rf "$SANDBOX"; }
   h=$(pp_memory_project_hash "$SANDBOX/repo")
   [ -n "$h" ]
   [ -f "$PP_MEMORY_DIR/.salt" ]
-  perm=$(stat -f '%Lp' "$PP_MEMORY_DIR/.salt" 2>/dev/null || stat -c '%a' "$PP_MEMORY_DIR/.salt")
+  # R3.8 — GNU first; BSD `stat -f` on Linux exits 1 but ALSO leaks
+  # filesystem-info to stdout, contaminating $perm and failing the eq check.
+  perm=$(stat -c '%a' "$PP_MEMORY_DIR/.salt" 2>/dev/null || stat -f '%Lp' "$PP_MEMORY_DIR/.salt" 2>/dev/null)
   [ "$perm" = "600" ]
 }
 

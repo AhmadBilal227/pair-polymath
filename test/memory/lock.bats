@@ -16,16 +16,17 @@ teardown() { rm -rf "$SANDBOX"; }
   [ ! -d "$SANDBOX/proj/.maint.lock" ]
 }
 
-@test "lock: pp_memory_with_lock runs body under lock, releases on success" {
+@test "lock: pp_memory_with_lock runs func under lock, releases on success" {
   mkdir -p "$SANDBOX/proj"
-  pp_memory_with_lock "$SANDBOX/proj" 'echo ran > "$SANDBOX/proj/output"'
+  _bats_helper_write_output() { echo ran > "$SANDBOX/proj/output"; }
+  pp_memory_with_lock "$SANDBOX/proj" _bats_helper_write_output
   [ -f "$SANDBOX/proj/output" ]
   [ ! -d "$SANDBOX/proj/.maint.lock" ]
 }
 
 @test "lock: pp_memory_with_lock releases on failure" {
   mkdir -p "$SANDBOX/proj"
-  run pp_memory_with_lock "$SANDBOX/proj" 'false'
+  run pp_memory_with_lock "$SANDBOX/proj" false
   [ "$status" -ne 0 ]
   [ ! -d "$SANDBOX/proj/.maint.lock" ]
 }

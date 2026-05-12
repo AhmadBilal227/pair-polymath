@@ -53,6 +53,66 @@ teardown() { rm -rf "$SANDBOX"; }
   [[ "$out" == *"[REDACTED-DOTENV]"* ]]
 }
 
+@test "redact: bare .env path stripped" {
+  out=$(pp_memory_redact_body "read /etc/.env for vars")
+  [[ "$out" == *"[REDACTED-DOTENV]"* ]]
+}
+
+@test "redact: word 'environment' is NOT redacted" {
+  out=$(pp_memory_redact_body "the production environment is healthy")
+  [ "$out" = "the production environment is healthy" ]
+}
+
+@test "redact: .envrc (direnv) is NOT redacted" {
+  out=$(pp_memory_redact_body "edit .envrc to add a hook")
+  [[ "$out" == *".envrc"* ]]
+}
+
+@test "redact: prose preserved with only path-occurrence redacted" {
+  out=$(pp_memory_redact_body "documentation about .env files lives here")
+  # The trailing ".env " in path form should be redacted; the prose words remain.
+  [[ "$out" == *"documentation about"* ]]
+  [[ "$out" == *"files lives here"* ]]
+  [[ "$out" == *"[REDACTED-DOTENV]"* ]]
+}
+
+@test "redact: email address stripped" {
+  out=$(pp_memory_redact_body "contact alice@example.com today")
+  [[ "$out" != *"alice@example.com"* ]]
+  [[ "$out" == *"[REDACTED-EMAIL]"* ]]
+}
+
+@test "redact: Stripe live key stripped" {
+  # Build the fake key at runtime so the literal doesn't trip GitHub
+  # Push Protection on the fixture itself (the Stripe scanner detects
+  # the contiguous string pattern). Still matches the regex.
+  prefix="sk_live"
+  body="NOTREALaaaaaaaaaaaaaaaaaaaa"
+  fake_key="${prefix}_${body}"
+  out=$(pp_memory_redact_body "stripe $fake_key done")
+  [[ "$out" != *"$fake_key"* ]]
+  [[ "$out" == *"[REDACTED-STRIPE]"* ]]
+}
+
+@test "redact: JWT token stripped" {
+  jwt="eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+  out=$(pp_memory_redact_body "auth=$jwt end")
+  [[ "$out" != *"eyJhbGciOiJIUzI1NiJ9"* ]]
+  [[ "$out" == *"[REDACTED-JWT]"* ]]
+}
+
+@test "redact: Postgres connection URI stripped" {
+  out=$(pp_memory_redact_body "DATABASE_URL=postgres://user:pass@host:5432/db trail")
+  [[ "$out" != *"user:pass@host"* ]]
+  [[ "$out" == *"[REDACTED-DBURI]"* ]]
+}
+
+@test "redact: MongoDB SRV URI stripped" {
+  out=$(pp_memory_redact_body "uri=mongodb+srv://u:p@cluster.example.com/db end")
+  [[ "$out" != *"u:p@cluster.example.com"* ]]
+  [[ "$out" == *"[REDACTED-DBURI]"* ]]
+}
+
 @test "redact: clean text passes through unchanged" {
   out=$(pp_memory_redact_body "no secrets in here, just words")
   [ "$out" = "no secrets in here, just words" ]

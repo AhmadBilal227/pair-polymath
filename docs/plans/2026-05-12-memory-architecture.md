@@ -264,6 +264,7 @@ Modified files:
     signal_file_edit    INTEGER DEFAULT 0,
     signal_commit_mention INTEGER DEFAULT 0,
     signal_test_flip    INTEGER DEFAULT 0,
+    signal_symbol_touch INTEGER DEFAULT 0,   -- column reserved in v1, implementation deferred to v0.4
     use_count           INTEGER DEFAULT 1,
     act_count           INTEGER DEFAULT 0,
     last_seen_ts        TEXT NOT NULL,

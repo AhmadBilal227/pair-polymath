@@ -86,18 +86,89 @@ teardown() { rm -rf "$SANDBOX"; }
   [ "$jm" = "wal" ]
 }
 
-@test "schema: pp_memory_db_init sets PRAGMA user_version = 1" {
+@test "schema: pp_memory_db_init sets PRAGMA user_version = 2" {
   mkdir -p "$SANDBOX/proj"
   pp_memory_db_init "$SANDBOX/proj"
   uv=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "PRAGMA user_version;")
-  [ "$uv" = "1" ]
+  [ "$uv" = "2" ]
 }
 
-@test "schema: pp_memory_db_migrate is a no-op on a v1 database" {
+@test "schema: pp_memory_db_migrate is a no-op on a v2 database" {
   mkdir -p "$SANDBOX/proj"
   pp_memory_db_init "$SANDBOX/proj"
   run pp_memory_db_migrate "$SANDBOX/proj/observations.sqlite"
   [ "$status" -eq 0 ]
   uv=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "PRAGMA user_version;")
-  [ "$uv" = "1" ]
+  [ "$uv" = "2" ]
+}
+
+@test "schema: pp_memory_db_init creates obs_fts virtual table" {
+  mkdir -p "$SANDBOX/proj"
+  pp_memory_db_init "$SANDBOX/proj"
+  has_fts=$(sqlite3 "$SANDBOX/proj/observations.sqlite" \
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='obs_fts';")
+  [ "$has_fts" = "obs_fts" ]
+}
+
+@test "schema: inserting into observations auto-populates obs_fts via trigger" {
+  mkdir -p "$SANDBOX/proj"
+  pp_memory_db_init "$SANDBOX/proj"
+  pp_memory_sqlite "$SANDBOX/proj/observations.sqlite" "
+    INSERT INTO observations
+      (obs_id, ts, schema_version, lens_id, topic, hook, body, last_seen_ts)
+    VALUES
+      ('o-fts-1', '2026-05-12T00:00:00Z', '1', 'ENG', 'BACKEND',
+       'cache eviction hook', 'body about retry budget', '2026-05-12T00:00:00Z');
+  "
+  # FTS5 MATCH should find the row.
+  hit=$(sqlite3 "$SANDBOX/proj/observations.sqlite" \
+    "SELECT COUNT(*) FROM obs_fts WHERE obs_fts MATCH 'retry';")
+  [ "$hit" = "1" ]
+}
+
+@test "schema: deleting from observations cascades into obs_fts via trigger" {
+  mkdir -p "$SANDBOX/proj"
+  pp_memory_db_init "$SANDBOX/proj"
+  pp_memory_sqlite "$SANDBOX/proj/observations.sqlite" "
+    INSERT INTO observations
+      (obs_id, ts, schema_version, lens_id, topic, hook, body, last_seen_ts)
+    VALUES
+      ('o-fts-2', '2026-05-12T00:00:00Z', '1', 'ENG', 'BACKEND',
+       'doomed hook', 'doomed body', '2026-05-12T00:00:00Z');
+    DELETE FROM observations WHERE obs_id = 'o-fts-2';
+  "
+  hit=$(sqlite3 "$SANDBOX/proj/observations.sqlite" \
+    "SELECT COUNT(*) FROM obs_fts WHERE obs_fts MATCH 'doomed';")
+  [ "$hit" = "0" ]
+}
+
+@test "schema: v1 → v2 migration adds FTS5 to a pre-existing v1 db" {
+  # Simulate a hypothetical pre-FTS5 v1 database: create only the observations
+  # table + cycle_state, mark it user_version=1, then run pp_memory_db_migrate.
+  mkdir -p "$SANDBOX/proj"
+  db="$SANDBOX/proj/observations.sqlite"
+  sqlite3 "$db" <<'SQL'
+PRAGMA journal_mode=WAL;
+CREATE TABLE observations (
+  obs_id TEXT PRIMARY KEY, ts TEXT NOT NULL, schema_version TEXT NOT NULL,
+  lens_id TEXT NOT NULL, topic TEXT, hook TEXT, body TEXT,
+  cited_paths TEXT, cited_symbols TEXT, project_hash TEXT, session_id TEXT,
+  signal_retention INTEGER DEFAULT 0, signal_file_edit INTEGER DEFAULT 0,
+  signal_commit_mention INTEGER DEFAULT 0, signal_test_flip INTEGER DEFAULT 0,
+  signal_symbol_touch INTEGER DEFAULT 0,
+  use_count INTEGER DEFAULT 1, act_count INTEGER DEFAULT 0,
+  last_seen_ts TEXT NOT NULL, activation_score REAL DEFAULT 1.0,
+  embedding_id TEXT, redacted INTEGER DEFAULT 0
+);
+PRAGMA user_version = 1;
+SQL
+  # Pre-condition: no obs_fts.
+  pre=$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE name='obs_fts';")
+  [ "$pre" = "0" ]
+  run pp_memory_db_migrate "$db"
+  [ "$status" -eq 0 ]
+  uv=$(sqlite3 "$db" "PRAGMA user_version;")
+  [ "$uv" = "2" ]
+  post=$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE name='obs_fts';")
+  [ "$post" = "1" ]
 }

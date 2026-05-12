@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # Pair Polymath — memory schema constants + salted project identity.
+#
+# Versioning glossary:
+#   PP_MEMORY_SCHEMA_VERSION (env-level, string) — per-row tag stamped on every
+#     observation. Bumps when the *row format* changes (column add/remove that
+#     readers must reason about). Still "1" — FTS5 mirrors observations 1:1,
+#     no row-format change.
+#   PRAGMA user_version (db-level, int) — tracks DDL applied to this SQLite
+#     file. Bumped to 2 by pp_memory_db_init / pp_memory_db_migrate when FTS5
+#     tables + triggers exist. Used by pp_memory_db_migrate to drive forward
+#     migrations on pre-existing v1 databases.
 
 PP_MEMORY_SCHEMA_VERSION="1"
 PP_MEMORY_DIR="${PP_MEMORY_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/memory}"
@@ -64,17 +74,28 @@ pp_memory_project_dir() {
   printf '%s/projects/%s' "$PP_MEMORY_DIR" "$h"
 }
 
+# pp_memory_sqlite ARGS...
+# Wrapper around sqlite3 that prepends PRAGMA trusted_schema = 1 to every
+# connection so triggers can write into the obs_fts virtual table without
+# SQLite's CLI defensive-mode rejecting the operation. The Apple-bundled
+# sqlite3 compiles with TRUSTED_SCHEMA=OFF default; passing the pragma
+# inline keeps macOS and Linux behaving identically.
+pp_memory_sqlite() {
+  sqlite3 -cmd "PRAGMA trusted_schema = 1;" "$@"
+}
+
 # pp_memory_db_init PROJ_DIR
-# Creates SQLite DB with the v1 schema. Idempotent. WAL mode for
+# Creates SQLite DB with the v1+ schema. Idempotent. WAL mode for
 # native concurrent-reader / single-writer semantics.
 # Schema reserves signal_symbol_touch for v0.4 (impl deferred, column
 # present now to avoid an ALTER TABLE migration later).
+# FTS5 mirror table + triggers added in v2 (Task B.1).
 pp_memory_db_init() {
   local proj_dir="$1"
   mkdir -p "$proj_dir" 2>/dev/null || return 1
   chmod 700 "$proj_dir" 2>/dev/null || true
   local db="$proj_dir/observations.sqlite"
-  sqlite3 "$db" <<'EOF'
+  pp_memory_sqlite "$db" <<'EOF'
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 CREATE TABLE IF NOT EXISTS observations (
@@ -109,33 +130,78 @@ CREATE TABLE IF NOT EXISTS cycle_state (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
-PRAGMA user_version = 1;
 EOF
   pp_memory_db_migrate "$db" || return 1
   chmod 600 "$db" 2>/dev/null || true
 }
 
+# _pp_memory_apply_fts5 DB_PATH
+# Creates the FTS5 virtual table + sync triggers on the observations table.
+# Idempotent (uses IF NOT EXISTS for everything). The triggers keep obs_fts
+# in lockstep with observations: AFTER INSERT inserts the new rowid, AFTER
+# DELETE issues an FTS5 'delete' command, AFTER UPDATE does both.
+#
+# Why FTS5 (ai-engineer R1 §9): pure activation_score top-K is recency-biased
+# (recently-touched dominates new-and-relevant). Hybrid BM25+activation lets
+# retrieval surface observations relevant to the CURRENT cycle's grounded
+# context, not just stuff that fired recently.
+_pp_memory_apply_fts5() {
+  local db="$1"
+  pp_memory_sqlite "$db" <<'EOF'
+CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5(
+  hook, body, topic,
+  content='observations',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS obs_fts_ai AFTER INSERT ON observations BEGIN
+  INSERT INTO obs_fts(rowid, hook, body, topic) VALUES (new.rowid, new.hook, new.body, new.topic);
+END;
+CREATE TRIGGER IF NOT EXISTS obs_fts_ad AFTER DELETE ON observations BEGIN
+  INSERT INTO obs_fts(obs_fts, rowid, hook, body, topic) VALUES('delete', old.rowid, old.hook, old.body, old.topic);
+END;
+CREATE TRIGGER IF NOT EXISTS obs_fts_au AFTER UPDATE ON observations BEGIN
+  INSERT INTO obs_fts(obs_fts, rowid, hook, body, topic) VALUES('delete', old.rowid, old.hook, old.body, old.topic);
+  INSERT INTO obs_fts(rowid, hook, body, topic) VALUES (new.rowid, new.hook, new.body, new.topic);
+END;
+EOF
+}
+
 # pp_memory_db_migrate DB_PATH
 # Applies pending migrations based on PRAGMA user_version.
-# v1 is the initial schema; no migrations exist yet. The function returns 0
-# immediately for v1 databases. v0.4+ will add migration scripts here.
+#
+# Version log:
+#   v0 → v1: first-time init (db_init already ran). Bump user_version.
+#   v1 → v2: add FTS5 virtual table + sync triggers (Task B.1).
+#   current: 2.
+#
+# Migrations are forward-only. Unknown future versions return 1 with an
+# explanatory stderr so a forward-rolled DB on an older codebase fails loudly.
 pp_memory_db_migrate() {
   local db="$1"
   [ -f "$db" ] || return 1
   local cur
-  cur=$(sqlite3 "$db" "PRAGMA user_version;" 2>/dev/null)
-  case "$cur" in
-    0)
-      # v0 → v1: first-time init, db_init already ran. Just bump user_version.
-      sqlite3 "$db" "PRAGMA user_version = 1;"
-      ;;
-    1)
-      # Current version. No-op.
-      return 0
-      ;;
-    *)
-      printf 'pp_memory_db_migrate: unknown user_version %s in %s\n' "$cur" "$db" >&2
-      return 1
-      ;;
-  esac
+  cur=$(pp_memory_sqlite "$db" "PRAGMA user_version;" 2>/dev/null)
+  # Step through versions one at a time so a v0 → v2 cold-start runs each
+  # migration in order.
+  while :; do
+    case "$cur" in
+      0)
+        pp_memory_sqlite "$db" "PRAGMA user_version = 1;"
+        cur=1
+        ;;
+      1)
+        _pp_memory_apply_fts5 "$db" || return 1
+        pp_memory_sqlite "$db" "PRAGMA user_version = 2;"
+        cur=2
+        ;;
+      2)
+        return 0
+        ;;
+      *)
+        printf 'pp_memory_db_migrate: unknown user_version %s in %s\n' "$cur" "$db" >&2
+        return 1
+        ;;
+    esac
+  done
 }

@@ -11,15 +11,20 @@ pp_memory_lock() {
   local timeout_s="${PP_MEMORY_LOCK_TIMEOUT_S:-30}"
   local waited=0
   while ! mkdir "$lockdir" 2>/dev/null; do
-    # Stale-takeover only when we can verify mtime. If both GNU-stat and
-    # BSD-stat fail (busybox / no coreutils), we MUST NOT take over —
-    # falling through to the timeout-based wait is the safe default.
-    # R3.8 — GNU first; BSD `stat -f` on Linux leaks fs-info to stdout on
-    # failure and would poison `$mtime` to a non-numeric, breaking stale
-    # detection silently.
+    # Stale-takeover only when we can verify mtime AS A VALID UNIX TIMESTAMP.
+    # R3.8 — GNU stat first; BSD `stat -f` on Linux leaks fs-info to stdout.
+    # R3.12 — additionally validate mtime is a numeric value in the
+    # expected range (>= 1_000_000_000, i.e. year 2001+). On overlayfs we've
+    # observed stat occasionally returning corrupted/zero values for
+    # whiteout-influenced directories, which would falsely trigger stale
+    # takeover and break the lock under high concurrency.
     local mtime=""
     mtime=$(stat -c %Y "$lockdir" 2>/dev/null) || \
     mtime=$(stat -f %m "$lockdir" 2>/dev/null)
+    case "$mtime" in
+      ''|*[!0-9]*) mtime="" ;;
+      *) [ "$mtime" -lt 1000000000 ] && mtime="" ;;
+    esac
     if [ -n "$mtime" ]; then
       local age=$(( $(date +%s) - mtime ))
       if [ "$age" -gt "$stale_s" ]; then
@@ -136,13 +141,25 @@ _pp_memory_increment_maint_counter_locked() {
     ''|*[!0-9]*) cur=0 ;;
   esac
   local nxt=$((cur + 1))
+  # R3.11 v3 — atomic write via mktemp + mv. We DROPPED the explicit sync
+  # call from v2 because empirical Docker stress testing showed it INCREASED
+  # F6 flakiness (system-wide sync under 24-way concurrency saturates I/O
+  # and pushes individual ops past the lock timeout window). The real fix
+  # is in pp_memory_lock (R3.12 — guard against bogus mtime values
+  # triggering spurious stale-takeover). mv on the same FS is atomic per
+  # POSIX, which is enough as long as the mkdir-lock truly serializes the
+  # critical section.
+  local tmp
+  tmp=$(mktemp "$counter_file.XXXXXX") || return 1
   if [ "$nxt" -ge "$threshold" ]; then
-    printf '0' > "$counter_file" || return 1
-    chmod 600 "$counter_file" 2>/dev/null || true
+    printf '0' > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$counter_file" || { rm -f "$tmp"; return 1; }
     printf 'TRIGGER'
   else
-    printf '%s' "$nxt" > "$counter_file" || return 1
-    chmod 600 "$counter_file" 2>/dev/null || true
+    printf '%s' "$nxt" > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$counter_file" || { rm -f "$tmp"; return 1; }
     printf '%s' "$nxt"
   fi
   return 0

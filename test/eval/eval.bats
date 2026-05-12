@@ -149,3 +149,70 @@ EOF
     return 1
   fi
 }
+
+# v0.4 calibration harness — R3.19.
+@test "eval: calibrate-judge.sh exists and is executable" {
+  [ -x "$EVAL_DIR/calibrate-judge.sh" ]
+}
+
+@test "eval: calibrate-judge --help exits 0 and prints usage" {
+  run bash "$EVAL_DIR/calibrate-judge.sh" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"calibration harness"* ]]
+  [[ "$output" == *"--csv"* ]]
+}
+
+@test "eval: calibrate-judge --offline scores all rows as unscored, agreement_rate=0" {
+  csv="$TMP_RUNS/cal.csv"
+  out="$TMP_RUNS/cal.calibration.json"
+  cat > "$csv" <<EOFCSV
+lens,observation,golden,human_label
+ENG,obs with N+1 in handlers,ARCH golden,useful
+SEC,unrelated string,SEC golden,missed_better
+PERF,prisma findMany,PERF golden,useful
+EOFCSV
+  run bash "$EVAL_DIR/calibrate-judge.sh" --csv "$csv" --out "$out" --offline
+  [ "$status" -eq 0 ]
+  [ -f "$out" ]
+  # Schema check.
+  total=$(jq -r '.total_rows' "$out")
+  scored=$(jq -r '.scored_rows' "$out")
+  rate=$(jq -r '.agreement_rate' "$out")
+  offline=$(jq -r '.offline' "$out")
+  [ "$total" = "3" ]
+  [ "$scored" = "3" ]
+  [ "$rate" = "0.0000" ]
+  [ "$offline" = "1" ]
+  # Confusion matrix has all 4 human labels as top-level keys.
+  jq -e '.confusion | has("useful") and has("obvious") and has("hallucinated") and has("missed_better")' "$out" >/dev/null
+}
+
+@test "eval: calibrate-judge rejects missing --csv flag" {
+  run bash "$EVAL_DIR/calibrate-judge.sh" --offline
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--csv is required"* ]]
+}
+
+@test "eval: calibrate-judge skips empty-observation rows" {
+  csv="$TMP_RUNS/cal2.csv"
+  out="$TMP_RUNS/cal2.calibration.json"
+  cat > "$csv" <<EOFCSV
+lens,observation,golden,human_label
+ENG,non-empty obs,golden,useful
+SEC,,golden,useful
+PERF,another non-empty,golden,obvious
+EOFCSV
+  run bash "$EVAL_DIR/calibrate-judge.sh" --csv "$csv" --out "$out" --offline
+  [ "$status" -eq 0 ]
+  total=$(jq -r '.total_rows' "$out")
+  scored=$(jq -r '.scored_rows' "$out")
+  # 3 rows in CSV, 1 empty → 2 scored.
+  [ "$total" = "3" ]
+  [ "$scored" = "2" ]
+}
+
+@test "eval: calibrate-judge non-existent CSV exits 1" {
+  run bash "$EVAL_DIR/calibrate-judge.sh" --csv /tmp/does-not-exist-$$.csv --offline
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CSV not found"* ]]
+}

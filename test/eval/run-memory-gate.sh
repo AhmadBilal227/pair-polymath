@@ -265,16 +265,151 @@ warm_p50=$(cohort_p50 "$out_dir/warm" warm)
 case "$base_p50" in ''|*[!0-9.]*) base_p50=0 ;; esac
 case "$warm_p50" in ''|*[!0-9.]*) warm_p50=0 ;; esac
 
-# Apply gate criteria.
+# Apply gate criteria. v0.4 R3.19: two paths to PASS, with three universal
+# guards (yield floor, hallucinated non-regression, latency cap).
+#
+# Path A (useful-delta) — original v0.3 criterion: memory directly raises
+#   useful%. Requires warm_useful >= base_useful + min_delta_pp.
+#
+# Path B (hallucinated-delta) — memory reduces fabrications. Requires
+#   base_hallucinated - warm_hallucinated >= min_delta_pp AND
+#   warm_useful >= base_useful (non-regression on useful).
+#
+# Either path triggers PASS, BUT only if all universal guards pass.
+#
+# UNIVERSAL #1 — yield floor (R3.19 ai-engineer review CRITICAL):
+#   hallucinated% denominator includes `missing` (SILENT lenses). A warm
+#   cohort that trivially makes all lenses silent gets hallucinated% = 0
+#   for free, gaming Path B. Require warm to produce at least 50% of the
+#   non-missing observations baseline produced (i.e. warm signal yield must
+#   not collapse). Computed from per_lens counters in score-report.json.
+# UNIVERSAL #2 — hallucinated non-regression.
+# UNIVERSAL #3 — latency cap: warm_p50 <= base_p50 * 1.10.
+#
+# Statistical floor (R3.19 ai-engineer review CRITICAL):
+#   At n=7 (one fixture × 7 lenses), one verdict flip = 14.3pp — below
+#   judge variance. min_delta_pp ramps with sample size:
+#     n  <  20  → 15pp
+#     n  <  70  → 10pp
+#     n >=  70  →  5pp
+#   Auto-detected from baseline's total scored count.
+
 verdict="PASS"
+pass_path=""
 failures=""
-LC_ALL=C awk -v wu="$warm_useful" -v bu="$base_useful" 'BEGIN { exit (wu >= bu + 5 ? 0 : 1) }' \
-  || { verdict="FAIL"; failures="${failures}useful_delta_below_5pp(warm=${warm_useful},base=${base_useful}); "; }
-LC_ALL=C awk -v wh="$warm_halluc" -v bh="$base_halluc" 'BEGIN { exit (wh <= bh ? 0 : 1) }' \
-  || { verdict="FAIL"; failures="${failures}hallucinated_regressed(warm=${warm_halluc},base=${base_halluc}); "; }
-if [ "$base_p50" != "0" ]; then
-  LC_ALL=C awk -v wp="$warm_p50" -v bp="$base_p50" 'BEGIN { exit (wp <= bp * 1.10 ? 0 : 1) }' \
-    || { verdict="FAIL"; failures="${failures}p50_regressed(warm=${warm_p50},base=${base_p50}); "; }
+
+# Extract baseline's total scored from score-report (LLM mode) OR cycle
+# count (heuristic mode) to size n.
+_extract_baseline_n() {
+  if [ "$score_mode" = "llm" ]; then
+    local r
+    r=$(find "$out_dir/baseline" -name 'score-report.json' -type f 2>/dev/null | head -1)
+    [ -z "$r" ] && { printf '0'; return; }
+    jq -r '
+      .per_lens | to_entries | map(.value) as $L
+      | ([$L[].useful, $L[].obvious, $L[]."missed-better", $L[].hallucinated, $L[].missing, $L[].unscored] | add // 0)
+    ' "$r" 2>/dev/null || printf '0'
+  else
+    # Heuristic: third field of base_score is cycle_count
+    printf '%s' "$base_score" | LC_ALL=C cut -f3
+  fi
+}
+baseline_n=$(_extract_baseline_n)
+case "$baseline_n" in ''|*[!0-9]*) baseline_n=0 ;; esac
+
+# Dynamic min_delta_pp.
+if [ "$baseline_n" -lt 20 ]; then
+  min_delta_pp=15
+elif [ "$baseline_n" -lt 70 ]; then
+  min_delta_pp=10
+else
+  min_delta_pp=5
+fi
+
+# Yield-floor numerator: warm's useful + obvious counts (real outputs that
+# aren't fabrications or absences). Pull from score-report when available.
+_extract_yield_counts() {
+  local cohort_dir="$1"
+  if [ "$score_mode" = "llm" ]; then
+    local r
+    r=$(find "$cohort_dir" -name 'score-report.json' -type f 2>/dev/null | head -1)
+    [ -z "$r" ] && { printf '0'; return; }
+    jq -r '
+      .per_lens | to_entries | map(.value) as $L
+      | (([$L[].useful, $L[].obvious] | add) // 0)
+    ' "$r" 2>/dev/null || printf '0'
+  else
+    # Heuristic doesn't distinguish obvious from useful; fall back to
+    # useful_pct * cycle_count / 100.
+    local pct n
+    pct=$(printf '%s' "$1_score_proxy" | LC_ALL=C cut -f1)  # placeholder
+    printf '0'
+  fi
+}
+warm_yield=$(_extract_yield_counts "$out_dir/warm")
+base_yield=$(_extract_yield_counts "$out_dir/baseline")
+case "$warm_yield" in ''|*[!0-9]*) warm_yield=0 ;; esac
+case "$base_yield" in ''|*[!0-9]*) base_yield=0 ;; esac
+
+# INSUFFICIENT_DATA: if baseline produced < 3 scorable observations total,
+# nothing the gate says is statistically meaningful.
+if [ "$baseline_n" -lt 3 ]; then
+  verdict="INSUFFICIENT_DATA"
+  pass_path=""
+  failures="${failures}baseline_n=${baseline_n}_below_3_scorable_obs; "
+else
+  # Path A check.
+  path_a_ok=0
+  LC_ALL=C awk -v wu="$warm_useful" -v bu="$base_useful" -v t="$min_delta_pp" \
+      'BEGIN { exit (wu >= bu + t ? 0 : 1) }' \
+    && path_a_ok=1
+
+  # Path B check.
+  path_b_ok=0
+  if LC_ALL=C awk -v wh="$warm_halluc" -v bh="$base_halluc" -v t="$min_delta_pp" \
+         'BEGIN { exit (bh - wh >= t ? 0 : 1) }' \
+     && LC_ALL=C awk -v wu="$warm_useful" -v bu="$base_useful" \
+          'BEGIN { exit (wu >= bu ? 0 : 1) }'; then
+    path_b_ok=1
+  fi
+
+  if [ "$path_a_ok" = "1" ]; then
+    pass_path="useful_delta"
+  elif [ "$path_b_ok" = "1" ]; then
+    pass_path="hallucinated_delta"
+  else
+    verdict="FAIL"
+    pass_path=""
+    failures="${failures}no_pass_path(useful_delta=warm:${warm_useful}-base:${base_useful}_below_${min_delta_pp}pp,hallucinated_delta=base:${base_halluc}-warm:${warm_halluc}_below_${min_delta_pp}pp_or_useful_regressed); "
+  fi
+
+  # UNIVERSAL #1: yield floor — warm must produce at least 50% of baseline's
+  # non-missing observations. Protects against silence-gaming Path B
+  # (R3.19 ai-engineer + code-reviewer C1).
+  # Only applied in --llm-judge mode where the score-report distinguishes
+  # useful+obvious from missing. Heuristic mode lacks this distinction.
+  if [ "$score_mode" = "llm" ] && [ "$base_yield" -gt 0 ]; then
+    _floor=$(( (base_yield + 1) / 2 ))   # ceil(base_yield / 2)
+    if [ "$warm_yield" -lt "$_floor" ]; then
+      verdict="FAIL"
+      failures="${failures}yield_floor_violated(warm_yield=${warm_yield}_below_floor=${_floor}_of_base_yield=${base_yield}); "
+    fi
+  fi
+
+  # UNIVERSAL #2: hallucinated must not regress.
+  LC_ALL=C awk -v wh="$warm_halluc" -v bh="$base_halluc" 'BEGIN { exit (wh <= bh ? 0 : 1) }' \
+    || { verdict="FAIL"; failures="${failures}hallucinated_regressed(warm=${warm_halluc},base=${base_halluc}); "; }
+
+  # UNIVERSAL #3: latency must not blow up.
+  if [ "$base_p50" != "0" ]; then
+    LC_ALL=C awk -v wp="$warm_p50" -v bp="$base_p50" 'BEGIN { exit (wp <= bp * 1.10 ? 0 : 1) }' \
+      || { verdict="FAIL"; failures="${failures}p50_regressed(warm=${warm_p50},base=${base_p50}); "; }
+  fi
+
+  # R3.19 code-reviewer C2: single point of pass_path invalidation. Resetting
+  # at each gate is error-prone (a future-added universal check could forget
+  # the reset); centralize here so verdict=FAIL ALWAYS implies pass_path="".
+  [ "$verdict" = "FAIL" ] && pass_path=""
 fi
 
 _note=""
@@ -290,6 +425,11 @@ cat > "$out_dir/gate-summary.json" <<EOF
   "score_mode": "$score_mode",
   "cohorts": ["baseline", "cold", "warm"],
   "verdict": "$verdict",
+  "pass_path": "$pass_path",
+  "min_delta_pp": $min_delta_pp,
+  "baseline_n": $baseline_n,
+  "baseline_yield": $base_yield,
+  "warm_yield": $warm_yield,
   "baseline_useful_pct": $base_useful,
   "warm_useful_pct": $warm_useful,
   "baseline_hallucinated_pct": $base_halluc,
@@ -301,6 +441,9 @@ cat > "$out_dir/gate-summary.json" <<EOF
 }
 EOF
 
-printf '\nGate verdict: %s\n' "$verdict"
-[ "$verdict" = "PASS" ] && exit 0
+if [ "$verdict" = "PASS" ]; then
+  printf '\nGate verdict: PASS via %s\n' "$pass_path"
+  exit 0
+fi
+printf '\nGate verdict: FAIL\n'
 exit 1

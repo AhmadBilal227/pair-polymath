@@ -238,7 +238,24 @@ teardown() { rm -rf "$SANDBOX"; }
       > "$SANDBOX/trig-$i.txt" 2>/dev/null &
   done
   wait
-  trigger_count=$(grep -l '^TRIGGER$' "$SANDBOX"/trig-*.txt 2>/dev/null | wc -l | tr -d ' ')
+  # R3.10 — `_pp_memory_increment_maint_counter_locked` emits printf 'TRIGGER'
+  # with NO trailing newline. GNU grep on Linux does NOT match `^TRIGGER$`
+  # against a file whose last/only "line" lacks a newline terminator (BSD
+  # grep on macOS is more permissive). Use -Fx for whole-line literal match
+  # against a fixed string, which works on both. Belt + suspenders: also
+  # try a direct content check via the loop below so the diagnostic on
+  # failure shows exactly which files contained TRIGGER.
+  trigger_count=0
+  for f in "$SANDBOX"/trig-*.txt; do
+    [ -f "$f" ] && [ "$(cat "$f")" = "TRIGGER" ] && \
+      trigger_count=$((trigger_count + 1))
+  done
+  if [ "$trigger_count" != "2" ]; then
+    echo "F6 TRIGGER FAIL — trigger_count=$trigger_count (expected 2)" >&3
+    for f in "$SANDBOX"/trig-*.txt; do
+      printf 'file %s: %s\n' "$f" "$(cat "$f")" >&3
+    done
+  fi
   [ "$trigger_count" = "2" ]
   # Counter should land back at 0 (last trigger reset it).
   final=$(pp_memory_sqlite "$DB" \

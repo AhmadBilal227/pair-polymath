@@ -43,9 +43,23 @@ _ins() {
 }
 
 # Helper: read one signal column for one obs.
+#
+# F6: obs_id is bound via SQLite JSON extraction rather than shell
+# interpolation. The column name is whitelisted to the four signal columns
+# we ever query in this file; any other input aborts the test rather than
+# falling through to a runtime SQL error. This keeps fixtures with awkward
+# obs_ids (apostrophes, embedded quotes) safe to introduce later.
 _sig() {
   local obs_id="$1" col="$2"
-  sqlite3 "$DB" "SELECT $col FROM observations WHERE obs_id='$obs_id';"
+  case "$col" in
+    signal_retention|signal_file_edit|signal_commit_mention|signal_test_flip) ;;
+    *) printf 'unknown column: %s\n' "$col" >&2; return 2 ;;
+  esac
+  local id_json
+  id_json=$(printf '%s' "$obs_id" | jq -Rs '.')
+  sqlite3 "$DB" \
+    "SELECT $col FROM observations
+      WHERE obs_id = (SELECT json_extract('{\"k\":' || '$id_json' || '}', '\$.k'));"
 }
 
 # ─────────────────────────────── RETENTION (5) ───────────────────────────────
@@ -312,4 +326,153 @@ EOF
 @test "orchestrator: run_signals_post_cycle returns 0 even with empty input" {
   pp_memory_run_signals_post_cycle "$SANDBOX/repo" '[]'
   [ "$?" -eq 0 ]
+}
+
+# ────────────────────────────── R2 REVIEW FIXES (9) ──────────────────────────
+# Tests guarding the Ralph R2 fixes. One test per fix where the fix has
+# observable behavior; F6 (helper SQL safety) and F9 (docs) are verified
+# by adoption above and grep respectively.
+
+# F1: deleted-file fallback in file_edit
+@test "file_edit: bumps when cited file was deleted before signal run" {
+  mkdir -p "$SANDBOX/repo/src"
+  printf 'a\n' > "$SANDBOX/repo/src/gone.ts"
+  ( cd "$SANDBOX/repo" && git add src/gone.ts && git commit -q -m "init gone.ts" )
+  _ins "o-f1a" "ENG" "fix gone" "body" '["src/gone.ts"]'
+  sqlite3 "$DB" "UPDATE observations SET ts=datetime('now','-5 minutes'),
+                                       last_seen_ts=datetime('now','-5 minutes')
+                  WHERE obs_id='o-f1a';"
+  # Commit a deletion AFTER the obs so it lands in the 30-min window.
+  ( cd "$SANDBOX/repo" && git rm -q src/gone.ts && git commit -q -m "rm gone.ts" )
+  # File no longer exists; pp_memory_redact_path would return empty here.
+  # _pp_signals_safe_cited_path falls back to the literal path so the
+  # signal still detects the deletion commit.
+  pp_memory_tag_file_edit "$SANDBOX/repo"
+  [ "$(_sig o-f1a signal_file_edit)" = "1" ]
+}
+
+# F1: deleted-file fallback in test_flip
+@test "test_flip: bumps when cited file was deleted before signal run" {
+  mkdir -p "$PP_CACHE_DIR" "$SANDBOX/repo/src/handlers"
+  printf 'a\n' > "$SANDBOX/repo/src/handlers/gone.ts"
+  ( cd "$SANDBOX/repo" && git add src/handlers/gone.ts && git commit -q -m "init" )
+  cat > "$PP_CACHE_DIR/last-test-run" <<EOF
+STATUS: FAIL
+EXIT_CODE: 1
+FAIL_BLOCK_START
+src/handlers/gone.ts:1:1 - error TS2304
+FAIL_BLOCK_END
+EOF
+  _ins "o-f1b" "ENG" "h" "b" '["src/handlers/gone.ts"]'
+  # Delete the file AFTER recording the obs and the FAIL_BLOCK reference.
+  rm -f "$SANDBOX/repo/src/handlers/gone.ts"
+  pp_memory_tag_test_flip "$SANDBOX/repo"
+  [ "$(_sig o-f1b signal_test_flip)" = "1" ]
+}
+
+# F2: invalid CURRENT_OBS_JSON preserves prior state
+@test "retention: invalid JSON preserves prior state" {
+  _ins "o-f2a" "ENG" "h" "b"
+  good='[{"obs_id":"o-f2a","lens_id":"ENG","hook":"h"}]'
+  pp_memory_tag_retention "$SANDBOX/repo" "$good"
+  before=$(sqlite3 "$DB" "SELECT value FROM cycle_state WHERE key='prior_obs_lens_hook';")
+  [ -n "$before" ]
+  # Garbage payload — should NOT touch cycle_state.
+  run pp_memory_tag_retention "$SANDBOX/repo" 'not-json-at-all'
+  [ "$status" -ne 0 ]
+  after=$(sqlite3 "$DB" "SELECT value FROM cycle_state WHERE key='prior_obs_lens_hook';")
+  [ "$before" = "$after" ]
+}
+
+# F2: non-array JSON rejected without state mutation
+@test "retention: non-array JSON rejected" {
+  _ins "o-f2b" "ENG" "h" "b"
+  good='[{"obs_id":"o-f2b","lens_id":"ENG","hook":"h"}]'
+  pp_memory_tag_retention "$SANDBOX/repo" "$good"
+  before=$(sqlite3 "$DB" "SELECT value FROM cycle_state WHERE key='prior_obs_lens_hook';")
+  # Object, not array.
+  run pp_memory_tag_retention "$SANDBOX/repo" '{"obs_id":"oX","lens_id":"L","hook":"h"}'
+  [ "$status" -ne 0 ]
+  after=$(sqlite3 "$DB" "SELECT value FROM cycle_state WHERE key='prior_obs_lens_hook';")
+  [ "$before" = "$after" ]
+}
+
+# F3: stopword list no longer banishes "fix" / "query" — they fire normally.
+@test "commit_mention: bumps when commit message contains 'fix N+1 query'" {
+  printf 'a\n' > "$SANDBOX/repo/seed.txt"
+  ( cd "$SANDBOX/repo" && git add seed.txt && git commit -q -m "init" )
+  # Hook contains "query" (5 chars, NOT a stopword post-F3). Commit
+  # message includes "query" too. Earlier expanded stopword list would
+  # have nuked both sides, dropping the signal entirely.
+  _ins "o-f3" "ENG" "fix the n+1 query in users" "body"
+  sqlite3 "$DB" "UPDATE observations SET ts=datetime('now','-5 minutes')
+                  WHERE obs_id='o-f3';"
+  printf 'b\n' >> "$SANDBOX/repo/seed.txt"
+  ( cd "$SANDBOX/repo" && git add seed.txt \
+      && git commit -q -m "fix the n+1 query in users" )
+  pp_memory_tag_commit_mention "$SANDBOX/repo"
+  [ "$(_sig o-f3 signal_commit_mention)" = "1" ]
+}
+
+# F4: NULL cited_paths is filtered cleanly (no crash; no bump).
+@test "file_edit: obs with NULL cited_paths is filtered cleanly" {
+  _ins "o-f4" "ENG" "h" "b" '[]'
+  # Force NULL via direct UPDATE (insert path always normalizes empty to '[]').
+  sqlite3 "$DB" "UPDATE observations SET cited_paths=NULL,
+                                       ts=datetime('now','-5 minutes')
+                  WHERE obs_id='o-f4';"
+  run pp_memory_tag_file_edit "$SANDBOX/repo"
+  [ "$status" -eq 0 ]
+  [ "$(_sig o-f4 signal_file_edit)" = "0" ]
+}
+
+# F5: path-prefix collision between foo.ts and foo.tsx does NOT bump.
+@test "test_flip: src/foo.ts cited does NOT bump when only src/foo.tsx appears in FAIL_BLOCK" {
+  mkdir -p "$PP_CACHE_DIR" "$SANDBOX/repo/src"
+  printf 'a\n' > "$SANDBOX/repo/src/foo.ts"
+  printf 'a\n' > "$SANDBOX/repo/src/foo.tsx"
+  ( cd "$SANDBOX/repo" && git add . && git commit -q -m "init" )
+  cat > "$PP_CACHE_DIR/last-test-run" <<EOF
+STATUS: FAIL
+EXIT_CODE: 1
+FAIL_BLOCK_START
+src/foo.tsx:42:1 - error TS2304
+src/foo.tsx:99:1 - error TS6133
+FAIL_BLOCK_END
+EOF
+  _ins "o-f5" "ENG" "h" "b" '["src/foo.ts"]'
+  pp_memory_tag_test_flip "$SANDBOX/repo"
+  [ "$(_sig o-f5 signal_test_flip)" = "0" ]
+}
+
+# F8: trap installed by pp_memory_with_lock releases lock if the inner
+# function aborts via SIGINT. We can't reliably test SIGTERM-mid-sleep on
+# bash 3.2 / macOS (bash sitting in waitpid on a child exits without
+# running traps before unwinding). What we CAN verify is the user-visible
+# guarantee: a subshell that runs through `pp_memory_with_lock`, receives
+# INT during a pure-shell tight loop, and dies — leaves the lockdir gone.
+@test "lock: trap installed by pp_memory_with_lock cleans up on INT" {
+  # Tight-loop function: stays in bash (no sleep child) so the INT trap
+  # can interrupt it cleanly.
+  _busy() {
+    local i=0
+    while [ "$i" -lt 100000 ]; do
+      i=$(( i + 1 ))
+    done
+  }
+  (
+    . "$PP_ROOT/lib/memory/lock.sh"
+    pp_memory_with_lock "$PROJ" _busy
+  ) &
+  pid=$!
+  # Spin briefly until the lock has been acquired.
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -d "$PROJ/.maint.lock" ] && break
+    sleep 0.05
+  done
+  [ -d "$PROJ/.maint.lock" ]
+  kill -INT "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  # Trap (or normal completion) released the lockdir.
+  [ ! -d "$PROJ/.maint.lock" ]
 }

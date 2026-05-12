@@ -8,6 +8,31 @@
 # +0.4*retention term, and the other 3 signals feed eviction / display
 # logic in later tasks.
 #
+# ─── Signal semantics (F9) ────────────────────────────────────────────────
+#   retention      GRADED. signal_retention += 1 each cycle the same
+#                  (lens_id, hook) pair fires again. Used directly in the
+#                  activation formula (0.4 × signal_retention). Cumulative
+#                  across the lifetime of the observation.
+#   file_edit      BINARY (one-shot via WHERE signal_file_edit = 0). Fires
+#                  once when git log shows the cited path was touched in
+#                  the 30-minute window after obs_ts. Reserved for Task D
+#                  weight-sweep; NOT currently consumed by activation.
+#   commit_mention BINARY (WHERE signal_commit_mention = 0). Fires once
+#                  when a commit message includes a non-stopword keyword
+#                  ≥4 chars drawn from hook ∪ body. Reserved for Task D.
+#   test_flip      BINARY (WHERE signal_test_flip = 0). Fires once when the
+#                  most recent FAIL block names a cited path within 30 min
+#                  of obs_ts. Reserved for Task D.
+#   symbol_touch   RESERVED for v0.4. Column exists; no tagger.
+#
+# Caller contract:
+#   - Invoke pp_memory_run_signals_post_cycle EXACTLY ONCE per cycle.
+#   - Calling pp_memory_tag_retention directly without the orchestrator is
+#     permitted (tests do this) but the caller assumes responsibility for
+#     advancing cycle_state correctly. The retention inner now hard-fails
+#     on invalid CURRENT_OBS_JSON without mutating prior_obs_lens_hook, so
+#     mis-calls preserve state rather than corrupting it.
+#
 # ┌────────────────────┬──────────────────────────────────────────────────┐
 # │ signal             │ "world said yes" rule                            │
 # ├────────────────────┼──────────────────────────────────────────────────┤
@@ -107,11 +132,16 @@ _pp_signals_normalize_ts() {
     || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
 }
 
-# Stopword list for commit-mention tokenization. Conservative — only words
-# that obviously can't carry signal across an obs/commit boundary. Plan
-# explicitly enumerated this list; we use it verbatim plus a handful of
-# trivial extras commonly seen in commit boilerplate (merge, init, etc.).
-_PP_SIGNALS_STOPWORDS=" the this that with from have been were what when where which will would could should about after before because still just then than they them their there more most some such only also into onto upon over under does doing done make made need want take took user users query queries merge init main next prev open close fix fixes fixed work works working test tests added adds adding update updates updating change changes changed remove removes removing "
+# Stopword list for commit-mention tokenization. CONNECTIVE TISSUE ONLY:
+# pronouns, conjunctions, modal verbs, and other ≥4-char filler that can
+# never carry semantic signal across an obs/commit boundary.
+#
+# IMPORTANT (F3): code-relevant tokens like "fix", "test", "update",
+# "query", "merge", etc. are deliberately ABSENT. The whole point of
+# commit_mention is to detect "the user fixed the thing I observed";
+# banning "fix" or "query" defeats that. The earlier expanded list (which
+# nuked those tokens) was an over-correction and is gone.
+_PP_SIGNALS_STOPWORDS=" the this that with from have been were what when where which will would could should about after before because still just then than they them their there more most some such only also into onto upon over under does doing done make made need want take took user users "
 
 # _pp_signals_extract_keywords TEXT
 # Stdout: newline-delimited keywords from TEXT — lowercase, alphanumeric,
@@ -130,6 +160,28 @@ _pp_signals_extract_keywords() {
     | LC_ALL=C sort -u
 }
 
+# _pp_signals_safe_cited_path PATH CWD
+# Resolve a cited path safely. pp_memory_redact_path → pp_contain_path uses
+# realpath, which FAILS when the file has been deleted. Without a fallback,
+# `git rm src/foo.ts && git commit` between obs-time and signal-time would
+# silently zero file_edit / test_flip forever. Honor the existence-confirmed
+# resolution first; if absent, accept a clearly-relative path (no `..`, no
+# leading `/`) verbatim — it remains git-log compatible.
+_pp_signals_safe_cited_path() {
+  local pp_pth="$1" pp_cwd="$2" resolved=""
+  resolved=$(pp_memory_redact_path "$pp_pth" "$pp_cwd")
+  if [ -n "$resolved" ]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  # Fallback: only when input is clearly safe (no `..`, no leading `/`).
+  case "$pp_pth" in
+    ''|/*) return 0 ;;
+    *..*)  return 0 ;;
+  esac
+  printf '%s' "$pp_pth"
+}
+
 # ───────────────────────────── SIGNAL 1: RETENTION ─────────────────────────────
 
 # _pp_signals_retention_inner CWD CURRENT_OBS_JSON
@@ -141,6 +193,18 @@ _pp_signals_retention_inner() {
   proj_dir=$(pp_memory_project_dir "$cwd") || return 1
   local db="$proj_dir/observations.sqlite"
   [ -f "$db" ] || return 0
+
+  # F2: validate CURRENT_OBS_JSON BEFORE touching cycle_state. Garbage in
+  # (bad JSON, wrong shape) previously fell through and REPLACEd the
+  # prior_obs_lens_hook key with an empty array — permanently disabling
+  # retention until a clean cycle ran. Now we hard-fail without mutating
+  # state, so the prior survives a transient corruption.
+  if ! printf '%s' "$current_json" \
+       | jq -e 'type=="array" and (all(.lens_id and .hook)) ' \
+         >/dev/null 2>&1; then
+    printf 'pp_memory_tag_retention: invalid CURRENT_OBS_JSON; preserving prior state\n' >&2
+    return 1
+  fi
 
   # Read prior cycle's (lens,hook) pairs. Missing key = empty JSON array.
   local prior_json
@@ -181,7 +245,11 @@ _pp_signals_retention_inner() {
   # through SQLite's json_each — no shell quoting on obs_ids.
   if [ "$(printf '%s' "$bump_ids" | jq 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null; then
     local payload_tmp
-    payload_tmp=$(mktemp "$proj_dir/.retention.XXXXXX") || return 1
+    # F7: tempfile under TMPDIR — $proj_dir may contain whitespace
+    # (PP_MEMORY_DIR overrides), which would break SQLite's .import
+    # whitespace tokenizer. /tmp is also writable on RO-FS deployments.
+    payload_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.retention.XXXXXX") || return 1
+    chmod 600 "$payload_tmp" 2>/dev/null || true
     printf '%s\n' "$bump_ids" > "$payload_tmp"
     pp_memory_sqlite "$db" <<SQL
 CREATE TEMP TABLE _ids(j TEXT);
@@ -197,7 +265,8 @@ SQL
   # Persist current pairs as the next cycle's "prior". Same JSON
   # round-trip pattern.
   local state_tmp
-  state_tmp=$(mktemp "$proj_dir/.priorstate.XXXXXX") || return 1
+  state_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.priorstate.XXXXXX") || return 1
+  chmod 600 "$state_tmp" 2>/dev/null || true
   printf '%s\n' "$(jq -nc --arg v "$current_pairs" '{v:$v}')" > "$state_tmp"
   pp_memory_sqlite "$db" <<SQL
 CREATE TEMP TABLE _ps(j TEXT);
@@ -240,12 +309,17 @@ _pp_signals_file_edit_inner() {
   # an edit, but we widen to a day so a deferred run (cron, shutdown) still
   # catches things.
   local rows_tmp
-  rows_tmp=$(mktemp "$proj_dir/.fileedit.XXXXXX") || return 1
+  rows_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.fileedit-rows.XXXXXX") || return 1
+  chmod 600 "$rows_tmp" 2>/dev/null || true
+  # F4: filter via json_array_length to handle '[]', '[ ]', NULL, '[\n]'
+  # uniformly. The earlier literal '!= ''[]''' bypassed any non-canonical
+  # empty form a future caller might pass. json_array_length(NULL) is NULL,
+  # so retain the explicit IS NOT NULL guard.
   pp_memory_sqlite -separator '	' "$db" "
     SELECT obs_id, ts, cited_paths FROM observations
      WHERE signal_file_edit = 0
        AND cited_paths IS NOT NULL
-       AND cited_paths != '[]'
+       AND json_array_length(cited_paths) > 0
        AND ts >= datetime('now','-24 hours');
   " > "$rows_tmp" 2>/dev/null
 
@@ -272,10 +346,12 @@ _pp_signals_file_edit_inner() {
     local matched=0
     while IFS= read -r pp_p; do
       [ -z "$pp_p" ] && continue
-      # Reject any path that escapes cwd. pp_memory_redact_path returns
-      # empty for escapes (../ etc).
+      # Reject paths that escape cwd. _pp_signals_safe_cited_path prefers
+      # the existence-confirmed resolution, but falls back to the literal
+      # path when the file has been deleted (git rm) so the signal still
+      # detects post-delete commits in the 30-min window. See F1.
       local safe_path
-      safe_path=$(pp_memory_redact_path "$pp_p" "$cwd")
+      safe_path=$(_pp_signals_safe_cited_path "$pp_p" "$cwd")
       [ -z "$safe_path" ] && continue
       # git log --name-only -- PATH prints commit hashes interleaved with
       # touched paths. We use --pretty=format: (empty header) so any
@@ -296,7 +372,8 @@ _pp_signals_file_edit_inner() {
   # Single UPDATE for all matched obs_ids.
   if [ "$(printf '%s' "$bump_ids" | jq 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null; then
     local payload_tmp
-    payload_tmp=$(mktemp "$proj_dir/.fileedit-ids.XXXXXX") || return 1
+    payload_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.fileedit-ids.XXXXXX") || return 1
+    chmod 600 "$payload_tmp" 2>/dev/null || true
     printf '%s\n' "$bump_ids" > "$payload_tmp"
     pp_memory_sqlite "$db" <<SQL
 CREATE TEMP TABLE _ids(j TEXT);
@@ -332,7 +409,8 @@ _pp_signals_commit_mention_inner() {
   git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1 || return 0
 
   local rows_tmp
-  rows_tmp=$(mktemp "$proj_dir/.cmmention.XXXXXX") || return 1
+  rows_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.cmmention-rows.XXXXXX") || return 1
+  chmod 600 "$rows_tmp" 2>/dev/null || true
   pp_memory_sqlite -separator '	' "$db" "
     SELECT obs_id, ts, hook, body FROM observations
      WHERE signal_commit_mention = 0
@@ -373,7 +451,8 @@ _pp_signals_commit_mention_inner() {
 
   if [ "$(printf '%s' "$bump_ids" | jq 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null; then
     local payload_tmp
-    payload_tmp=$(mktemp "$proj_dir/.cmmention-ids.XXXXXX") || return 1
+    payload_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.cmmention-ids.XXXXXX") || return 1
+    chmod 600 "$payload_tmp" 2>/dev/null || true
     printf '%s\n' "$bump_ids" > "$payload_tmp"
     pp_memory_sqlite "$db" <<SQL
 CREATE TEMP TABLE _ids(j TEXT);
@@ -432,12 +511,14 @@ _pp_signals_test_flip_inner() {
   _pp_signals_is_number "$cache_mtime" || return 0
 
   local rows_tmp
-  rows_tmp=$(mktemp "$proj_dir/.testflip.XXXXXX") || return 1
+  rows_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.testflip-rows.XXXXXX") || return 1
+  chmod 600 "$rows_tmp" 2>/dev/null || true
+  # F4: same json_array_length filter as file_edit — uniform null/empty.
   pp_memory_sqlite -separator '	' "$db" "
     SELECT obs_id, ts, cited_paths FROM observations
      WHERE signal_test_flip = 0
        AND cited_paths IS NOT NULL
-       AND cited_paths != '[]'
+       AND json_array_length(cited_paths) > 0
        AND ts >= datetime('now','-1 hours');
   " > "$rows_tmp" 2>/dev/null
 
@@ -457,10 +538,32 @@ _pp_signals_test_flip_inner() {
     local matched=0 pp_p safe_path
     while IFS= read -r pp_p; do
       [ -z "$pp_p" ] && continue
-      safe_path=$(pp_memory_redact_path "$pp_p" "$cwd")
+      # F1: tolerate deleted files — fall back to literal path when the
+      # file is gone (git rm), so the signal still fires.
+      safe_path=$(_pp_signals_safe_cited_path "$pp_p" "$cwd")
       [ -z "$safe_path" ] && continue
-      # Fixed-string match — paths often contain regex metachars (dots).
-      if printf '%s\n' "$fail_block" | LC_ALL=C grep -qF -- "$safe_path"; then
+      # F5: avoid path-prefix collisions. FAIL_BLOCK lines have shape
+      # "path/to/file.ext:LINE:COL ...". A naked `grep -F src/foo.ts`
+      # would falsely match `src/foo.tsx`. Use awk to anchor the path at
+      # exactly one of the field delimiters that production tools emit:
+      # the first colon, whitespace, or end-of-line. Compare as a literal
+      # string (no regex) so dotted paths stay safe.
+      if printf '%s\n' "$fail_block" \
+           | LC_ALL=C awk -v p="$safe_path" '
+               {
+                 # Split on ANY of ":", space, or tab. Field 1 is the
+                 # leading token; that is what tsc/eslint/jest emit as
+                 # the file path. Trim any leading "./" that some tools
+                 # prepend; our cited paths never carry it.
+                 n = split($0, parts, /[: \t]/)
+                 if (n >= 1) {
+                   t = parts[1]
+                   sub(/^\.\//, "", t)
+                   if (t == p) { found = 1 }
+                 }
+               }
+               END { exit !found }
+             '; then
         matched=1
         break
       fi
@@ -474,7 +577,8 @@ _pp_signals_test_flip_inner() {
 
   if [ "$(printf '%s' "$bump_ids" | jq 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null; then
     local payload_tmp
-    payload_tmp=$(mktemp "$proj_dir/.testflip-ids.XXXXXX") || return 1
+    payload_tmp=$(mktemp "${TMPDIR:-/tmp}/pp-signals.testflip-ids.XXXXXX") || return 1
+    chmod 600 "$payload_tmp" 2>/dev/null || true
     printf '%s\n' "$bump_ids" > "$payload_tmp"
     pp_memory_sqlite "$db" <<SQL
 CREATE TEMP TABLE _ids(j TEXT);

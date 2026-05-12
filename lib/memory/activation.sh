@@ -15,6 +15,19 @@
 # observation (use_count=1, days=0) scores ≈ 0.693 (ln 2), and one week
 # of inactivity with no further use brings it down to ≈ -2.81 — i.e. fades
 # below practically any newer entry. Tunable via PP_MEMORY_DECAY_PER_DAY.
+#
+# ─── Signal consumption (F9) ──────────────────────────────────────────────
+# Only signal_retention is read by this scorer (the +0.4 term above).
+# signal_retention is GRADED (cumulative bumps; see lib/memory/signals.sh).
+#
+# The remaining 3 signals on the observations table are BINARY one-shots
+# reserved for Task D weight-sweep:
+#   - signal_file_edit
+#   - signal_commit_mention
+#   - signal_test_flip
+# Touching their weights in this formula without first running the weight
+# sweep will change retrieval ordering on every existing row, so leave
+# them as columns-only until Task D selects multipliers.
 
 if [ -z "${PP_ROOT:-}" ]; then
   _pp_memory_activation_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." 2>/dev/null && pwd)"

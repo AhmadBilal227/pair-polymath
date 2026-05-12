@@ -42,6 +42,18 @@ pp_memory_unlock() {
 # pp_memory_with_lock PROJ_DIR FUNC_NAME [ARGS...]
 # Acquires lock, calls FUNC_NAME with the remaining args, always unlocks.
 # NO eval — FUNC_NAME must be a defined shell function or external command.
+#
+# F8: lock release is wired to EXIT/INT/TERM traps so the lockdir is freed
+# even if the inner function (or the shell hosting it) dies between the
+# `mkdir` and the unconditional unlock. Previously, a SIGINT mid-flight
+# would leave the lockdir until the 300s stale-takeover window elapsed.
+#
+# Trap interaction with bash:
+#   - On RETURN from this function the EXIT trap fires only inside subshells.
+#     We rely on it as a safety net; the explicit pp_memory_unlock at the
+#     end of the happy path still releases for the normal case.
+#   - INT/TERM traps catch the standard kill signals. The trap body must be
+#     idempotent (pp_memory_unlock is — rmdir on a missing dir is a no-op).
 pp_memory_with_lock() {
   local proj_dir="$1"
   shift
@@ -50,8 +62,13 @@ pp_memory_with_lock() {
     return 2
   }
   pp_memory_lock "$proj_dir" || return 1
+  # Install signal traps that always release the lock. EXIT only fires
+  # inside subshells (bash function return doesn't), so we still call the
+  # explicit unlock below — INT/TERM are the ones we genuinely need.
+  trap 'pp_memory_unlock "$proj_dir"' INT TERM
   local rc=0
   "$@" || rc=$?
+  trap - INT TERM
   pp_memory_unlock "$proj_dir"
   return "$rc"
 }

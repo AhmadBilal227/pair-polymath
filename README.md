@@ -10,7 +10,7 @@
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-CI%20verified-success)
 ![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-orange)
 
-**Status:** `v0.1.0-alpha` — first tagged release. Core mechanics work for the author on macOS; bats green on Ubuntu CI; APIs (config keys, lens schema, prompt placeholders) may still shift before `v1.0`. Expect rough edges. Issues + PRs welcome.
+**Status:** `v0.3.0-pre` — Phase 2.3 (memory subsystem) just merged. Core mechanics + cost transparency + privacy log + installer hardening + memory all working; off-by-default memory subsystem behind `PP_MEMORY_ENABLE=1`. 454 bats tests green on macOS + Ubuntu CI; APIs (config keys, lens schema, prompt placeholders, memory schema) may still shift before `v1.0`. Eval-gate against labeled goldens lands in `v0.4`. Issues + PRs welcome.
 
 ---
 

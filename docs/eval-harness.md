@@ -142,7 +142,11 @@ For a single fixture, look at:
 - **useful%** per lens — primary target metric. Phase 2 PRs gate on
   per-lens +10pp.
 - **hallucinated%** — secondary. Phase 2.2 (deterministic citation check)
-  is expected to drive this down.
+  is expected to drive this down. Phase 2.2 added explicit `valid_paths` +
+  `valid_symbols` allowlists to the critique input (extracted in shell from
+  the un-truncated grounded blob; see `lib/citations.sh`). The Phase 2.2 PR
+  will commit the post-2.2 baseline showing the `hallucinated%` delta vs
+  `post-phase-2.1.1`.
 - **missing rate** — if SILENT is dominating, the analyst is failing to find
   signal in your fixtures. Either the fixtures are too thin or the lens
   prompts are over-conservative.

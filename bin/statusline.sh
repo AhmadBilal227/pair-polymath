@@ -37,6 +37,8 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/prompt-loader.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/metrics.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/citations.sh"
 
 # Load lens registry from lenses/*.json (built-in + user overrides).
 # Populates PP_LENS_{COUNT,IDS,HATS,FOCUS,COLOR,ENABLED}.
@@ -883,8 +885,32 @@ $lens_evidence"
 
         if [ -n "$critique_input" ]; then
           critique_sys=$(pp_render_prompt critique)
+          # Phase 2.2: deterministic citation allowlists. Extracted in shell
+          # from the (un-truncated) grounded blob so the critique LLM can do
+          # an EXACT-match check instead of fuzzy-grepping a 3KB slice that
+          # may have cut OFF the citation site. Caps at 200 each — they're
+          # pure context for the LLM, not template-substituted, so no
+          # PP_PROMPT_VAR_ALLOWLIST change is needed.
+          pp_extract_citations
+          # R2 fix: when both allowlists are empty (fresh repo / cold start /
+          # no FILE READ), give the model an explicit signal so it doesn't
+          # have to parse two empty multiline sections to figure that out.
+          # The critique prompt's EMPTY-ALLOWLIST EXCEPTION kicks in when this
+          # holds — observations are then judged on concrete/grounded/non-
+          # redundant only.
+          critique_allowlist_note=""
+          if [ -z "$_pp_valid_paths" ] && [ -z "$_pp_valid_symbols" ]; then
+            critique_allowlist_note="(NOTE: both allowlists empty — fresh repo or no FILE READ. Apply EMPTY-ALLOWLIST EXCEPTION: skip citation check.)
+"
+          fi
           critique_data="GROUNDED FACTS:
 ${grounded:0:3000}
+
+${critique_allowlist_note}VALID PATHS (only these paths exist in the grounded inputs — observations citing anything else are HALLUCINATED):
+${_pp_valid_paths}
+
+VALID SYMBOLS (only these identifiers appear in FILE READ — observations citing anything else are [unverified] or HALLUCINATED):
+${_pp_valid_symbols}
 
 OBSERVATIONS TO JUDGE:
 $critique_input"

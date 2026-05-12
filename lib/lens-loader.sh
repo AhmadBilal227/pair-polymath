@@ -9,12 +9,16 @@
 # turning a statusline refresh into a parallel-LLM cost bomb.
 
 # Populates these globals:
-#   PP_LENS_COUNT       — integer
-#   PP_LENS_IDS         — array of ids (e.g. UX_DESIGN, ENGINEERING, ...)
-#   PP_LENS_HATS        — array of comma-joined hats per lens
-#   PP_LENS_FOCUS       — array of focus strings per lens
-#   PP_LENS_COLOR       — array of color_hex per lens
-#   PP_LENS_ENABLED     — array of "true"/"false" per lens
+#   PP_LENS_COUNT                   — integer
+#   PP_LENS_IDS                     — array of ids (e.g. UX_DESIGN, ENGINEERING, ...)
+#   PP_LENS_HATS                    — array of comma-joined hats per lens
+#   PP_LENS_FOCUS                   — array of focus strings per lens
+#   PP_LENS_COLOR                   — array of color_hex per lens
+#   PP_LENS_ENABLED                 — array of "true"/"false" per lens
+#   PP_LENS_SYSTEM_PROMPT_ADDITION  — array of extras.system_prompt_addition strings
+#                                     (may be empty for back-compat with old lens files)
+#   PP_LENS_EXAMPLES                — array of extras.examples joined with \n separator
+#                                     (may be empty for back-compat)
 
 pp_load_lenses() {
   local builtin_dir="$PP_ROOT/lenses"
@@ -23,12 +27,36 @@ pp_load_lenses() {
   local tmp
   tmp=$(mktemp)
 
+  # Field separator inside the tmp/awk pipeline: tab.
+  # `extras.system_prompt_addition` and `extras.examples` may contain tabs,
+  # newlines, and quotes; we base64-encode them so they survive the TSV
+  # pipeline intact and decode at the very end. (Bash 3.2 lacks reliable
+  # mapfile/IFS-newline tricks for arbitrary content, so base64 is the
+  # simplest portable choice.)
+  #
+  # IMPORTANT: in bash `read -r`, when IFS contains only whitespace chars
+  # (including tab), consecutive separators are COLLAPSED — so empty
+  # extras would shift `src` into the wrong variable. We therefore re-emit
+  # the awk-sorted rows with a non-whitespace separator (\x1f) at the read
+  # step, preserving empty fields. (Caught by lens-loader.bats override
+  # test when extras={}.)
   {
     [ -d "$builtin_dir" ] && find "$builtin_dir" -maxdepth 1 -name '*.json' -type f 2>/dev/null
     [ -d "$user_dir" ]    && find "$user_dir"    -maxdepth 1 -name '*.json' -type f 2>/dev/null
   } | while IFS= read -r f; do
     jq -r --arg src "$f" '
-      [.display_order, .id, (.hats|join(",")), .focus, .color_hex, (.enabled // true | tostring), $src]
+      def b64: @base64;
+      [
+        .display_order,
+        .id,
+        (.hats|join(",")),
+        .focus,
+        .color_hex,
+        (.enabled // true | tostring),
+        ((.extras.system_prompt_addition // "") | b64),
+        ((.extras.examples // []) | join("\n") | b64),
+        $src
+      ]
       | @tsv
     ' "$f" 2>/dev/null
   done > "$tmp"
@@ -38,34 +66,50 @@ pp_load_lenses() {
   PP_LENS_FOCUS=()
   PP_LENS_COLOR=()
   PP_LENS_ENABLED=()
+  PP_LENS_SYSTEM_PROMPT_ADDITION=()
+  PP_LENS_EXAMPLES=()
 
   # Dedupe by id (last entry wins → user overrides built-in), then sort by
-  # display_order with id as stable tiebreak.
+  # display_order with id as stable tiebreak. Re-emit with \x1f between
+  # fields so the downstream `read` doesn't collapse empty fields.
   local awk_out
-  awk_out=$(awk -F'\t' '
+  awk_out=$(awk -F'\t' -v OFS=$'\x1f' '
     {
       id = $2
+      $1=$1   # force rebuild with new OFS
       data[id] = $0
       order[id] = $1
     }
     END {
-      for (id in data) print order[id] "\t" id "\t" data[id]
+      for (id in data) print order[id] OFS id OFS data[id]
     }
-  ' "$tmp" | sort -k1,1n -k2,2 | cut -f3-)
+  ' "$tmp" | sort -t $'\x1f' -k1,1n -k2,2 | cut -d $'\x1f' -f3-)
 
   local loaded=0
-  while IFS=$'\t' read -r order id hats focus color enabled src; do
+  while IFS=$'\x1f' read -r order id hats focus color enabled sys_b64 ex_b64 src; do
     [ -z "$id" ] && continue
     [ "$enabled" = "false" ] && continue
     if [ "$loaded" -ge "$max" ]; then
       printf 'pp_load_lenses: lens cap (%s) reached; ignoring remainder\n' "$max" >&2
       break
     fi
+    # Decode base64-wrapped extras fields. `printf` + `base64 -d` is portable
+    # on macOS (BSD) and Linux (GNU). Empty input → empty output.
+    local sys_prompt=""
+    local examples=""
+    if [ -n "$sys_b64" ]; then
+      sys_prompt=$(printf '%s' "$sys_b64" | base64 -d 2>/dev/null)
+    fi
+    if [ -n "$ex_b64" ]; then
+      examples=$(printf '%s' "$ex_b64" | base64 -d 2>/dev/null)
+    fi
     PP_LENS_IDS+=("$id")
     PP_LENS_HATS+=("$hats")
     PP_LENS_FOCUS+=("$focus")
     PP_LENS_COLOR+=("$color")
     PP_LENS_ENABLED+=("$enabled")
+    PP_LENS_SYSTEM_PROMPT_ADDITION+=("$sys_prompt")
+    PP_LENS_EXAMPLES+=("$examples")
     loaded=$((loaded + 1))
   done <<< "$awk_out"
 

@@ -82,6 +82,63 @@ JSON
   rm -rf "$PP_ROOT_EMPTY"
 }
 
+@test "Phase 2.1: each built-in lens JSON has non-empty extras.system_prompt_addition" {
+  for f in "$PP_ROOT"/lenses/*.json; do
+    val=$(jq -r '.extras.system_prompt_addition // ""' "$f")
+    [ -n "$val" ] || { echo "FAIL: $f has empty extras.system_prompt_addition"; return 1; }
+    # Sanity: at least 200 chars — guards against a future drive-by edit
+    # that strips the persona back to a one-liner.
+    [ "${#val}" -ge 200 ] || { echo "FAIL: $f system_prompt_addition too short (${#val} chars)"; return 1; }
+  done
+}
+
+@test "Phase 2.1: each built-in lens JSON has at least 2 worked examples" {
+  for f in "$PP_ROOT"/lenses/*.json; do
+    n=$(jq -r '(.extras.examples // []) | length' "$f")
+    [ "$n" -ge 2 ] || { echo "FAIL: $f has $n examples (need >=2)"; return 1; }
+  done
+}
+
+@test "Phase 2.1: loader populates PP_LENS_SYSTEM_PROMPT_ADDITION + PP_LENS_EXAMPLES" {
+  pp_load_lenses
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ -n "${PP_LENS_SYSTEM_PROMPT_ADDITION[$i]}" ] \
+      || { echo "FAIL: lens $i (${PP_LENS_IDS[$i]}) has empty system_prompt_addition"; return 1; }
+    [ -n "${PP_LENS_EXAMPLES[$i]}" ] \
+      || { echo "FAIL: lens $i (${PP_LENS_IDS[$i]}) has empty examples"; return 1; }
+    # Examples are joined with \n so a 2+-example lens has at least one newline
+    case "${PP_LENS_EXAMPLES[$i]}" in
+      *$'\n'*) ;;
+      *) echo "FAIL: lens $i examples missing newline separator (need >=2 examples joined)"; return 1 ;;
+    esac
+  done
+}
+
+@test "Phase 2.1: lens file missing extras still loads (back-compat)" {
+  # Old-format lens file (no extras at all) should still load — empty
+  # system_prompt_addition + empty examples are acceptable for user lenses
+  # written before Phase 2.1.
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  cat > "$HOME/.claude/pair-polymath/lenses/zz-legacy.json" <<'JSON'
+{
+  "version": 1,
+  "id": "ZZ_LEGACY",
+  "display_order": 200,
+  "hats": ["LEGACY"],
+  "focus": "old-format lens with no extras key",
+  "color_hex": "#888888",
+  "enabled": true
+}
+JSON
+  pp_load_lenses
+  # ZZ_LEGACY appears at the tail (display_order 200, > all built-ins)
+  last=$((PP_LENS_COUNT - 1))
+  [ "${PP_LENS_IDS[$last]}" = "ZZ_LEGACY" ]
+  # Empty system_prompt_addition + examples — but loader must NOT have failed
+  [ -z "${PP_LENS_SYSTEM_PROMPT_ADDITION[$last]}" ]
+  [ -z "${PP_LENS_EXAMPLES[$last]}" ]
+}
+
 @test "loader: stable tiebreak when display_order ties" {
   mkdir -p "$HOME/.claude/pair-polymath/lenses"
   # Inject 2 user lenses both with display_order=100 — verify deterministic id-ascending order

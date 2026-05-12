@@ -243,10 +243,14 @@ _ins() {
   _fixture_emit_capturing '{"patterns":[{"title":"Ordering preservation under R3.17 redaction","evidence_obs_ids":[],"lens_ids":["ENG"],"confidence":0.5}]}'
   pp_memory_extract_patterns "$SANDBOX/repo"
   [ -f "$SANDBOX/last_user_input.json" ]
-  # user_input is the rows array directly (not wrapped in {rows: ...}).
-  bodies=$(jq -r '.[].body' "$SANDBOX/last_user_input.json")
-  count=$(printf '%s\n' "$bodies" | grep -c 'marker-')
-  [ "$count" = "5" ]
+  # GPT review #6 — assert EXACT order, not just marker count, so a
+  # silent reordering bug can't slip through.
+  # The query is ORDER BY ts DESC so most-recently-inserted comes first.
+  # bash insertion order: 1,2,3,4,5 → captured rows order: 5,4,3,2,1.
+  expected=$'marker-5\nmarker-4\nmarker-3\nmarker-2\nmarker-1'
+  actual=$(jq -r '.[].body' "$SANDBOX/last_user_input.json" \
+            | sed -nE 's/.*(marker-[0-9]+).*/\1/p')
+  [ "$actual" = "$expected" ]
 }
 
 @test "patterns: R3.17 — empty body row survives without crashing" {
@@ -259,6 +263,32 @@ _ins() {
   # All 3 rows should be present in the captured user_input array.
   row_count=$(jq 'length' "$SANDBOX/last_user_input.json")
   [ "$row_count" = "3" ]
+}
+
+@test "patterns: R3.17 — TRAILING empty-body rows survive (code-reviewer Important)" {
+  # Command substitution `$(jq -r '.[].body | @base64')` strips trailing
+  # newlines. Without the alignment guard, an input ending in N empty-body
+  # rows yields fewer heredoc lines than $arr_len, and the splice's `// ""`
+  # silently fills with empties — which is fine today (redact("") == "")
+  # but would break invisibly under a future redaction change. This test
+  # asserts the guard pads correctly so the row count stays exact.
+  _ins "o-r317tail-1" "ENG" "h1" "first body"
+  _ins "o-r317tail-2" "ENG" "h2" "second body"
+  _ins "o-r317tail-3" "ENG" "h3" ""
+  _ins "o-r317tail-4" "ENG" "h4" ""
+  _fixture_emit_capturing '{"patterns":[{"title":"Trailing-empty-body regression test under R3.17","evidence_obs_ids":[],"lens_ids":["ENG"],"confidence":0.5}]}'
+  pp_memory_extract_patterns "$SANDBOX/repo"
+  [ -f "$SANDBOX/last_user_input.json" ]
+  # All 4 rows must be present (no silent drop of trailing empties).
+  row_count=$(jq 'length' "$SANDBOX/last_user_input.json")
+  [ "$row_count" = "4" ]
+  # SQL ORDER BY ts DESC: insertion order 1,2,3,4 → output order 4,3,2,1.
+  # Indices 0,1 are the two empty-body rows (tail-4, tail-3).
+  # Indices 2,3 are the non-empty rows (tail-2, tail-1).
+  [ "$(jq -r '.[0].body' "$SANDBOX/last_user_input.json")" = "" ]
+  [ "$(jq -r '.[1].body' "$SANDBOX/last_user_input.json")" = "" ]
+  [ "$(jq -r '.[2].body' "$SANDBOX/last_user_input.json")" = "second body" ]
+  [ "$(jq -r '.[3].body' "$SANDBOX/last_user_input.json")" = "first body" ]
 }
 
 @test "patterns: invalid PP_MEMORY_PATTERN_BATCH_SIZE rejected" {

@@ -239,21 +239,35 @@ _pp_memory_extract_patterns_inner() {
     _pp_bodies_b64=$(printf '%s' "$rows_json" \
       | jq -r '.[].body // "" | @base64' 2>/dev/null)
     _pp_new_b64=""
-    local _pp_enc _pp_body _pp_red _pp_red_enc
+    local _pp_enc _pp_body _pp_red _pp_red_enc _pp_count=0
     while IFS= read -r _pp_enc; do
       if [ -z "$_pp_enc" ]; then
         # Empty body row — preserve as empty so the index alignment in the
         # zip step still matches.
         _pp_new_b64="${_pp_new_b64}"$'\n'
+        _pp_count=$((_pp_count + 1))
         continue
       fi
       _pp_body=$(printf '%s' "$_pp_enc" | base64 -d 2>/dev/null)
       _pp_red=$(pp_memory_redact_body "$_pp_body")
       _pp_red_enc=$(printf '%s' "$_pp_red" | base64 | LC_ALL=C tr -d '\n')
       _pp_new_b64="${_pp_new_b64}${_pp_red_enc}"$'\n'
+      _pp_count=$((_pp_count + 1))
     done <<EOF
 $_pp_bodies_b64
 EOF
+    # R3.17 alignment guard (code-reviewer Important): command substitution
+    # strips trailing newlines from $(jq -r '.[].body // "" | @base64'), so
+    # an input array ending in N empty-body rows yields fewer heredoc lines
+    # than $arr_len. Without padding, the zip step `// ""` silently fills
+    # trailing positions — which is fine TODAY because redact("") == "",
+    # but would break invisibly if redaction ever transformed empty input.
+    # Pad to $arr_len with empty entries so the splice is invariant under
+    # any future redaction change.
+    while [ "$_pp_count" -lt "$arr_len" ]; do
+      _pp_new_b64="${_pp_new_b64}"$'\n'
+      _pp_count=$((_pp_count + 1))
+    done
     # Splice redacted bodies back into rows via a single jq call. We DROP
     # only the trailing empty element from split (which comes from the
     # final newline we always append in the loop). Empty-string entries

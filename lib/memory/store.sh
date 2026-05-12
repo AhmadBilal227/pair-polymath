@@ -295,8 +295,12 @@ _pp_memory_wrap_inject_block() {
 # R3.16 — UTF-8-safe byte truncation. `head -c N` can chop a multi-byte
 # codepoint mid-sequence, leaving an invalid leading byte in the output
 # that gets injected into the analyst prompt. iconv -c (-c = omit invalid
-# characters) strips any incomplete-at-end UTF-8 sequence cleanly. Works
-# on macOS BSD iconv and GNU iconv identically.
+# characters) strips ALL invalid UTF-8 bytes — both an incomplete-at-end
+# sequence AND any mid-string invalid bytes the input may already contain
+# (the latter shouldn't happen since pp_memory_redact_body operates on
+# SQLite-stored text via sed, and SQLite text is valid UTF-8 by contract,
+# but iconv -c handles it idempotently either way). Works on macOS BSD
+# iconv and GNU iconv identically.
 #
 # Output is ≤ N bytes AND guaranteed valid UTF-8.
 # Non-numeric N → return input unchanged (defensive). Empty STR → empty out.

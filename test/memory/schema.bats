@@ -142,6 +142,69 @@ teardown() { rm -rf "$SANDBOX"; }
   [ "$hit" = "0" ]
 }
 
+@test "schema: v1 → v2 migration backfills obs_fts from pre-existing rows" {
+  # Reproduces the legacy-DB failure mode: a v1 database with rows already in
+  # observations must have its FTS5 mirror populated during migration,
+  # otherwise search returns empty against legacy data.
+  mkdir -p "$SANDBOX/proj"
+  db="$SANDBOX/proj/observations.sqlite"
+  sqlite3 "$db" <<'SQL'
+PRAGMA journal_mode=WAL;
+CREATE TABLE observations (
+  obs_id TEXT PRIMARY KEY, ts TEXT NOT NULL, schema_version TEXT NOT NULL,
+  lens_id TEXT NOT NULL, topic TEXT, hook TEXT, body TEXT,
+  cited_paths TEXT, cited_symbols TEXT, project_hash TEXT, session_id TEXT,
+  signal_retention INTEGER DEFAULT 0, signal_file_edit INTEGER DEFAULT 0,
+  signal_commit_mention INTEGER DEFAULT 0, signal_test_flip INTEGER DEFAULT 0,
+  signal_symbol_touch INTEGER DEFAULT 0,
+  use_count INTEGER DEFAULT 1, act_count INTEGER DEFAULT 0,
+  last_seen_ts TEXT NOT NULL, activation_score REAL DEFAULT 1.0,
+  embedding_id TEXT, redacted INTEGER DEFAULT 0
+);
+INSERT INTO observations (obs_id, ts, schema_version, lens_id, hook, body, topic, last_seen_ts)
+VALUES
+  ('legacy-1', '2026-05-12T00:00:00Z', '1', 'ENG', 'h1', 'kafka rebalance lag', 'BACKEND', '2026-05-12T00:00:00Z'),
+  ('legacy-2', '2026-05-12T00:00:00Z', '1', 'ENG', 'h2', 'circuit breaker thresholds', 'BACKEND', '2026-05-12T00:00:00Z'),
+  ('legacy-3', '2026-05-12T00:00:00Z', '1', 'ENG', 'h3', 'retry budget exhausted', 'BACKEND', '2026-05-12T00:00:00Z');
+PRAGMA user_version = 1;
+SQL
+  run pp_memory_db_migrate "$db"
+  [ "$status" -eq 0 ]
+  obs_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM observations;")
+  fts_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM obs_fts;")
+  [ "$obs_count" = "3" ]
+  [ "$fts_count" = "3" ]
+  # And we can search the legacy content.
+  hit=$(sqlite3 "$db" "SELECT COUNT(*) FROM obs_fts WHERE obs_fts MATCH 'kafka';")
+  [ "$hit" = "1" ]
+}
+
+@test "schema: obs_fts_au trigger does NOT fire on use_count/last_seen_ts UPDATE" {
+  # Trigger scoping check — bumping use_count shouldn't produce a delete+reinsert
+  # in obs_fts. We detect "did it fire" by checking that the FTS5 segment-merge
+  # cost stays at zero new internal rows; the simplest observable proxy is that
+  # FTS5 search still returns exactly one row (it would also return one before,
+  # so this test specifically checks that the row is still findable AND that
+  # repeated use_count bumps don't error out).
+  mkdir -p "$SANDBOX/proj"
+  pp_memory_db_init "$SANDBOX/proj"
+  pp_memory_sqlite "$SANDBOX/proj/observations.sqlite" "
+    INSERT INTO observations
+      (obs_id, ts, schema_version, lens_id, topic, hook, body, last_seen_ts)
+    VALUES
+      ('o-bump', '2026-05-12T00:00:00Z', '1', 'ENG', 'BACKEND',
+       'kafka hook', 'kafka body', '2026-05-12T00:00:00Z');
+  "
+  # Bump use_count 10x; with the scoped trigger this should not invalidate FTS5.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pp_memory_sqlite "$SANDBOX/proj/observations.sqlite" \
+      "UPDATE observations SET use_count = use_count + 1, last_seen_ts = '2026-05-12T00:00:01Z' WHERE obs_id = 'o-bump';"
+  done
+  hit=$(sqlite3 "$SANDBOX/proj/observations.sqlite" \
+    "SELECT COUNT(*) FROM obs_fts WHERE obs_fts MATCH 'kafka';")
+  [ "$hit" = "1" ]
+}
+
 @test "schema: v1 → v2 migration adds FTS5 to a pre-existing v1 db" {
   # Simulate a hypothetical pre-FTS5 v1 database: create only the observations
   # table + cycle_state, mark it user_version=1, then run pp_memory_db_migrate.

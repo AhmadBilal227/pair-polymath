@@ -143,6 +143,47 @@ teardown() { rm -rf "$SANDBOX"; }
   [ "$status" -eq 0 ]
 }
 
+@test "store: pp_memory_top_k deterministic tiebreak on identical scores (obs_id ASC)" {
+  # Three rows with the same activation_score must come back ordered by
+  # obs_id ASC so reproducibility is preserved across SQLite builds.
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "obs-c" "ENG" "T" "h" "b" "[]" "[]" "s"
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "obs-a" "ENG" "T" "h" "b" "[]" "[]" "s"
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "obs-b" "ENG" "T" "h" "b" "[]" "[]" "s"
+  pp_memory_sqlite "$PROJ/observations.sqlite" \
+    "UPDATE observations SET activation_score=5.0;"
+  out=$(pp_memory_top_k "$SANDBOX/repo" 3)
+  ids=$(printf '%s' "$out" | jq -r '.[].obs_id' | tr '\n' ' ')
+  [ "$ids" = "obs-a obs-b obs-c " ]
+}
+
+@test "store: pp_memory_top_k with FTS5 operator tokens (NOT/OR/AND) does not crash" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-tok" "ENG" "T" "h" "kafka body" "[]" "[]" "s"
+  # Bare operator tokens would raise an FTS5 syntax error without phrase-quoting.
+  run pp_memory_top_k "$SANDBOX/repo" 5 "kafka NOT"
+  [ "$status" -eq 0 ]
+  run pp_memory_top_k "$SANDBOX/repo" 5 "kafka OR AND"
+  [ "$status" -eq 0 ]
+  run pp_memory_top_k "$SANDBOX/repo" 5 "NEAR kafka"
+  [ "$status" -eq 0 ]
+}
+
+@test "store: pp_memory_top_k rejects injection in PP_MEMORY_RETRIEVAL_ALPHA" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-inj" "ENG" "T" "h" "b" "[]" "[]" "s"
+  PP_MEMORY_RETRIEVAL_ALPHA="1.0; DROP TABLE observations; --" \
+    run pp_memory_top_k "$SANDBOX/repo" 5 "kafka"
+  [ "$status" -ne 0 ]
+  cnt=$(sqlite3 "$PROJ/observations.sqlite" "SELECT COUNT(*) FROM observations;")
+  [ "$cnt" = "1" ]
+}
+
+@test "store: pp_memory_top_k rejects non-integer k" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-k" "ENG" "T" "h" "b" "[]" "[]" "s"
+  run pp_memory_top_k "$SANDBOX/repo" "5.5"
+  [ "$status" -ne 0 ]
+  run pp_memory_top_k "$SANDBOX/repo" "5; DROP"
+  [ "$status" -ne 0 ]
+}
+
 @test "store: re-inserting same obs_id replaces (INSERT OR REPLACE)" {
   PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-dup" "ENG" "T" "h1" "b1" "[]" "[]" "s"
   PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-dup" "ENG" "T" "h2" "b2" "[]" "[]" "s"

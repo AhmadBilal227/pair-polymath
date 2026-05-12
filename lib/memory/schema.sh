@@ -153,6 +153,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5(
   content='observations',
   content_rowid='rowid'
 );
+-- Backfill pre-existing rows. On a fresh DB this is a no-op (0 rows).
+-- On a v1→v2 migration with existing observations, the 'rebuild' command
+-- repopulates the index from the content table so search isn't empty
+-- against legacy data.
+INSERT INTO obs_fts(obs_fts) VALUES('rebuild');
 
 CREATE TRIGGER IF NOT EXISTS obs_fts_ai AFTER INSERT ON observations BEGIN
   INSERT INTO obs_fts(rowid, hook, body, topic) VALUES (new.rowid, new.hook, new.body, new.topic);
@@ -160,7 +165,12 @@ END;
 CREATE TRIGGER IF NOT EXISTS obs_fts_ad AFTER DELETE ON observations BEGIN
   INSERT INTO obs_fts(obs_fts, rowid, hook, body, topic) VALUES('delete', old.rowid, old.hook, old.body, old.topic);
 END;
-CREATE TRIGGER IF NOT EXISTS obs_fts_au AFTER UPDATE ON observations BEGIN
+-- Scoped to content columns only (hook, body, topic). use_count/last_seen_ts
+-- bumps from top_k retrieval fire on every cycle's returned rows; firing the
+-- FTS5 delete+reinsert on those is a perf cliff (15 rows × 288 cycles/day =
+-- 4,320 wasted FTS5 ops). Listing columns scopes the trigger so it only runs
+-- when the FTS5-indexed content actually changes.
+CREATE TRIGGER IF NOT EXISTS obs_fts_au AFTER UPDATE OF hook, body, topic ON observations BEGIN
   INSERT INTO obs_fts(obs_fts, rowid, hook, body, topic) VALUES('delete', old.rowid, old.hook, old.body, old.topic);
   INSERT INTO obs_fts(rowid, hook, body, topic) VALUES (new.rowid, new.hook, new.body, new.topic);
 END;

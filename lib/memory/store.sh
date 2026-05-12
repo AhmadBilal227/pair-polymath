@@ -22,6 +22,25 @@ fi
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/memory/redact.sh"
 
+# _pp_memory_is_number VALUE [MIN]
+# Returns 0 if VALUE matches a numeric regex (optional leading minus, digits,
+# optional fractional part). With MIN given, also requires VALUE >= MIN.
+# Used to defang SQL-injection via numeric interpolation in heredoc queries
+# (alpha, k, decay are all interpolated as bare literals).
+_pp_memory_is_number() {
+  local val="$1" min="${2:-}"
+  case "$val" in
+    ''|*[!0-9.-]*) return 1 ;;
+  esac
+  # Anchor: only one optional leading minus, digits, optional single dot
+  # followed by digits. Reject "1.2.3", "-", "-.5", etc.
+  printf '%s' "$val" | LC_ALL=C grep -qE '^-?[0-9]+(\.[0-9]+)?$' || return 1
+  if [ -n "$min" ]; then
+    LC_ALL=C awk -v v="$val" -v m="$min" 'BEGIN { exit (v+0 >= m+0 ? 0 : 1) }' || return 1
+  fi
+  return 0
+}
+
 # pp_memory_insert CWD OBS_ID LENS_ID TOPIC HOOK BODY CITED_PATHS_JSON CITED_SYMBOLS_JSON SESSION_ID
 # Inserts (or replaces) one observation. Default-on redaction
 # (PP_MEMORY_REDACT=1) runs on body before persistence.
@@ -103,6 +122,25 @@ pp_memory_top_k() {
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local alpha="${PP_MEMORY_RETRIEVAL_ALPHA:-1.0}"
 
+  # Numeric validation. These get interpolated into the SQL heredoc as bare
+  # literals — any non-numeric string would be a SQL injection vector
+  # (e.g. PP_MEMORY_RETRIEVAL_ALPHA='1.0; DROP TABLE observations; --').
+  if ! _pp_memory_is_number "$k" 1; then
+    printf 'pp_memory_top_k: invalid k=%s (need integer >= 1)\n' "$k" >&2
+    return 1
+  fi
+  # k must also be an integer; reject fractional.
+  case "$k" in
+    *.*)
+      printf 'pp_memory_top_k: k=%s must be integer\n' "$k" >&2
+      return 1
+      ;;
+  esac
+  if ! _pp_memory_is_number "$alpha" 0; then
+    printf 'pp_memory_top_k: invalid alpha=%s (need float >= 0)\n' "$alpha" >&2
+    return 1
+  fi
+
   if [ -n "$query" ]; then
     # Hybrid retrieval. FTS5 bm25() is negative for relevance (lower = better
     # match); we negate so higher = better, normalize by max, then add to
@@ -126,15 +164,45 @@ pp_memory_top_k() {
     # Trim leading + trailing whitespace.
     q_safe="${q_safe# }"
     q_safe="${q_safe% }"
-    [ -z "$q_safe" ] && q_safe="x"
     # Defense-in-depth: strip any embedded single quotes (the char class
     # above already excludes them, but a future tweak shouldn't open the door).
     q_safe=${q_safe//\'/}
+    # Phrase-quote every token. Without quoting, FTS5 treats bare "OR", "AND",
+    # "NOT", "NEAR" as operators — an adversarial query like "kafka NOT" then
+    # raises an FTS5 syntax error and aborts the transaction. Quoting each
+    # token forces FTS5 to treat them as literal phrases.
+    local q_quoted="" tok
+    for tok in $q_safe; do
+      [ -z "$tok" ] && continue
+      if [ -z "$q_quoted" ]; then
+        q_quoted="\"$tok\""
+      else
+        q_quoted="$q_quoted \"$tok\""
+      fi
+    done
+    # If nothing survived, fall through to the pure-activation branch — the
+    # FTS5 MATCH with empty/whitespace query is a syntax error.
+    if [ -z "$q_quoted" ]; then
+      pp_memory_sqlite -json "$db" <<SQL
+BEGIN;
+CREATE TEMP TABLE _top AS
+  SELECT obs_id FROM observations
+  ORDER BY (activation_score IS NULL), activation_score DESC, obs_id ASC
+  LIMIT $k;
+UPDATE observations
+  SET use_count = use_count + 1, last_seen_ts = '$now'
+  WHERE obs_id IN (SELECT obs_id FROM _top);
+SELECT * FROM observations WHERE obs_id IN (SELECT obs_id FROM _top)
+  ORDER BY (activation_score IS NULL), activation_score DESC, obs_id ASC;
+COMMIT;
+SQL
+      return $?
+    fi
     pp_memory_sqlite -json "$db" <<SQL
 BEGIN;
 CREATE TEMP TABLE _bm(rowid INTEGER PRIMARY KEY, relevance REAL);
 INSERT INTO _bm
-  SELECT rowid, -bm25(obs_fts) FROM obs_fts WHERE obs_fts MATCH '${q_safe}';
+  SELECT rowid, -bm25(obs_fts) FROM obs_fts WHERE obs_fts MATCH '${q_quoted}';
 CREATE TEMP TABLE _scored AS
   SELECT o.obs_id,
          o.activation_score
@@ -142,29 +210,32 @@ CREATE TEMP TABLE _scored AS
          AS hybrid_score
   FROM observations o
   LEFT JOIN _bm ON _bm.rowid = o.rowid
-  ORDER BY hybrid_score DESC NULLS LAST
+  ORDER BY (hybrid_score IS NULL), hybrid_score DESC, o.obs_id ASC
   LIMIT $k;
 UPDATE observations
   SET use_count = use_count + 1, last_seen_ts = '$now'
   WHERE obs_id IN (SELECT obs_id FROM _scored);
 SELECT o.* FROM observations o
   JOIN _scored s ON s.obs_id = o.obs_id
-  ORDER BY s.hybrid_score DESC;
+  ORDER BY (s.hybrid_score IS NULL), s.hybrid_score DESC, o.obs_id ASC;
 COMMIT;
 SQL
   else
     # Pure activation ranking — no query context provided.
+    # ORDER BY (col IS NULL), col DESC is the portable equivalent of
+    # "DESC NULLS LAST" (not all SQLite builds compile in NULLS LAST).
+    # obs_id ASC is the deterministic tiebreak for identical scores.
     pp_memory_sqlite -json "$db" <<SQL
 BEGIN;
 CREATE TEMP TABLE _top AS
   SELECT obs_id FROM observations
-  ORDER BY activation_score DESC NULLS LAST
+  ORDER BY (activation_score IS NULL), activation_score DESC, obs_id ASC
   LIMIT $k;
 UPDATE observations
   SET use_count = use_count + 1, last_seen_ts = '$now'
   WHERE obs_id IN (SELECT obs_id FROM _top);
 SELECT * FROM observations WHERE obs_id IN (SELECT obs_id FROM _top)
-  ORDER BY activation_score DESC NULLS LAST;
+  ORDER BY (activation_score IS NULL), activation_score DESC, obs_id ASC;
 COMMIT;
 SQL
   fi

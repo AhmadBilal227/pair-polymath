@@ -74,7 +74,7 @@ _assert_close() {
     UPDATE observations SET last_seen_ts=datetime('now','-10 days') WHERE obs_id='o-stale';
     UPDATE observations SET act_count=5 WHERE obs_id='o-fresh';
   "
-  pp_memory_recompute_scores "$SANDBOX/repo"
+  pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo"
   stale_score=$(sqlite3 "$PROJ/observations.sqlite" "SELECT activation_score FROM observations WHERE obs_id='o-stale';")
   fresh_score=$(sqlite3 "$PROJ/observations.sqlite" "SELECT activation_score FROM observations WHERE obs_id='o-fresh';")
   # Fresh + 5 act_count must outscore 10-day-stale row.
@@ -84,10 +84,10 @@ _assert_close() {
 @test "activation: recompute is idempotent up to clock-tick noise" {
   PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o1" "ENG" "T" "h" "b" "[]" "[]" "s"
   PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o2" "ENG" "T" "h" "b" "[]" "[]" "s"
-  pp_memory_recompute_scores "$SANDBOX/repo"
+  pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo"
   first=$(sqlite3 "$PROJ/observations.sqlite" \
     "SELECT GROUP_CONCAT(obs_id || '=' || printf('%.4f', activation_score), '|') FROM (SELECT * FROM observations ORDER BY obs_id);")
-  pp_memory_recompute_scores "$SANDBOX/repo"
+  pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo"
   second=$(sqlite3 "$PROJ/observations.sqlite" \
     "SELECT GROUP_CONCAT(obs_id || '=' || printf('%.4f', activation_score), '|') FROM (SELECT * FROM observations ORDER BY obs_id);")
   # 4-decimal rounding tolerates fractional-second clock drift between
@@ -110,10 +110,53 @@ _assert_close() {
   # Backdate 1 day
   pp_memory_sqlite "$PROJ/observations.sqlite" \
     "UPDATE observations SET last_seen_ts=datetime('now','-1 days') WHERE obs_id='o-d';"
-  PP_MEMORY_DECAY_PER_DAY=2.0 pp_memory_recompute_scores "$SANDBOX/repo"
+  PP_MEMORY_DECAY_PER_DAY=2.0 pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo"
   hi_decay=$(sqlite3 "$PROJ/observations.sqlite" "SELECT activation_score FROM observations WHERE obs_id='o-d';")
-  PP_MEMORY_DECAY_PER_DAY=0.1 pp_memory_recompute_scores "$SANDBOX/repo"
+  PP_MEMORY_DECAY_PER_DAY=0.1 pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo"
   lo_decay=$(sqlite3 "$PROJ/observations.sqlite" "SELECT activation_score FROM observations WHERE obs_id='o-d';")
   # Higher decay → lower (more negative) score for same elapsed time.
   LC_ALL=C awk -v h="$hi_decay" -v l="$lo_decay" 'BEGIN { exit (l>h ? 0 : 1) }'
+}
+
+@test "activation: recompute_scores without lock returns 1 + stderr message" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-nolock" "ENG" "T" "h" "b" "[]" "[]" "s"
+  # Direct call without pp_memory_with_lock wrapper must fail.
+  # bats versions differ in `run` stderr handling — capture via shell to a file
+  # so the assertion is portable, and use a subshell with `set +e` so the
+  # non-zero exit doesn't immediately fail the test under bats errexit.
+  err_file="$SANDBOX/recompute.err"
+  ( set +e
+    pp_memory_recompute_scores "$SANDBOX/repo" 2>"$err_file"
+    printf '%s\n' "$?" > "$SANDBOX/recompute.rc"
+  )
+  rc=$(cat "$SANDBOX/recompute.rc")
+  [ "$rc" -ne 0 ]
+  grep -q "must be called under pp_memory_with_lock" "$err_file"
+}
+
+@test "activation: recompute_scores rejects non-numeric PP_MEMORY_DECAY_PER_DAY" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-inj" "ENG" "T" "h" "b" "[]" "[]" "s"
+  err_file="$SANDBOX/decay.err"
+  ( set +e
+    PP_MEMORY_DECAY_PER_DAY="0.5; DROP TABLE observations; --" \
+      pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo" 2>"$err_file"
+    printf '%s\n' "$?" > "$SANDBOX/decay.rc"
+  )
+  rc=$(cat "$SANDBOX/decay.rc")
+  [ "$rc" -ne 0 ]
+  # Table must still exist.
+  cnt=$(sqlite3 "$PROJ/observations.sqlite" "SELECT COUNT(*) FROM observations;")
+  [ "$cnt" = "1" ]
+}
+
+@test "activation: malformed last_seen_ts does not produce NULL activation_score" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-bad" "ENG" "T" "h" "b" "[]" "[]" "s"
+  # Corrupt last_seen_ts to something julianday() can't parse.
+  pp_memory_sqlite "$PROJ/observations.sqlite" \
+    "UPDATE observations SET last_seen_ts='not-a-date' WHERE obs_id='o-bad';"
+  pp_memory_with_lock "$PROJ" pp_memory_recompute_scores "$SANDBOX/repo"
+  # activation_score must be a number, not NULL.
+  is_null=$(sqlite3 "$PROJ/observations.sqlite" \
+    "SELECT activation_score IS NULL FROM observations WHERE obs_id='o-bad';")
+  [ "$is_null" = "0" ]
 }

@@ -102,6 +102,14 @@ pp_load_lenses() {
     fi
     if [ -n "$ex_b64" ]; then
       examples=$(printf '%s' "$ex_b64" | base64 -d 2>/dev/null)
+      # R2 fix (code-reviewer M2): bake the section header into the value so
+      # the prompt template's "Worked examples" header is only rendered when
+      # examples actually exist. Empty examples → empty rendering, no dangling
+      # header for back-compat lens files.
+      if [ -n "$examples" ]; then
+        examples="Worked examples for THIS lens:
+$examples"
+      fi
     fi
     PP_LENS_IDS+=("$id")
     PP_LENS_HATS+=("$hats")

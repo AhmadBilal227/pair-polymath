@@ -5,7 +5,6 @@ HAT = 2-12 uppercase chars
 hook = 40-70 chars
 body = 80-180 chars with concrete next step ending in a verb (Fix, Refactor, Extract, Add, Move, Verify, Cap, Cite, Schedule, Defer)
 
-Worked examples for THIS lens:
 ${lens_examples}
 
 RELEVANCE MODE: ${relevance_directive}

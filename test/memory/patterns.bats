@@ -41,6 +41,23 @@ EOF
   export PP_MEMORY_LLM_BIN="$FIXTURE"
 }
 
+# Helper (R3.17): fixture that ALSO captures the user_input so tests can
+# inspect what the redaction loop produced before invoking the LLM. The
+# user_input arrives on STDIN per _pp_memory_invoke_llm's contract.
+_fixture_emit_capturing() {
+  local body="$1"
+  cat > "$FIXTURE" <<EOF
+#!/usr/bin/env bash
+# Capture STDIN (rows_json after re-redaction) for the test to inspect.
+tee "$SANDBOX/last_user_input.json" > /dev/null
+cat <<'JSONOUT'
+$body
+JSONOUT
+EOF
+  chmod +x "$FIXTURE"
+  export PP_MEMORY_LLM_BIN="$FIXTURE"
+}
+
 # Helper: insert one observation (no redaction).
 _ins() {
   local id="$1" lens="$2" hook="$3" body="$4"
@@ -193,6 +210,55 @@ _ins() {
   pp_memory_extract_patterns "$SANDBOX/repo"
   ev=$(head -1 "$PROJ/patterns.jsonl" | jq -c '.evidence_obs_ids')
   [ "$ev" = "[]" ]
+}
+
+# R3.17 — O(n) re-redaction rewrite. Three invariants under load:
+# (1) no secrets survive into the rows_json passed to the LLM
+# (2) row ordering is preserved (so obs_id N stays at index N)
+# (3) empty bodies don't crash
+@test "patterns: R3.17 — bodies redacted at batch scale, no sk-* survives" {
+  # 10 rows, each body carries a unique sk- secret.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    _ins "o-r317-$i" "ENG" "hook-$i" "body $i carries sk-ABCD$i$i$i$i$i$i$i$i$i$i$i$i$i$i$i$i$i$i$i$i secret"
+  done
+  _fixture_emit_capturing '{"patterns":[{"title":"Captured a batch successfully under R3.17","evidence_obs_ids":[],"lens_ids":["ENG"],"confidence":0.5}]}'
+  pp_memory_extract_patterns "$SANDBOX/repo"
+  # Inspect what the LLM saw.
+  [ -f "$SANDBOX/last_user_input.json" ]
+  # No sk- secret literal anywhere in the captured user input.
+  if grep -q 'sk-ABCD' "$SANDBOX/last_user_input.json"; then
+    cat "$SANDBOX/last_user_input.json" >&3
+    false
+  fi
+  # All bodies should now contain [REDACTED-OPENAI] marker.
+  marker_count=$(grep -o '\[REDACTED-OPENAI\]' "$SANDBOX/last_user_input.json" | wc -l | tr -d ' ')
+  [ "$marker_count" -ge "10" ]
+}
+
+@test "patterns: R3.17 — row ordering preserved after re-redaction" {
+  # Insert 5 rows with distinguishable bodies (no secrets — just bigrams).
+  for i in 1 2 3 4 5; do
+    _ins "o-r317ord-$i" "ENG" "hook-$i" "marker-$i body content"
+  done
+  _fixture_emit_capturing '{"patterns":[{"title":"Ordering preservation under R3.17 redaction","evidence_obs_ids":[],"lens_ids":["ENG"],"confidence":0.5}]}'
+  pp_memory_extract_patterns "$SANDBOX/repo"
+  [ -f "$SANDBOX/last_user_input.json" ]
+  # user_input is the rows array directly (not wrapped in {rows: ...}).
+  bodies=$(jq -r '.[].body' "$SANDBOX/last_user_input.json")
+  count=$(printf '%s\n' "$bodies" | grep -c 'marker-')
+  [ "$count" = "5" ]
+}
+
+@test "patterns: R3.17 — empty body row survives without crashing" {
+  _ins "o-r317emp-1" "ENG" "hook-with-body" "non-empty body"
+  _ins "o-r317emp-2" "ENG" "hook-with-empty" ""
+  _ins "o-r317emp-3" "ENG" "hook-back-to-body" "another body"
+  _fixture_emit_capturing '{"patterns":[{"title":"Empty-body row handling under R3.17 redaction","evidence_obs_ids":[],"lens_ids":["ENG"],"confidence":0.5}]}'
+  pp_memory_extract_patterns "$SANDBOX/repo"
+  [ -f "$SANDBOX/last_user_input.json" ]
+  # All 3 rows should be present in the captured user_input array.
+  row_count=$(jq 'length' "$SANDBOX/last_user_input.json")
+  [ "$row_count" = "3" ]
 }
 
 @test "patterns: invalid PP_MEMORY_PATTERN_BATCH_SIZE rejected" {

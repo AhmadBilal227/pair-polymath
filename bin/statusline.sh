@@ -813,7 +813,11 @@ GROUND
             _pp_mem_hook=$(printf '%s' "$_pp_mem_json" | jq -r --argjson i "$_pp_mem_i" '.[$i].hook // ""' 2>/dev/null)
             _pp_mem_body=$(printf '%s' "$_pp_mem_json" | jq -r --argjson i "$_pp_mem_i" '.[$i].body // ""' 2>/dev/null)
             _pp_mem_body=$(pp_memory_redact_body "$_pp_mem_body")
-            _pp_mem_body=$(printf '%s' "$_pp_mem_body" | head -c "$_pp_mem_body_max")
+            # R3.16 — UTF-8-safe truncate. `head -c N` can chop multi-byte
+            # codepoints (4-byte emoji etc.) mid-sequence, putting invalid
+            # bytes into the analyst prompt. _pp_memory_truncate_utf8 uses
+            # iconv -c to drop any partial trailing sequence.
+            _pp_mem_body=$(_pp_memory_truncate_utf8 "$_pp_mem_body" "$_pp_mem_body_max")
             _pp_mem_formatted="${_pp_mem_formatted}[${_pp_mem_lens}] ${_pp_mem_hook} — ${_pp_mem_body}"$'\n'
             _pp_mem_i=$((_pp_mem_i + 1))
           done

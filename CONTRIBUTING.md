@@ -11,10 +11,23 @@ brew install bats-core shellcheck jq    # macOS
 # OR
 sudo apt-get install -y bats shellcheck jq    # Ubuntu
 
-bats test/                              # run the test suite
+bats -r test/                           # run the test suite (recursive)
 shellcheck bin/*.sh lib/*.sh hooks/*.sh # lint
 bash bin/polymath doctor                # see your machine's state
 ```
+
+Or use the `Makefile` shortcuts:
+
+```bash
+make test          # bats -r test/ on the host
+make test-linux    # bats -r test/ inside Ubuntu Docker — catches BSD/GNU
+                   # portability bugs (stat, tr, set -u + sourcing, etc.)
+                   # WITHOUT a CI roundtrip. Requires Docker.
+make test-eval     # only the test/eval/ subset (faster iteration)
+make lint          # shellcheck across bin/ and lib/
+```
+
+**Strongly recommended before push: `make test-linux`.** macOS bash 3.2 and Ubuntu bash 5 disagree on plenty (BSD `stat -f` vs GNU `stat -c`, BSD `tr` single-byte under `LC_ALL=C`, bats `run` stderr capture, `set -u` semantics in `bash -c`). Every cross-platform bug this project has shipped to CI was preventable with a one-line `make test-linux` before push.
 
 ## How to propose a change
 

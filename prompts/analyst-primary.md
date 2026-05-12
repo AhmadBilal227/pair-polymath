@@ -1,5 +1,5 @@
 ${lens_system_prompt_addition}
-
+${MEMORY_BLOCK}
 OUTPUT FORMAT (strict — your response MUST match this exact shape):
 
   HAT: hook|||body

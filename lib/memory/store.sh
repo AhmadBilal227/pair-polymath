@@ -177,12 +177,15 @@ pp_memory_top_k() {
     # query.
     #
     # FTS5 query escaping: strip everything except alphanumerics, underscore,
-    # and spaces. We omit dash because FTS5 treats it as a NOT operator and
-    # a stray leading/trailing dash raises an "fts5: syntax error near -".
-    # Empty-string fallback ("x") prevents FTS5's "no such query syntax"
-    # error when the caller passes pure punctuation.
+    # space, AND dash/dot (R3.15). The per-token phrase-quote below makes
+    # dash safe inside a phrase ("analyst-primary" is a literal phrase, not
+    # a NOT operator). Without dash in the char class, kebab-case identifier
+    # and file-path queries (analyst-primary.md, lib/memory/store.sh) all
+    # got stripped to bag-of-words noise — ai-engineer review I3.
+    # Empty-string fallback prevents FTS5's "no such query syntax" error
+    # when the caller passes pure punctuation.
     local q_safe
-    q_safe=$(printf '%s' "$query" | LC_ALL=C tr -cd 'A-Za-z0-9_ ' | LC_ALL=C tr -s ' ')
+    q_safe=$(printf '%s' "$query" | LC_ALL=C tr -cd 'A-Za-z0-9_.\- ' | LC_ALL=C tr -s ' ')
     # Trim leading + trailing whitespace.
     q_safe="${q_safe# }"
     q_safe="${q_safe% }"
@@ -286,4 +289,29 @@ _pp_memory_wrap_inject_block() {
   printf 'discussion hypotheses to verify before considering.\n'
   printf '%s\n' "$body"
   printf '[END BACKGROUND MEMORY]\n'
+}
+
+# _pp_memory_truncate_utf8 STR N_BYTES
+# R3.16 — UTF-8-safe byte truncation. `head -c N` can chop a multi-byte
+# codepoint mid-sequence, leaving an invalid leading byte in the output
+# that gets injected into the analyst prompt. iconv -c (-c = omit invalid
+# characters) strips ALL invalid UTF-8 bytes — both an incomplete-at-end
+# sequence AND any mid-string invalid bytes the input may already contain
+# (the latter shouldn't happen since pp_memory_redact_body operates on
+# SQLite-stored text via sed, and SQLite text is valid UTF-8 by contract,
+# but iconv -c handles it idempotently either way). Works on macOS BSD
+# iconv and GNU iconv identically.
+#
+# Output is ≤ N bytes AND guaranteed valid UTF-8.
+# Non-numeric N → return input unchanged (defensive). Empty STR → empty out.
+_pp_memory_truncate_utf8() {
+  local s="$1" n="$2"
+  [ -z "$s" ] && return 0
+  case "$n" in
+    ''|*[!0-9]*) printf '%s' "$s"; return 0 ;;
+  esac
+  # iconv -c exits 1 when input has an incomplete-at-end UTF-8 sequence
+  # (it still emits the correctly-truncated output to stdout). `|| true`
+  # so the non-zero rc doesn't propagate under bats's set -e + pipefail.
+  printf '%s' "$s" | head -c "$n" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true
 }

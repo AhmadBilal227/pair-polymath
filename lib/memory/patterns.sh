@@ -226,21 +226,59 @@ _pp_memory_extract_patterns_inner() {
   # before reaching the LLM. Hook and topic are usually short/structured;
   # body is the high-leverage field. This is intentionally a second pass —
   # the at-store-time redaction already ran when PP_MEMORY_REDACT=1.
+  #
+  # R3.17 — O(n) rewrite. The previous loop spawned 2 jq processes per row
+  # AND rebuilt the accumulator JSON each iteration (O(n²) memory). For
+  # batch=200 that was ~400 jq invocations + quadratic copy. This version
+  # uses 2 jq invocations total: one to emit base64-encoded bodies (handles
+  # multi-line bodies safely without separator-collision risk), then a
+  # tight shell loop that redacts each, then one final jq to splice the
+  # redacted bodies back into the rows array.
   if [ "${PP_MEMORY_REDACT:-1}" = "1" ]; then
-    local _pp_pat_redacted_rows _pp_pat_idx _pp_pat_body _pp_pat_redacted
-    _pp_pat_redacted_rows='[]'
-    _pp_pat_idx=0
-    while [ "$_pp_pat_idx" -lt "$arr_len" ]; do
-      _pp_pat_body=$(printf '%s' "$rows_json" | jq -r --argjson i "$_pp_pat_idx" '.[$i].body // ""')
-      _pp_pat_redacted=$(pp_memory_redact_body "$_pp_pat_body")
-      _pp_pat_redacted_rows=$(printf '%s' "$rows_json" | jq -c \
-        --argjson acc "$_pp_pat_redacted_rows" \
-        --argjson i "$_pp_pat_idx" \
-        --arg b "$_pp_pat_redacted" \
-        '$acc + [(.[$i] + {body:$b})]')
-      _pp_pat_idx=$((_pp_pat_idx + 1))
+    local _pp_bodies_b64 _pp_new_b64
+    _pp_bodies_b64=$(printf '%s' "$rows_json" \
+      | jq -r '.[].body // "" | @base64' 2>/dev/null)
+    _pp_new_b64=""
+    local _pp_enc _pp_body _pp_red _pp_red_enc _pp_count=0
+    while IFS= read -r _pp_enc; do
+      if [ -z "$_pp_enc" ]; then
+        # Empty body row — preserve as empty so the index alignment in the
+        # zip step still matches.
+        _pp_new_b64="${_pp_new_b64}"$'\n'
+        _pp_count=$((_pp_count + 1))
+        continue
+      fi
+      _pp_body=$(printf '%s' "$_pp_enc" | base64 -d 2>/dev/null)
+      _pp_red=$(pp_memory_redact_body "$_pp_body")
+      _pp_red_enc=$(printf '%s' "$_pp_red" | base64 | LC_ALL=C tr -d '\n')
+      _pp_new_b64="${_pp_new_b64}${_pp_red_enc}"$'\n'
+      _pp_count=$((_pp_count + 1))
+    done <<EOF
+$_pp_bodies_b64
+EOF
+    # R3.17 alignment guard (code-reviewer Important): command substitution
+    # strips trailing newlines from $(jq -r '.[].body // "" | @base64'), so
+    # an input array ending in N empty-body rows yields fewer heredoc lines
+    # than $arr_len. Without padding, the zip step `// ""` silently fills
+    # trailing positions — which is fine TODAY because redact("") == "",
+    # but would break invisibly if redaction ever transformed empty input.
+    # Pad to $arr_len with empty entries so the splice is invariant under
+    # any future redaction change.
+    while [ "$_pp_count" -lt "$arr_len" ]; do
+      _pp_new_b64="${_pp_new_b64}"$'\n'
+      _pp_count=$((_pp_count + 1))
     done
-    rows_json="$_pp_pat_redacted_rows"
+    # Splice redacted bodies back into rows via a single jq call. We DROP
+    # only the trailing empty element from split (which comes from the
+    # final newline we always append in the loop). Empty-string entries
+    # mid-array represent legitimately empty bodies and MUST be preserved
+    # to keep the index alignment with $orig.
+    rows_json=$(printf '%s' "$_pp_new_b64" \
+      | jq -Rsc --argjson orig "$rows_json" '
+          (split("\n") | if (length > 0 and .[-1] == "") then .[:-1] else . end) as $b64s
+          | $orig
+          | [range(length) as $i | .[$i] + {body: ($b64s[$i] // "" | @base64d)}]
+        ' 2>/dev/null)
   fi
 
   # Load extraction prompt. Absence is non-fatal — without a prompt we can't

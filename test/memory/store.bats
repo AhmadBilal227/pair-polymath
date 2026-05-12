@@ -258,3 +258,87 @@ teardown() { rm -rf "$SANDBOX"; }
     "SELECT cited_paths FROM observations WHERE obs_id='o-r39d';")
   [[ "$paths" == *"never-existed.ts"* ]]
 }
+
+# R3.15 — FTS5 dash-fix: hyphenated identifier search.
+@test "store: R3.15 — query with dash matches doc with same dash-token" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-r315a" "ENG" "T" \
+    "refactor analyst-primary template" "body of analyst-primary observation" \
+    '[]' '[]' "s"
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-r315b" "ENG" "T" \
+    "unrelated thing" "no kebab-case here" '[]' '[]' "s"
+  out=$(pp_memory_top_k "$SANDBOX/repo" 5 "analyst-primary")
+  # Must include the dash-token obs and rank it first.
+  [[ "$out" == *"o-r315a"* ]]
+  # ID-first ranking via FTS5 + activation hybrid.
+  first_id=$(printf '%s' "$out" | jq -r '.[0].obs_id')
+  [ "$first_id" = "o-r315a" ]
+}
+
+@test "store: R3.15 — dotted filename query matches dotted hook" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-r315c" "ENG" "T" \
+    "review analyst-primary.md template" "body content" '[]' '[]' "s"
+  out=$(pp_memory_top_k "$SANDBOX/repo" 5 "analyst-primary.md")
+  [[ "$out" == *"o-r315c"* ]]
+}
+
+@test "store: R3.15 — bare-dash query does not crash FTS5" {
+  PP_MEMORY_REDACT=0 pp_memory_insert "$SANDBOX/repo" "o-r315d" "ENG" "T" \
+    "regular hook" "body" '[]' '[]' "s"
+  # Should not crash — empty/punctuation-only query falls through to pure activation.
+  run pp_memory_top_k "$SANDBOX/repo" 5 "-"
+  [ "$status" -eq 0 ]
+}
+
+# R3.16 — UTF-8-safe truncate.
+@test "store: R3.16 — ASCII body truncates to exactly N bytes" {
+  out=$(_pp_memory_truncate_utf8 "abcdefghij" 5)
+  [ "$out" = "abcde" ]
+  [ "${#out}" -eq 5 ]
+}
+
+@test "store: R3.16 — multi-byte UTF-8 never truncates mid-codepoint" {
+  # 🙂 = U+1F642 = 4 bytes (F0 9F 99 82). Body = 'hi' + 🙂 + ' rest'.
+  # Truncating to 4 bytes would chop the emoji in half → invalid UTF-8.
+  body="hi$(printf '\xf0\x9f\x99\x82') rest"
+  out=$(_pp_memory_truncate_utf8 "$body" 4)
+  # Output must be either 'hi' (partial emoji stripped) or 'hi🙂' if we
+  # rounded up, but NEVER 'hi' + 2 of the 4 emoji bytes.
+  # Verify by round-tripping through iconv strict — invalid bytes would fail.
+  printf '%s' "$out" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+}
+
+@test "store: R3.16 — truncate to >= input length returns input unchanged" {
+  out=$(_pp_memory_truncate_utf8 "hello" 100)
+  [ "$out" = "hello" ]
+}
+
+@test "store: R3.16 — empty input returns empty" {
+  out=$(_pp_memory_truncate_utf8 "" 100)
+  [ -z "$out" ]
+}
+
+@test "store: R3.16 — non-numeric N returns input unchanged (defensive)" {
+  out=$(_pp_memory_truncate_utf8 "hello" "not-a-number")
+  [ "$out" = "hello" ]
+}
+
+@test "store: R3.16 — N=0 returns empty" {
+  out=$(_pp_memory_truncate_utf8 "hello world" 0)
+  [ -z "$out" ]
+}
+
+@test "store: R3.16 — 2-byte UTF-8 (é) at boundary stripped cleanly" {
+  # é = U+00E9 = C3 A9 (2 bytes). Body = 'ab' + é + 'cd'.
+  body="ab$(printf '\xc3\xa9')cd"
+  # Truncate to 3 bytes (after 'ab' = 2 bytes, the next is é's C3 byte alone)
+  out=$(_pp_memory_truncate_utf8 "$body" 3)
+  [ "$out" = "ab" ]
+}
+
+@test "store: R3.16 — 3-byte UTF-8 (€) at boundary stripped cleanly" {
+  # € = U+20AC = E2 82 AC (3 bytes). Body = 'X' + € + 'Y'.
+  body="X$(printf '\xe2\x82\xac')Y"
+  # Truncate to 2 bytes ('X' + first byte of €).
+  out=$(_pp_memory_truncate_utf8 "$body" 2)
+  [ "$out" = "X" ]
+}

@@ -82,6 +82,30 @@ Update these if you've measured your actual usage and want sharper estimates.
 | `PP_CACHE_DIR` | `~/.claude/cache` | Where per-cycle observations, budget tracker, and metrics.jsonl live. |
 | `PP_STATE_DIR` | `~/.claude/pair-polymath` | Where user-supplied lenses, prompts, and `user.env` are read from. |
 
+## Memory subsystem (v0.3 Phase 2.3 — off-by-default)
+
+`PP_MEMORY_ENABLE=0` (default) keeps the cycle path byte-identical to `v0.2`. Set to `1` to capture observations to local SQLite, tag them with windowed signals, and inject relevant past observations into future analyst prompts. Full reference: [`docs/memory-architecture.md`](memory-architecture.md).
+
+| Var | Default | Controls |
+|---|---|---|
+| `PP_MEMORY_ENABLE` | `0` | Master toggle. `1` enables observation capture + injection. |
+| `PP_MEMORY_DIR` | `~/.claude/pair-polymath/memory` | Where per-project memory DBs live. |
+| `PP_MEMORY_REDACT` | `1` | Apply `pp_memory_redact_body` at store time + inject time. |
+| `PP_MEMORY_DECAY_PER_DAY` | `0.5` | Activation decay rate per day since last_seen. |
+| `PP_MEMORY_RETRIEVAL_ALPHA` | `0.3` | BM25 weight in hybrid `activation + α × bm25` scoring. |
+| `PP_MEMORY_ACTIVATION_K` | `15` | Top-K observations injected per cycle. |
+| `PP_MEMORY_INJECT_BODY_CHARS` | `240` | Per-observation body truncation at inject. |
+| `PP_MEMORY_PATTERN_INJECT_K` | `5` | Top-N patterns injected per cycle. |
+| `PP_MEMORY_MAINTENANCE_EVERY_N` | `12` | Run activation-recompute + eviction + pattern-extraction every Nth cycle. |
+| `PP_MEMORY_MAX_BYTES` | `52428800` (50 MB) | DB size budget before eviction fires. |
+| `PP_MEMORY_EVICT_BATCH_SIZE` | `100` | Rows evicted per maintenance pass. |
+| `PP_MEMORY_PATTERN_BATCH_SIZE` | `200` | Observations sampled per pattern-extraction LLM call. |
+| `PP_MEMORY_PATTERNS_MAX` | `1000` | Patterns.jsonl FIFO cap. |
+| `PP_MEMORY_LOCK_STALE_S` | `300` | Maintenance-lock stale-takeover threshold (5 min). |
+| `PP_MEMORY_LOCK_TIMEOUT_S` | `30` | Max wait for maintenance-lock acquisition. |
+
+Memory observations are local-only. The salted project hash means identical projects on different machines produce different DB paths; the salt does not portably identify a project across machines. See `docs/memory-architecture.md` for the full privacy / threat model.
+
 ---
 
 To add a custom lens: drop `~/.claude/pair-polymath/lenses/08-mylens.json` matching the [Lens schema](../README.md#lens-schema). To override the analyst prompt: drop `~/.claude/pair-polymath/prompts/analyst-primary.md` with your text — the loader does `${var}` substitution against the calling scope.

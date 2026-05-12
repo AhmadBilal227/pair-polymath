@@ -84,12 +84,13 @@ _ins() {
       "obs-$i" ENG TOPIC "h-$i" "$big" "[]" "[]" "sess"
     sqlite3 "$DB" "UPDATE observations SET activation_score=$i WHERE obs_id='obs-$i';"
   done
-  before=$(stat -f %z "$DB" 2>/dev/null || stat -c %s "$DB")
+  # R3.8 — GNU first; BSD stat -f leaks fs-info to stdout on Linux.
+  before=$(stat -c %s "$DB" 2>/dev/null || stat -f %z "$DB" 2>/dev/null)
   _fixture_emit '{"title":"Bulk eviction summary across 20 rows","evidence_obs_ids":["obs-1"],"lens_ids":["ENG"],"confidence":0.5,"type":"eviction_summary","evicted_count":20}'
   PP_MEMORY_MAX_BYTES=1 PP_MEMORY_EVICT_BATCH_SIZE=20 pp_memory_evict "$SANDBOX/repo"
   # File must still exist + size must be less than before (WAL truncated).
   [ -f "$DB" ]
-  after=$(stat -f %z "$DB" 2>/dev/null || stat -c %s "$DB")
+  after=$(stat -c %s "$DB" 2>/dev/null || stat -f %z "$DB" 2>/dev/null)
   # Allow equality in pathological cases (very small files); just require
   # that nothing grew unexpectedly.
   [ "$after" -le "$before" ]

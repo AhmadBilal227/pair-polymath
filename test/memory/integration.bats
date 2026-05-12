@@ -206,14 +206,24 @@ teardown() { rm -rf "$SANDBOX"; }
   pp_memory_sqlite "$DB" \
     "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');"
   # Run 12 concurrent invocations with threshold high enough to not trigger.
+  # R3.10 — capture stderr per-job so we can diagnose lock-acquisition
+  # timeouts on slow CI runners. The test must fail loudly with the actual
+  # outputs if anything regresses.
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     pp_memory_with_lock "$PROJ" _pp_memory_increment_maint_counter_locked "$PROJ" 100 \
-      > "$SANDBOX/out-$i.txt" 2>/dev/null &
+      > "$SANDBOX/out-$i.txt" 2> "$SANDBOX/err-$i.txt" &
   done
   wait
   # Final counter value must equal exactly 12.
   final=$(pp_memory_sqlite "$DB" \
     "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  if [ "$final" != "12" ]; then
+    echo "F6 FAIL — final=$final (expected 12)" >&3
+    echo "out files:" >&3
+    cat "$SANDBOX"/out-*.txt >&3
+    echo "err files:" >&3
+    cat "$SANDBOX"/err-*.txt >&3
+  fi
   [ "$final" = "12" ]
 }
 

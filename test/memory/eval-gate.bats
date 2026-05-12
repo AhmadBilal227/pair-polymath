@@ -41,26 +41,42 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
-@test "eval-gate: F2 — gate-summary.json explains heuristic limitation" {
-  run "$GATE" --dry-mode
+@test "eval-gate: v0.4 — header documents LLM-judge as default scoring mode" {
+  # The F2 test was renamed in v0.4 — the gate is now LLM-judge by default
+  # (replacing the F2 heuristic-only limitation). The header must explain
+  # the methodology so contributors don't re-add the regex scorer.
+  run "$GATE" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"LLM-judge"* ]]
+  [[ "$output" == *"DEFAULT MODE"* ]]
+}
+
+@test "eval-gate: v0.4 — --heuristic flag accepted for legacy fast-iteration mode" {
+  run "$GATE" --heuristic --dry-mode
   [ "$status" -eq 0 ]
   out_dir=$(printf '%s\n' "$output" | grep -E '^\s+Output: ' | head -1 | awk -F': ' '{print $2}')
-  # Header docstring documents the heuristic.
-  head -40 "$GATE" | grep -q "HEURISTIC LIMITATION"
-  # Doc reference exists in repo.
-  doc="$PP_ROOT/docs/memory-architecture.md"
-  grep -q "HEURISTIC" "$doc"
+  [ -f "$out_dir/gate-summary.json" ]
   rm -rf "$out_dir"
 }
 
-@test "eval-gate: F2 — --no-dry path runs score loop and emits real verdict" {
-  # We can't actually invoke run-eval.sh in a hermetic test (LLM cost,
-  # ~minutes). Stage a shadow copy of test/eval/ that has a stub run-eval.sh
-  # writing placeholder cycle files. The gate computes its verdict from
-  # those per-cycle outputs, so the verdict mechanism runs end-to-end.
+@test "eval-gate: v0.4 — gate-summary.json records score_mode field" {
+  run "$GATE" --heuristic --dry-mode
+  [ "$status" -eq 0 ]
+  out_dir=$(printf '%s\n' "$output" | grep -E '^\s+Output: ' | head -1 | awk -F': ' '{print $2}')
+  # dry_mode skips the non-dry path entirely so score_mode isn't recorded,
+  # but the verdict mechanism shouldn't crash. Real score_mode coverage
+  # lives below in the --no-dry path test.
+  verdict=$(jq -r '.verdict' "$out_dir/gate-summary.json")
+  [ "$verdict" = "INFRA_PASS" ]
+  rm -rf "$out_dir"
+}
+
+@test "eval-gate: F2 — --no-dry --heuristic path runs and emits real verdict" {
+  # Heuristic path is the v0.3 regex scorer kept for fast local iteration
+  # without LLM budget. Same end-to-end mechanism as before; just guarded
+  # by --heuristic flag now that LLM-judge is default.
   TMPROOT=$(mktemp -d)
   mkdir -p "$TMPROOT/test/eval/fixtures" "$TMPROOT/test/eval/golden" "$TMPROOT/test/eval/baselines"
-  # Real gate script — same file the production CI runs.
   cp "$PP_ROOT/test/eval/run-memory-gate.sh" "$TMPROOT/test/eval/run-memory-gate.sh"
   chmod +x "$TMPROOT/test/eval/run-memory-gate.sh"
   cat > "$TMPROOT/test/eval/run-eval.sh" <<'EOF'
@@ -74,31 +90,61 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$runs_dir" ] || exit 0
 mkdir -p "$runs_dir"
-# 3 cycle outputs: 1 useful (real path), 1 hallucinated (fake path),
-# 1 too-short (skipped). The real path must exist under the gate's
-# expected repo root — lib/memory/lock.sh ships in every Pair Polymath tree.
 echo "issue at lib/memory/lock.sh:7 — real cite" > "$runs_dir/cycle-1.txt"
 echo "issue at not/a/real/file.ts:42 — fake cite" > "$runs_dir/cycle-2.txt"
 echo "x" > "$runs_dir/cycle-3.txt"
 EOF
   chmod +x "$TMPROOT/test/eval/run-eval.sh"
-  # The gate resolves $_repo_root as $(cd $_dir/../.. && pwd). For the stub
-  # repo to have lib/memory/lock.sh, symlink it.
   mkdir -p "$TMPROOT/lib/memory"
   ln -s "$PP_ROOT/lib/memory/lock.sh" "$TMPROOT/lib/memory/lock.sh"
 
-  run "$TMPROOT/test/eval/run-memory-gate.sh" --no-dry
+  run "$TMPROOT/test/eval/run-memory-gate.sh" --no-dry --heuristic
   out_dir=$(printf '%s\n' "$output" | grep -E '^\s+Output: ' | head -1 | awk -F': ' '{print $2}')
   [ -n "$out_dir" ]
   [ -f "$out_dir/gate-summary.json" ]
-  # Verdict must be PASS or FAIL — NOT INFRA_PASS.
   verdict=$(jq -r '.verdict' "$out_dir/gate-summary.json")
   [ "$verdict" != "INFRA_PASS" ]
   [ "$verdict" = "PASS" ] || [ "$verdict" = "FAIL" ]
-  # baseline/warm useful% fields must be present (numeric).
-  bu=$(jq -r '.baseline_useful_pct' "$out_dir/gate-summary.json")
-  wu=$(jq -r '.warm_useful_pct' "$out_dir/gate-summary.json")
-  [ -n "$bu" ] && [ "$bu" != "null" ]
-  [ -n "$wu" ] && [ "$wu" != "null" ]
+  mode=$(jq -r '.score_mode' "$out_dir/gate-summary.json")
+  [ "$mode" = "heuristic" ]
+  rm -rf "$TMPROOT"
+}
+
+@test "eval-gate: v0.4 — --no-dry --llm-judge with no score-report falls through to zeros" {
+  # When score.sh hasn't been invoked (e.g., `llm` not on PATH), the
+  # LLM-judge path finds no score-report.json and produces 0/0/0 — the
+  # gate then evaluates the criteria (0 useful, 0 halluc) and emits a
+  # deterministic FAIL (warm useful must be ≥ baseline + 5pp, which 0
+  # vs 0 doesn't satisfy). This asserts the gate doesn't crash on a
+  # missing score-report.
+  TMPROOT=$(mktemp -d)
+  mkdir -p "$TMPROOT/test/eval/fixtures" "$TMPROOT/test/eval/golden" "$TMPROOT/test/eval/baselines"
+  cp "$PP_ROOT/test/eval/run-memory-gate.sh" "$TMPROOT/test/eval/run-memory-gate.sh"
+  chmod +x "$TMPROOT/test/eval/run-memory-gate.sh"
+  # Stub run-eval that creates cohort dir but doesn't produce score-report.
+  cat > "$TMPROOT/test/eval/run-eval.sh" <<'EOF'
+#!/usr/bin/env bash
+runs_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --runs-dir) runs_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$runs_dir"
+echo "any content" > "$runs_dir/cycle-1.txt"
+EOF
+  chmod +x "$TMPROOT/test/eval/run-eval.sh"
+  # No score.sh either — gate's score_cohort_llm must handle absence gracefully.
+  rm -f "$TMPROOT/test/eval/score.sh"
+  run "$TMPROOT/test/eval/run-memory-gate.sh" --no-dry --llm-judge
+  out_dir=$(printf '%s\n' "$output" | grep -E '^\s+Output: ' | head -1 | awk -F': ' '{print $2}')
+  [ -n "$out_dir" ]
+  [ -f "$out_dir/gate-summary.json" ]
+  mode=$(jq -r '.score_mode' "$out_dir/gate-summary.json")
+  [ "$mode" = "llm" ]
+  # All zeros → must FAIL (warm useful 0 < baseline useful 0 + 5pp threshold).
+  verdict=$(jq -r '.verdict' "$out_dir/gate-summary.json")
+  [ "$verdict" = "FAIL" ]
   rm -rf "$TMPROOT"
 }

@@ -50,9 +50,8 @@ teardown() { rm -rf "$SANDBOX"; }
 }
 
 @test "lock: F6 — _pp_memory_increment_maint_counter_locked increments + reports" {
+  # R3.11: counter is now a plain file under the proj dir (no sqlite).
   mkdir -p "$SANDBOX/proj"
-  # Seed a DB with the cycle_state schema (mirrors what pp_memory_db_init creates).
-  sqlite3 "$SANDBOX/proj/observations.sqlite" "CREATE TABLE cycle_state(key TEXT PRIMARY KEY, value TEXT);"
   out1=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 100)
   [ "$out1" = "1" ]
   out2=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 100)
@@ -61,27 +60,26 @@ teardown() { rm -rf "$SANDBOX"; }
 
 @test "lock: F6 — counter resets and emits TRIGGER at threshold" {
   mkdir -p "$SANDBOX/proj"
-  sqlite3 "$SANDBOX/proj/observations.sqlite" "CREATE TABLE cycle_state(key TEXT PRIMARY KEY, value TEXT); INSERT INTO cycle_state VALUES('maintenance_cycle_counter','11');"
+  # Seed counter to 11 via file (R3.11).
+  printf '11' > "$SANDBOX/proj/maintenance-counter"
   out=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 12)
   [ "$out" = "TRIGGER" ]
-  cur=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  cur=$(cat "$SANDBOX/proj/maintenance-counter")
   [ "$cur" = "0" ]
 }
 
-@test "lock: F6 — non-existent DB returns NOOP without crashing" {
-  mkdir -p "$SANDBOX/proj"
-  out=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 12)
+@test "lock: F6 — non-existent project dir returns NOOP without crashing" {
+  out=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/does-not-exist" 12)
   [ "$out" = "NOOP" ]
 }
 
 @test "lock: F6 — non-numeric threshold falls back to default" {
   mkdir -p "$SANDBOX/proj"
-  sqlite3 "$SANDBOX/proj/observations.sqlite" "CREATE TABLE cycle_state(key TEXT PRIMARY KEY, value TEXT); INSERT INTO cycle_state VALUES('maintenance_cycle_counter','11');"
+  printf '11' > "$SANDBOX/proj/maintenance-counter"
   out=$(_pp_memory_increment_maint_counter_locked "$SANDBOX/proj" 'evil; DROP TABLE cycle_state')
   # Default threshold is 12, current value 11 → +1 = 12 → TRIGGER.
   [ "$out" = "TRIGGER" ]
-  # Table must still exist.
-  cur=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  cur=$(cat "$SANDBOX/proj/maintenance-counter")
   [ "$cur" = "0" ]
 }
 

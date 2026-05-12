@@ -97,40 +97,52 @@ pp_memory_with_lock() {
 }
 
 # _pp_memory_increment_maint_counter_locked PROJ_DIR THRESHOLD
-# Run under pp_memory_with_lock. Reads cycle_state.maintenance_cycle_counter,
-# increments by 1, and writes it back. If the new value >= THRESHOLD, ALSO
-# resets the counter to 0 atomically (inside the same lock + same SQL run)
-# and emits "TRIGGER" on stdout. Otherwise emits the new value.
+# Run under pp_memory_with_lock. Reads the maintenance cycle counter from a
+# plain file, increments by 1, writes it back. If the new value >= THRESHOLD,
+# resets the counter to 0 and emits "TRIGGER" on stdout. Otherwise emits the
+# new value.
 #
 # F6: was previously a read-modify-write OUTSIDE any lock in bin/statusline.sh,
 # so two concurrent statuslines could both observe N-1, both write N, both
-# trigger maintenance. The maintenance functions themselves take the lock,
-# but the cycle counter decision happened before that. Pulling it inside
-# pp_memory_with_lock serializes the decision atomically.
+# trigger maintenance.
+#
+# R3.11 — STORAGE MOVED FROM SQLITE TO PLAIN FILE. The previous SQLite-backed
+# version failed on CI (24-job concurrency test on Linux/Docker overlayfs):
+# SQLite WAL mode relies on shared-memory (-shm) mmap, which has reliability
+# issues on overlayfs and some network filesystems. Concurrent readers saw
+# STALE counter values across separate sqlite3 process invocations even
+# under the mkdir-lock (the mkdir-lock serialized our shell code, but WAL
+# visibility between separate sqlite3 invocations was not guaranteed).
+# Diagnostic on CI run 25755301220 showed 10 duplicate counter reads out of
+# 24 increments — the lock was holding, but the data layer was lying.
+#
+# Plain file under the mkdir-lock has no such failure mode: single-writer,
+# single-reader, all under the same lock, no FS caching games.
 _pp_memory_increment_maint_counter_locked() {
   local proj_dir="$1" threshold="$2"
-  local db="$proj_dir/observations.sqlite"
-  [ -f "$db" ] || { printf 'NOOP'; return 0; }
-  # Validate threshold so we don't interpolate hostile values into SQL.
+  [ -d "$proj_dir" ] || { printf 'NOOP'; return 0; }
+  # Validate threshold (was already SQL-quoted in v1; preserved for safety).
   case "$threshold" in
     ''|*[!0-9]*) threshold=12 ;;
   esac
+  local counter_file="$proj_dir/maintenance-counter"
   local cur
-  cur=$(sqlite3 -cmd "PRAGMA trusted_schema = 1;" "$db" \
-    "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';" 2>/dev/null)
+  if [ -f "$counter_file" ]; then
+    cur=$(cat "$counter_file" 2>/dev/null || printf '')
+  else
+    cur=''
+  fi
   case "$cur" in
     ''|*[!0-9]*) cur=0 ;;
   esac
   local nxt=$((cur + 1))
   if [ "$nxt" -ge "$threshold" ]; then
-    sqlite3 -cmd "PRAGMA trusted_schema = 1;" "$db" \
-      "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');" \
-      2>/dev/null || return 1
+    printf '0' > "$counter_file" || return 1
+    chmod 600 "$counter_file" 2>/dev/null || true
     printf 'TRIGGER'
   else
-    sqlite3 -cmd "PRAGMA trusted_schema = 1;" "$db" \
-      "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','$nxt');" \
-      2>/dev/null || return 1
+    printf '%s' "$nxt" > "$counter_file" || return 1
+    chmod 600 "$counter_file" 2>/dev/null || true
     printf '%s' "$nxt"
   fi
   return 0

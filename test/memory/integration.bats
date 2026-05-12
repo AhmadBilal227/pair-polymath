@@ -201,22 +201,17 @@ teardown() { rm -rf "$SANDBOX"; }
 }
 
 @test "integration: F6 — concurrent maint-counter increments are atomic under lock" {
-  # Reset and verify the counter increments by exactly N for N concurrent
-  # invocations of the locked helper (no double-counting, no lost updates).
-  pp_memory_sqlite "$DB" \
-    "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');"
-  # Run 12 concurrent invocations with threshold high enough to not trigger.
-  # R3.10 — capture stderr per-job so we can diagnose lock-acquisition
-  # timeouts on slow CI runners. The test must fail loudly with the actual
-  # outputs if anything regresses.
+  # R3.11: counter is now a plain file under the project dir (no sqlite).
+  # The previous SQLite-backed counter was unreliable on Docker overlayfs
+  # (WAL+SHM doesn't sync between separate sqlite3 invocations).
+  rm -f "$PROJ/maintenance-counter"
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     pp_memory_with_lock "$PROJ" _pp_memory_increment_maint_counter_locked "$PROJ" 100 \
       > "$SANDBOX/out-$i.txt" 2> "$SANDBOX/err-$i.txt" &
   done
   wait
   # Final counter value must equal exactly 12.
-  final=$(pp_memory_sqlite "$DB" \
-    "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  final=$(cat "$PROJ/maintenance-counter" 2>/dev/null)
   if [ "$final" != "12" ]; then
     echo "F6 FAIL — final=$final (expected 12)" >&3
     echo "out files:" >&3
@@ -228,8 +223,7 @@ teardown() { rm -rf "$SANDBOX"; }
 }
 
 @test "integration: F6 — atomic counter triggers maintenance exactly once at threshold" {
-  pp_memory_sqlite "$DB" \
-    "INSERT OR REPLACE INTO cycle_state(key,value) VALUES('maintenance_cycle_counter','0');"
+  rm -f "$PROJ/maintenance-counter"
   trigger_count=0
   # 24 concurrent invocations against threshold 12: counter should hit
   # threshold exactly twice → 2 TRIGGER results.
@@ -238,13 +232,8 @@ teardown() { rm -rf "$SANDBOX"; }
       > "$SANDBOX/trig-$i.txt" 2>/dev/null &
   done
   wait
-  # R3.10 — `_pp_memory_increment_maint_counter_locked` emits printf 'TRIGGER'
-  # with NO trailing newline. GNU grep on Linux does NOT match `^TRIGGER$`
-  # against a file whose last/only "line" lacks a newline terminator (BSD
-  # grep on macOS is more permissive). Use -Fx for whole-line literal match
-  # against a fixed string, which works on both. Belt + suspenders: also
-  # try a direct content check via the loop below so the diagnostic on
-  # failure shows exactly which files contained TRIGGER.
+  # Per-file content equality (R3.10): printf 'TRIGGER' has no trailing
+  # newline, so `grep '^TRIGGER$'` doesn't match on GNU grep.
   trigger_count=0
   for f in "$SANDBOX"/trig-*.txt; do
     [ -f "$f" ] && [ "$(cat "$f")" = "TRIGGER" ] && \
@@ -258,8 +247,7 @@ teardown() { rm -rf "$SANDBOX"; }
   fi
   [ "$trigger_count" = "2" ]
   # Counter should land back at 0 (last trigger reset it).
-  final=$(pp_memory_sqlite "$DB" \
-    "SELECT value FROM cycle_state WHERE key='maintenance_cycle_counter';")
+  final=$(cat "$PROJ/maintenance-counter" 2>/dev/null)
   [ "$final" = "0" ]
 }
 

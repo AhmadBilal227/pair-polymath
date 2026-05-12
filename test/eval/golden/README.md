@@ -55,3 +55,21 @@ Goldens are intentionally hand-curated. Do NOT script-generate them from LLM
 output (that would defeat the purpose of measuring against a held-out
 reference). If a fixture's scenario changes, update both the fixture AND
 the golden in the same commit.
+
+## Lens personality vocabulary (Phase 2.1+)
+
+Each lens now ships with a persona + worked examples in
+`lenses/NN-<id>.json` (`extras.system_prompt_addition`, `extras.examples`).
+When writing a golden for a lens, mirror its vocabulary:
+
+- `UX_DESIGN` — affordance, Jakob's law, tap target, loading state, focus order, microcopy.
+- `ENGINEERING` — invariant, happy path, branch coverage, side effect, contract, dead code.
+- `SECURITY` — TOCTOU, trust boundary, attacker-controlled, scope creep, supply chain, authz bypass.
+- `PERF_FINOPS` — p99, tail latency, cache stampede, hot path, $/req, token budget (include numbers when grounded).
+- `PRODUCT_BIZ` — WTP, activation, JTBD, feature creep, distribution, retention signal, pricing power.
+- `STRATEGIC_FOUNDER` — Hofstadter's Law, one-way door, leverage point, opportunity cost, kill criteria, shipping over polishing.
+- `COGNITIVE_FLOW` — load on working memory, deliberate practice, rest debt, context-switch cost, decision fatigue.
+
+A golden that uses generic vocabulary across lenses will look the same
+regardless of which lens fired and will undermine the eval signal. Read the
+lens's `extras.examples` for tone and shape before writing the golden.

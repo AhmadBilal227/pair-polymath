@@ -67,6 +67,18 @@ Free-form. Describe:
 - What the ideal observation looks like (English summary)
 - Any gotchas about replay (timing, ordering)
 
+### Lens personality vocabulary (Phase 2.1+)
+
+As of Phase 2.1 each lens has its own persona + worked examples baked into
+`lenses/NN-<id>.json` under `extras.system_prompt_addition` and
+`extras.examples`. When you author a fixture's `notes.md` ideal observation,
+mirror the lens's vocabulary — e.g. a `SECURITY` fixture's ideal obs should
+sound like the SECURITY persona ("TOCTOU", "trust boundary", "scope creep
+on permissions") and a `PERF_FINOPS` one should mention numbers
+("p99", "$/req", "cache stampede"). The eval scorer compares against the
+hand-curated golden files, so this is just a consistency hint — but it
+keeps fixtures and goldens in the same dialect.
+
 ## Adding a new fixture
 
 1. `mkdir test/eval/fixtures/session-NN`

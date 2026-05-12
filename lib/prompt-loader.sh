@@ -19,7 +19,7 @@
 # directly naming a secret. (Ralph core round 1 — ai-engineer M8.)
 # Default allowlist — overrideable via env (e.g. by tests). End-users with a
 # customized template can extend this from config/default.env or user.env.
-PP_PROMPT_VAR_ALLOWLIST="${PP_PROMPT_VAR_ALLOWLIST:-lens_group lens_focus lens_hats relevance_directive grounded prev_observations recent_user_messages activity_tail file_contents git_status git_log git_diff_stat git_recent_files gh_prs gh_ci candidate_file inv_grep drop_reason rlens_group rlens_hats rlens_focus project_ctx recent_commits stories arxiv_titles cwd cwd_ls test_state recent_tools PP_LENS_COUNT}"
+PP_PROMPT_VAR_ALLOWLIST="${PP_PROMPT_VAR_ALLOWLIST:-lens_group lens_focus lens_hats lens_system_prompt_addition lens_examples relevance_directive grounded prev_observations recent_user_messages activity_tail file_contents git_status git_log git_diff_stat git_recent_files gh_prs gh_ci candidate_file inv_grep drop_reason rlens_group rlens_hats rlens_focus project_ctx recent_commits stories arxiv_titles cwd cwd_ls test_state recent_tools PP_LENS_COUNT}"
 #
 # SECURITY (review fix H1): substitution is SINGLE-PASS over the set of
 # placeholders found in the ORIGINAL template. Replacement values that

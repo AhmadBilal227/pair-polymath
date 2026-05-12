@@ -823,6 +823,13 @@ $inv_hits"
 $lens_evidence"
             fi
 
+            # Phase 2.1: pull this lens's persona + worked examples (from
+            # lenses/*.json extras.system_prompt_addition + extras.examples).
+            # The analyst-primary.md template now uses these as the dominant
+            # content; the generic scaffold is the smaller share.
+            lens_system_prompt_addition="${PP_LENS_SYSTEM_PROMPT_ADDITION[$lens_idx]}"
+            lens_examples="${PP_LENS_EXAMPLES[$lens_idx]}"
+
             analyst_prompt=$(pp_render_prompt analyst-primary)
             lens_suggestion=""
             if [ -n "$analyst_prompt" ]; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pair Polymath — memory subsystem eval gate (Task D.4 + R2 F2).
+# Pair Polymath — memory subsystem eval gate (Task D.4 + v0.4 LLM-judge).
 #
 # Runs the existing eval suite (test/eval/run-eval.sh) three times and
 # compares cycle latency + useful% + hallucinated% across the three runs:
@@ -16,19 +16,21 @@
 # FAIL on any violation (script exits non-zero).
 #
 # Flags:
-#   --dry-mode   Skip LLM calls. Validates the harness without spending API
-#                budget. Emits INFRA_PASS, exits 0.
-#   --help       This message.
+#   --dry-mode    Skip LLM calls. Validates the harness without spending
+#                 API budget. Emits INFRA_PASS, exits 0.
+#   --heuristic   Use the old regex-based scoring (citation-resolves =
+#                 useful, citation-doesn't-resolve = hallucinated). Kept
+#                 for fast local iteration; cheap but biased (see header).
+#   --help        This message.
 #
-# HEURISTIC LIMITATION (R2 F2):
-#   `useful%` and `hallucinated%` here are computed from per-cohort cycle
-#   output files using a regex heuristic, NOT an LLM-as-judge. A cycle's
-#   output is "useful" iff it is non-trivial (>100 chars) AND contains at
-#   least one citation that resolves to a real path. It is "hallucinated"
-#   iff it contains a citation that does NOT resolve to a real path. This
-#   catches obvious wins/losses but cannot distinguish a useful-but-vague
-#   observation from a useless-but-precise one. The LLM-judge replacement
-#   is v0.4 — see docs/memory-architecture.md §8.
+# DEFAULT MODE: LLM-judge (v0.4).
+#   score.sh is invoked per cohort to call gpt-5 (or --cheap → gpt-5-mini)
+#   on each observation+golden pair. Verdicts are aggregated to cohort-
+#   level useful% / hallucinated% via per_lens counters in score-report.json.
+#   Defenses against fixture-controlled prompt injection live in score.sh
+#   (R1 code-reviewer H1). Budget: ~$0.50-$5 per gate run depending on
+#   fixture count and scorer model. See docs/memory-architecture.md §8
+#   for the heuristic-vs-LLM-judge tradeoff writeup.
 
 set -e -u
 
@@ -38,11 +40,14 @@ _run_eval="$_dir/run-eval.sh"
 _score="$_dir/score.sh"
 
 dry_mode=0
+score_mode="llm"   # "llm" (default, v0.4) | "heuristic" (legacy, fast)
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-mode) dry_mode=1; shift ;;
     --no-dry|--no-dry-mode) dry_mode=0; shift ;;
-    --help|-h) sed -n '2,33p' "$0"; exit 0 ;;
+    --heuristic) score_mode="heuristic"; shift ;;
+    --llm-judge) score_mode="llm"; shift ;;
+    --help|-h) sed -n '2,38p' "$0"; exit 0 ;;
     *) printf 'run-memory-gate.sh: unknown flag: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -135,6 +140,62 @@ fi
 # behavior via grep -E.
 _citation_re='[A-Za-z0-9_./-]+\.(ts|js|tsx|jsx|py|go|rs|java|sh|md):[0-9]+'
 
+# score_cohort_llm COHORT_DIR
+# Stdout: "useful_pct\thallucinated_pct\tscored_count" (tab-separated).
+#
+# v0.4 LLM-judge path. score.sh already wrote score-report.json under the
+# cohort's runs/<ts>/ when run_cohort() invoked it. Parse per_lens.useful
+# and per_lens.hallucinated, aggregate to cohort-level percentages.
+#
+# `obvious` verdicts are excluded from BOTH numerator (useful) and the
+# denominator's "harmful" side (hallucinated) — they're low-signal but
+# not wrong. `missed_better` counts as not-useful (memory didn't help).
+# `missing` (no observation emitted) doesn't count toward either bucket;
+# it inflates the denominator only.
+score_cohort_llm() {
+  local cohort_dir="$1"
+  # score.sh writes score-report.json next to the latest run-summary.json.
+  # Find it: the cohort's runs-dir is cohort_dir itself, so the report is
+  # under cohort_dir/<ts>/score-report.json. There's at most one ts per
+  # cohort here.
+  local report
+  report=$(find "$cohort_dir" -name 'score-report.json' -type f 2>/dev/null | head -1)
+  if [ -z "$report" ] || [ ! -f "$report" ]; then
+    # No report (score.sh didn't run or no llm available) → caller decides.
+    printf '0.00\t0.00\t0\n'
+    return 0
+  fi
+  # Aggregate per_lens counters with jq. Sum useful across all lenses for
+  # numerator. Denominator = useful + obvious + hallucinated + missed_better
+  # + missing (exclude unscored — those are infra failures we don't penalize).
+  local agg
+  agg=$(jq -r '
+    .per_lens
+    | to_entries
+    | map(.value) as $lenses
+    | [($lenses | map(.useful // 0)         | add // 0),
+       ($lenses | map(.obvious // 0)        | add // 0),
+       ($lenses | map(.hallucinated // 0)   | add // 0),
+       ($lenses | map(."missed-better" // 0)| add // 0),
+       ($lenses | map(.missing // 0)        | add // 0)]
+    | @tsv
+  ' "$report" 2>/dev/null)
+  if [ -z "$agg" ]; then
+    printf '0.00\t0.00\t0\n'
+    return 0
+  fi
+  local useful obvious halluc missed missing total upct hpct
+  IFS=$'\t' read -r useful obvious halluc missed missing <<< "$agg"
+  total=$(( useful + obvious + halluc + missed + missing ))
+  if [ "$total" -le 0 ]; then
+    printf '0.00\t0.00\t0\n'
+    return 0
+  fi
+  upct=$(LC_ALL=C awk -v u="$useful" -v t="$total" 'BEGIN { printf "%.2f", (u/t)*100 }')
+  hpct=$(LC_ALL=C awk -v h="$halluc" -v t="$total" 'BEGIN { printf "%.2f", (h/t)*100 }')
+  printf '%s\t%s\t%s\n' "$upct" "$hpct" "$total"
+}
+
 # score_cohort COHORT_DIR
 # Stdout: "useful_pct\thallucinated_pct\tcycle_count" (tab-separated).
 score_cohort() {
@@ -185,9 +246,15 @@ cohort_p50() {
   LC_ALL=C awk -v lbl="$label" '$1 == lbl { print $2; exit }' "$out_dir/timings.tsv"
 }
 
-base_score=$(score_cohort "$out_dir/baseline")
-cold_score=$(score_cohort "$out_dir/cold")
-warm_score=$(score_cohort "$out_dir/warm")
+if [ "$score_mode" = "llm" ]; then
+  base_score=$(score_cohort_llm "$out_dir/baseline")
+  cold_score=$(score_cohort_llm "$out_dir/cold")
+  warm_score=$(score_cohort_llm "$out_dir/warm")
+else
+  base_score=$(score_cohort "$out_dir/baseline")
+  cold_score=$(score_cohort "$out_dir/cold")
+  warm_score=$(score_cohort "$out_dir/warm")
+fi
 base_useful=${base_score%%$'\t'*}
 warm_useful=${warm_score%%$'\t'*}
 base_halluc=$(printf '%s' "$base_score" | LC_ALL=C cut -f2)
@@ -210,10 +277,17 @@ if [ "$base_p50" != "0" ]; then
     || { verdict="FAIL"; failures="${failures}p50_regressed(warm=${warm_p50},base=${base_p50}); "; }
 fi
 
+_note=""
+if [ "$score_mode" = "llm" ]; then
+  _note="useful% / hallucinated% scored by gpt-5 LLM-judge via test/eval/score.sh against per-fixture goldens (test/eval/golden/). See docs/memory-architecture.md §8 for the methodology."
+else
+  _note="useful% / hallucinated% are HEURISTIC (non-empty + citation resolves) — kept available via --heuristic for fast local iteration. Default is --llm-judge (v0.4)."
+fi
 cat > "$out_dir/gate-summary.json" <<EOF
 {
   "ts": "$ts",
   "dry_mode": 0,
+  "score_mode": "$score_mode",
   "cohorts": ["baseline", "cold", "warm"],
   "verdict": "$verdict",
   "baseline_useful_pct": $base_useful,
@@ -223,7 +297,7 @@ cat > "$out_dir/gate-summary.json" <<EOF
   "baseline_p50_s": $base_p50,
   "warm_p50_s": $warm_p50,
   "failures": "$failures",
-  "note": "useful% / hallucinated% are HEURISTIC (non-empty + citation resolves). LLM-judge replacement is v0.4 — see docs/memory-architecture.md §8."
+  "note": "$_note"
 }
 EOF
 

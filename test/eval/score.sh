@@ -254,7 +254,12 @@ for lens_path in "$_lens_seen_dir"/*; do
   useful=$(_read_counter "$lens" useful)
   obvious=$(_read_counter "$lens" obvious)
   hall=$(_read_counter "$lens" hallucinated)
-  missed=$(_read_counter "$lens" missed-better)
+  # v0.4 fix: bump_counter writes the verdict under "missed_better"
+  # (underscore — see normalize at score_obs line 119), but historically
+  # this reader used the hyphen form, so every missed_better verdict was
+  # silently dropped from per_lens counts. Read with underscore (the
+  # actual on-disk key); emit with hyphen for JSON-schema back-compat.
+  missed=$(_read_counter "$lens" missed_better)
   missing=$(_read_counter "$lens" missing)
   unscored=$(_read_counter "$lens" unscored)
 

@@ -40,6 +40,28 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/citations.sh"
 
+# Pair Polymath memory subsystem (Phase 2.3). Only sourced when enabled; the
+# default PP_MEMORY_ENABLE=0 keeps the cycle path byte-identical to pre-2.3
+# behavior so the eval gate's off-mode baseline holds.
+if [ "${PP_MEMORY_ENABLE:-0}" = "1" ]; then
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/schema.sh"
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/redact.sh"
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/store.sh"
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/activation.sh"
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/lock.sh"
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/signals.sh"
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/patterns.sh"
+  # shellcheck disable=SC1091
+  . "$_pp_bin_dir/../lib/memory/evict.sh"
+fi
+
 # Load lens registry from lenses/*.json (built-in + user overrides).
 # Populates PP_LENS_{COUNT,IDS,HATS,FOCUS,COLOR,ENABLED}.
 pp_load_lenses
@@ -739,6 +761,87 @@ GROUND
         "${PP_MODEL_CRITIQUE:-}" \
         2>/dev/null || true
 
+      # === Memory injection (Phase 2.3) ===
+      # When PP_MEMORY_ENABLE=1, retrieve top-K observations relevant to this
+      # cycle's grounded context and format them into MEMORY_BLOCK for the
+      # analyst prompt. Off-mode keeps MEMORY_BLOCK empty → the prompt
+      # template degenerates to its pre-2.3 shape (the `${MEMORY_BLOCK}`
+      # placeholder renders to empty).
+      MEMORY_BLOCK=""
+      if [ "${PP_MEMORY_ENABLE:-0}" = "1" ] && [ -n "$cwd" ] && [ "$cwd" != "-" ]; then
+        # F7: lazy DB init — idempotent CREATE TABLE IF NOT EXISTS. This
+        # guarantees the FIRST cycle on a fresh project has a DB before
+        # any retrieval/insert, so reads don't silently no-op and the
+        # maintenance counter has a cycle_state row to read from.
+        _pp_mem_init_proj=$(pp_memory_project_dir "$cwd" 2>/dev/null)
+        if [ -n "$_pp_mem_init_proj" ]; then
+          pp_memory_db_init "$_pp_mem_init_proj" 2>/dev/null || true
+        fi
+        # Query: synthesize from cwd basename + recent file paths + recent
+        # commits — same grounding signals the analysts see. Truncated so
+        # we don't blow out the FTS5 query parser.
+        _pp_mem_query=$(printf '%s %s %s' \
+          "$(basename "$cwd" 2>/dev/null)" \
+          "$candidate_file" \
+          "$git_recent_files" | head -c 500)
+        _pp_mem_k="${PP_MEMORY_ACTIVATION_K:-15}"
+        _pp_mem_body_max="${PP_MEMORY_INJECT_BODY_CHARS:-240}"
+
+        # Top patterns (extracted themes) — small N to leave token budget for obs.
+        # Patterns are recency-weighted-confidence-ranked (see pp_memory_top_patterns).
+        _pp_mem_pat_n="${PP_MEMORY_PATTERN_INJECT_K:-5}"
+        _pp_mem_patterns_json=$(pp_memory_top_patterns "$cwd" "$_pp_mem_pat_n" 2>/dev/null || printf '[]')
+        # Format each pattern as: "[conf=0.XX] TITLE (lens_ids)". Empty if no patterns.
+        _pp_mem_pat_block=$(printf '%s' "$_pp_mem_patterns_json" | jq -r '
+          if length == 0 then ""
+          else map("[conf=\(.confidence)] \(.title) (\(.lens_ids | join(",")))") | join("\n")
+          end' 2>/dev/null || printf '')
+
+        _pp_mem_json=$(pp_memory_top_k "$cwd" "$_pp_mem_k" "$_pp_mem_query" 2>/dev/null)
+        _pp_mem_formatted=""
+        if [ -n "$_pp_mem_json" ] && [ "$_pp_mem_json" != "[]" ]; then
+          # Format as "[LENS] HOOK — body (truncated)" lines, one per obs.
+          # Defense-in-depth: redact each body at INJECT time (per the
+          # ai-engineer R1 §5 recommendation — catches obs stored before
+          # an upgrade introduced a new redaction pattern).
+          # Iterate by index via jq so we don't have to invent a separator
+          # that's guaranteed-absent from hook/body strings.
+          _pp_mem_count=$(printf '%s' "$_pp_mem_json" | jq 'length' 2>/dev/null || echo 0)
+          _pp_mem_i=0
+          while [ "$_pp_mem_i" -lt "$_pp_mem_count" ]; do
+            _pp_mem_lens=$(printf '%s' "$_pp_mem_json" | jq -r --argjson i "$_pp_mem_i" '.[$i].lens_id // "?"' 2>/dev/null)
+            _pp_mem_hook=$(printf '%s' "$_pp_mem_json" | jq -r --argjson i "$_pp_mem_i" '.[$i].hook // ""' 2>/dev/null)
+            _pp_mem_body=$(printf '%s' "$_pp_mem_json" | jq -r --argjson i "$_pp_mem_i" '.[$i].body // ""' 2>/dev/null)
+            _pp_mem_body=$(pp_memory_redact_body "$_pp_mem_body")
+            _pp_mem_body=$(printf '%s' "$_pp_mem_body" | head -c "$_pp_mem_body_max")
+            _pp_mem_formatted="${_pp_mem_formatted}[${_pp_mem_lens}] ${_pp_mem_hook} — ${_pp_mem_body}"$'\n'
+            _pp_mem_i=$((_pp_mem_i + 1))
+          done
+        fi
+
+        # Assemble: patterns section (if any) + obs section (if any). Both
+        # optional; if neither, MEMORY_BLOCK stays empty.
+        # R3.2: build the inner content first, then wrap in the
+        # [BACKGROUND MEMORY — UNTRUSTED] fence via _pp_memory_wrap_inject_block.
+        # The wrapper returns empty on empty input, so the F3 sentinel strip
+        # in lib/prompt-loader.sh still elides the block byte-identically in
+        # off-mode.
+        _pp_mem_inner=""
+        if [ -n "$_pp_mem_pat_block" ] && [ -n "$_pp_mem_formatted" ]; then
+          _pp_mem_inner=$(printf '\n## RECURRING PATTERNS\n%s\n\n## RECENT OBSERVATIONS (top-%s)\n%s' \
+            "$_pp_mem_pat_block" "$_pp_mem_k" "$_pp_mem_formatted")
+        elif [ -n "$_pp_mem_pat_block" ]; then
+          _pp_mem_inner=$(printf '\n## RECURRING PATTERNS\n%s\n' "$_pp_mem_pat_block")
+        elif [ -n "$_pp_mem_formatted" ]; then
+          _pp_mem_inner=$(printf '\n## RECENT OBSERVATIONS (top-%s)\n%s' \
+            "$_pp_mem_k" "$_pp_mem_formatted")
+        fi
+        if [ -n "$_pp_mem_inner" ]; then
+          MEMORY_BLOCK=$(_pp_memory_wrap_inject_block "$_pp_mem_inner")
+        fi
+      fi
+      export MEMORY_BLOCK
+
       if [ -n "$grounded" ] && command -v llm >/dev/null 2>&1; then
         # === PARALLEL N-AGENT FAN-OUT ===
         # Run all loaded lenses in parallel subshells. Each writes to its own cache.
@@ -1003,6 +1106,82 @@ $critique_input"
         # Bound history sizes after all writes finish
         tail -50 "$HIST_FILE_SESSION" > "${HIST_FILE_SESSION}.tmp" 2>/dev/null && mv "${HIST_FILE_SESSION}.tmp" "$HIST_FILE_SESSION"
         tail -100 "$HIST_FILE_PROJECT" > "${HIST_FILE_PROJECT}.tmp" 2>/dev/null && mv "${HIST_FILE_PROJECT}.tmp" "$HIST_FILE_PROJECT"
+
+        # === Memory subsystem post-cycle ===
+        # When enabled, persist this cycle's accepted observations to the
+        # per-project store, then run windowed reinforcement signals.
+        # Periodically run maintenance (activation recompute + eviction +
+        # pattern extraction) under the maintenance lock.
+        if [ "${PP_MEMORY_ENABLE:-0}" = "1" ]; then
+          # F7: lazy init — defensive even if memory-injection branch was
+          # skipped (e.g. cwd was empty there). Idempotent.
+          _pp_mem_post_proj=$(pp_memory_project_dir "$cwd" 2>/dev/null)
+          if [ -n "$_pp_mem_post_proj" ]; then
+            pp_memory_db_init "$_pp_mem_post_proj" 2>/dev/null || true
+          fi
+          # Build current cycle's obs JSON from the per-lens cache files.
+          # Each cache line is "HAT: hook|||body" — we parse the SAME way
+          # PP_EVAL_MODE does. obs_id is derived from session + lens + ts so
+          # the same cycle's writes can be retrieved later.
+          _pp_mem_cur_json='[]'
+          _pp_mem_cycle_ts=$(date -u +%Y%m%dT%H%M%SZ)
+          for _pp_mem_lidx in $(seq 0 $((PP_LENS_COUNT - 1))); do
+            _pp_mem_lens_id="${PP_LENS_IDS[$_pp_mem_lidx]}"
+            _pp_mem_cache="${PP_CACHE_DIR}/cc-monitor-${session_id}-${_pp_mem_lens_id}.txt"
+            [ -f "$_pp_mem_cache" ] && [ -s "$_pp_mem_cache" ] || continue
+            _pp_mem_line=$(head -1 "$_pp_mem_cache" 2>/dev/null)
+            printf '%s' "$_pp_mem_line" | LC_ALL=C grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$' || continue
+            _pp_mem_topic="${_pp_mem_line%%:*}"
+            _pp_mem_rest="${_pp_mem_line#*: }"
+            _pp_mem_obs_hook="${_pp_mem_rest%%|||*}"
+            _pp_mem_obs_body="${_pp_mem_rest#*|||}"
+            _pp_mem_obs_id="o-${session_id}-${_pp_mem_cycle_ts}-${_pp_mem_lens_id}"
+            # Cited paths: include candidate_file when not NONE (gives the
+            # file_edit signal something to match against).
+            _pp_mem_paths='[]'
+            if [ -n "$candidate_file" ] && [ "$candidate_file" != "NONE" ]; then
+              _pp_mem_paths=$(jq -nc --arg p "$candidate_file" '[$p]')
+            fi
+            pp_memory_insert "$cwd" \
+              "$_pp_mem_obs_id" "$_pp_mem_lens_id" "$_pp_mem_topic" \
+              "$_pp_mem_obs_hook" "$_pp_mem_obs_body" \
+              "$_pp_mem_paths" '[]' "$session_id" 2>/dev/null || true
+            _pp_mem_cur_json=$(jq -nc \
+              --argjson arr "$_pp_mem_cur_json" \
+              --arg obs_id "$_pp_mem_obs_id" \
+              --arg lens "$_pp_mem_lens_id" \
+              --arg hook "$_pp_mem_obs_hook" \
+              '$arr + [{obs_id:$obs_id, lens_id:$lens, hook:$hook}]')
+          done
+
+          # Windowed reinforcement signals — always best-effort.
+          pp_memory_run_signals_post_cycle "$cwd" "$_pp_mem_cur_json" 2>/dev/null || true
+
+          # Periodic maintenance: every Nth cycle, recompute activation +
+          # evict + extract patterns under the maintenance lock. Counter
+          # lives in cycle_state (DB-resident, survives statusline restarts).
+          # F6: the increment + threshold check + reset is now an atomic
+          # operation under pp_memory_with_lock so two concurrent statuslines
+          # cannot both trigger maintenance on the same cycle.
+          # F10: validate the every-N knob — non-numeric, zero, or negative
+          # values default to 12 instead of triggering on every cycle (or
+          # never, depending on shell coercion).
+          _pp_mem_maint_every="${PP_MEMORY_MAINTENANCE_EVERY_N:-12}"
+          if ! [[ "$_pp_mem_maint_every" =~ ^[1-9][0-9]*$ ]]; then
+            _pp_mem_maint_every=12
+          fi
+          _pp_mem_proj=$(pp_memory_project_dir "$cwd" 2>/dev/null)
+          if [ -n "$_pp_mem_proj" ] && [ -f "$_pp_mem_proj/observations.sqlite" ]; then
+            _pp_mem_maint_result=$(pp_memory_with_lock "$_pp_mem_proj" \
+              _pp_memory_increment_maint_counter_locked "$_pp_mem_proj" "$_pp_mem_maint_every" \
+              2>/dev/null || printf '')
+            if [ "$_pp_mem_maint_result" = "TRIGGER" ]; then
+              pp_memory_with_lock "$_pp_mem_proj" pp_memory_recompute_scores "$cwd" 2>/dev/null || true
+              pp_memory_evict "$cwd" 2>/dev/null || true
+              pp_memory_extract_patterns "$cwd" 2>/dev/null || true
+            fi
+          fi
+        fi
       fi  # grounded && llm available
       fi  # can_run — gates BOTH planner and analyst fan-out
 

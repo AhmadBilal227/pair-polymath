@@ -118,3 +118,47 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$output" = "value: Hello" ]
 }
+
+@test "loader: F3 — empty MEMORY_BLOCK sentinel block strips entirely" {
+  # Template uses the same sentinel pattern as analyst-primary.md.
+  mkdir -p "$HOME/.claude/pair-polymath/prompts"
+  cat > "$HOME/.claude/pair-polymath/prompts/sentinel-probe.md" <<'EOF'
+HEAD
+
+<!-- MEMORY_BLOCK_START -->
+${MEMORY_BLOCK}
+<!-- MEMORY_BLOCK_END -->
+TAIL
+EOF
+  PP_PROMPT_VAR_ALLOWLIST="MEMORY_BLOCK" MEMORY_BLOCK="" run pp_render_prompt sentinel-probe
+  [ "$status" -eq 0 ]
+  # Expect: "HEAD\n\nTAIL" — the empty block, both sentinels, and the
+  # newline after the END sentinel are all stripped.
+  expected=$'HEAD\n\nTAIL'
+  [ "$output" = "$expected" ]
+}
+
+@test "loader: F3 — non-empty MEMORY_BLOCK strips only the sentinels" {
+  mkdir -p "$HOME/.claude/pair-polymath/prompts"
+  cat > "$HOME/.claude/pair-polymath/prompts/sentinel-probe2.md" <<'EOF'
+HEAD
+
+<!-- MEMORY_BLOCK_START -->
+${MEMORY_BLOCK}
+<!-- MEMORY_BLOCK_END -->
+TAIL
+EOF
+  PP_PROMPT_VAR_ALLOWLIST="MEMORY_BLOCK" MEMORY_BLOCK="MEMORY CONTENT" run pp_render_prompt sentinel-probe2
+  [ "$status" -eq 0 ]
+  expected=$'HEAD\n\nMEMORY CONTENT\nTAIL'
+  [ "$output" = "$expected" ]
+}
+
+@test "loader: F3 — analyst-primary off-mode is byte-identical to pre-2.3 fixture" {
+  baseline="$PP_ROOT/test/fixtures/prompts/pre-2.3-analyst-baseline.txt"
+  [ -f "$baseline" ]
+  PP_PROMPT_VAR_ALLOWLIST="MEMORY_BLOCK lens_system_prompt_addition lens_examples lens_silent_example relevance_directive"
+  MEMORY_BLOCK="" lens_system_prompt_addition="" lens_examples="" lens_silent_example="" relevance_directive=""
+  out=$(pp_render_prompt analyst-primary)
+  diff <(printf '%s' "$out") "$baseline"
+}

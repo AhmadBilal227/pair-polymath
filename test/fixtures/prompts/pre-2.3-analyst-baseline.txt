@@ -1,8 +1,5 @@
-${lens_system_prompt_addition}
 
-<!-- MEMORY_BLOCK_START -->
-${MEMORY_BLOCK}
-<!-- MEMORY_BLOCK_END -->
+
 OUTPUT FORMAT (strict — your response MUST match this exact shape):
 
   HAT: hook|||body
@@ -22,11 +19,11 @@ INVALID (rejected — do not emit any of these):
   HAT: hook | body                 ← wrong separator
   HAT:hook|||body                  ← missing space after colon
 
-${lens_examples}
 
-${lens_silent_example}
 
-RELEVANCE MODE: ${relevance_directive}
+
+
+RELEVANCE MODE: 
 
 CRITICAL RULES (apply to ALL lenses):
 - Only cite paths/symbols that appear in the grounded facts. NEVER invent — if inferring without ground truth, tag [inferred] in the body.

@@ -913,6 +913,133 @@ HELP
     printf '\n\033[32mAll self-test checks passed.\033[0m\n'
     ;;
 
+  memory)
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/memory/schema.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/memory/redact.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/memory/store.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/memory/activation.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/memory/lock.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/memory/patterns.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/memory/evict.sh"
+    _pp_mem_cwd="${PP_MEMORY_CLI_CWD:-$PWD}"
+    _pp_mem_sub="${1:-status}"
+    case "$_pp_mem_sub" in
+      status)
+        _pp_mem_proj=$(pp_memory_project_dir "$_pp_mem_cwd")
+        _pp_mem_db="$_pp_mem_proj/observations.sqlite"
+        printf '\n\033[1mPair Polymath memory\033[0m\n'
+        printf '  Enabled:          %s\n' "${PP_MEMORY_ENABLE:-0}"
+        printf '  Memory dir:       %s\n' "$PP_MEMORY_DIR"
+        printf '  Project dir:      %s\n' "$_pp_mem_proj"
+        if [ -f "$_pp_mem_db" ]; then
+          _pp_mem_size=$(stat -f %z "$_pp_mem_db" 2>/dev/null || stat -c %s "$_pp_mem_db" 2>/dev/null || echo 0)
+          printf '  DB path:          %s\n' "$_pp_mem_db"
+          printf '  Size (bytes):     %s\n' "$_pp_mem_size"
+          # F13: detect schema before querying. A DB file that exists but
+          # has no observations table (corrupt, half-initialized, or from a
+          # future schema version) used to crash with "no such table" once
+          # the SELECT ran. PRAGMA table_info returns nothing for a missing
+          # table and is a free read — no schema mutation.
+          _pp_mem_has_obs=$(pp_memory_sqlite "$_pp_mem_db" "PRAGMA table_info(observations);" 2>/dev/null | head -1)
+          if [ -z "$_pp_mem_has_obs" ]; then
+            printf '  Schema:           DB uninitialized (no observations table)\n'
+          else
+            _pp_mem_rows=$(pp_memory_sqlite "$_pp_mem_db" "SELECT COUNT(*) FROM observations;" 2>/dev/null)
+            printf '  Observations:     %s\n' "$_pp_mem_rows"
+            if [ "${_pp_mem_rows:-0}" -gt 0 ]; then
+              printf '  Top-5 by activation:\n'
+              pp_memory_sqlite -separator ' | ' "$_pp_mem_db" "
+                SELECT printf('    [%s] %s (act=%.3f)', lens_id, hook, activation_score)
+                  FROM observations
+                 ORDER BY (activation_score IS NULL), activation_score DESC, obs_id ASC
+                 LIMIT 5;" 2>/dev/null
+            fi
+          fi
+        else
+          printf '  DB:               (not yet initialized)\n'
+        fi
+        if [ -f "$_pp_mem_proj/patterns.jsonl" ]; then
+          _pp_mem_plines=$(wc -l < "$_pp_mem_proj/patterns.jsonl" 2>/dev/null | tr -d ' ')
+          printf '  Patterns:         %s\n' "$_pp_mem_plines"
+        fi
+        printf '\n'
+        ;;
+      recompute)
+        _pp_mem_pd=$(pp_memory_project_dir "$_pp_mem_cwd")
+        pp_memory_db_init "$_pp_mem_pd"
+        if pp_memory_with_lock "$_pp_mem_pd" pp_memory_recompute_scores "$_pp_mem_cwd"; then
+          printf 'memory: activation_score recomputed.\n'
+        else
+          printf 'memory: recompute failed (see stderr).\n' >&2
+          exit 1
+        fi
+        ;;
+      evict)
+        if pp_memory_evict "$_pp_mem_cwd"; then
+          printf 'memory: eviction sweep complete.\n'
+        else
+          printf 'memory: eviction did NOT complete (LLM summary required); see stderr.\n' >&2
+          exit 1
+        fi
+        ;;
+      patterns)
+        out=$(pp_memory_top_patterns "$_pp_mem_cwd" 10)
+        if [ -z "$out" ] || [ "$out" = "[]" ]; then
+          printf '(no patterns extracted yet)\n'
+        else
+          printf '%s\n' "$out" | jq -r '.[] | "  • [" + (.confidence|tostring) + "] " + .title'
+        fi
+        ;;
+      clear)
+        _pp_mem_yes=0
+        [ "${2:-}" = "--yes" ] && _pp_mem_yes=1
+        if [ "$_pp_mem_yes" != "1" ]; then
+          printf 'memory clear: refusing without --yes (this deletes ALL memory for the current project)\n' >&2
+          exit 2
+        fi
+        _pp_mem_proj=$(pp_memory_project_dir "$_pp_mem_cwd")
+        rm -rf "$_pp_mem_proj"
+        printf 'memory: cleared %s\n' "$_pp_mem_proj"
+        ;;
+      enable)
+        _pp_set_user_env_var PP_MEMORY_ENABLE 1 || exit 1
+        printf 'memory: enabled (takes effect next cycle within 5min)\n'
+        ;;
+      disable)
+        _pp_set_user_env_var PP_MEMORY_ENABLE 0 || exit 1
+        printf 'memory: disabled (takes effect next cycle within 5min)\n'
+        ;;
+      help|-h|--help|"")
+        cat <<HELP
+polymath memory — Pair Polymath memory subsystem
+
+Usage:
+  polymath memory status          Show DB path, row count, size, top-5 by activation
+  polymath memory recompute       Trigger activation_score recompute (under lock)
+  polymath memory evict           Trigger eviction sweep (LLM summary required)
+  polymath memory patterns        Show last 10 extracted patterns
+  polymath memory clear --yes     Wipe all memory for the current project
+  polymath memory enable          Set PP_MEMORY_ENABLE=1 in user.env
+  polymath memory disable         Set PP_MEMORY_ENABLE=0 in user.env
+
+Override the active project by exporting PP_MEMORY_CLI_CWD before the call.
+HELP
+        ;;
+      *)
+        printf 'polymath memory: unknown subcommand "%s". Try: polymath memory help\n' "$_pp_mem_sub" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
@@ -924,6 +1051,7 @@ Usage:
   polymath disable     Disable the LLM cycle / status-only mode (PP_EXTERNAL_LLM=0)
   polymath logs        Tail recent lens observations (-n, --lens, --follow)
   polymath cost        Show estimated USD spend (--since, --by-lens, --json)
+  polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)
   polymath self-test   End-to-end LLM probe (~\$0.0001 per run)
   polymath version     Print version

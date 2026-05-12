@@ -19,7 +19,7 @@
 # directly naming a secret. (Ralph core round 1 — ai-engineer M8.)
 # Default allowlist — overrideable via env (e.g. by tests). End-users with a
 # customized template can extend this from config/default.env or user.env.
-PP_PROMPT_VAR_ALLOWLIST="${PP_PROMPT_VAR_ALLOWLIST:-lens_group lens_focus lens_hats lens_system_prompt_addition lens_examples lens_silent_example relevance_directive grounded prev_observations recent_user_messages activity_tail file_contents git_status git_log git_diff_stat git_recent_files gh_prs gh_ci candidate_file inv_grep drop_reason rlens_group rlens_hats rlens_focus project_ctx recent_commits stories arxiv_titles cwd cwd_ls test_state recent_tools PP_LENS_COUNT}"
+PP_PROMPT_VAR_ALLOWLIST="${PP_PROMPT_VAR_ALLOWLIST:-lens_group lens_focus lens_hats lens_system_prompt_addition lens_examples lens_silent_example relevance_directive grounded prev_observations recent_user_messages activity_tail file_contents git_status git_log git_diff_stat git_recent_files gh_prs gh_ci candidate_file inv_grep drop_reason rlens_group rlens_hats rlens_focus project_ctx recent_commits stories arxiv_titles cwd cwd_ls test_state recent_tools PP_LENS_COUNT MEMORY_BLOCK}"
 #
 # SECURITY (review fix H1): substitution is SINGLE-PASS over the set of
 # placeholders found in the ORIGINAL template. Replacement values that
@@ -90,6 +90,46 @@ pp_render_prompt() {
     esac
     _pp_template="${_pp_template//\$\{$_pp_key\}/$_pp_value}"
   done
+
+  # Sentinel-block stripping (F3): templates wrap optional content in
+  # <!-- MEMORY_BLOCK_START --> ... <!-- MEMORY_BLOCK_END -->. After
+  # substitution:
+  #   - If the content between sentinels is empty/whitespace-only, delete
+  #     the ENTIRE block including the sentinel lines AND the trailing
+  #     newline after the END sentinel. This makes off-mode (empty
+  #     MEMORY_BLOCK) render byte-identical to pre-2.3 templates that
+  #     never had the placeholder.
+  #   - If non-empty, strip ONLY the two sentinel comment lines (and their
+  #     own terminating newlines), leaving content in place.
+  # awk state machine on lines so we don't depend on GNU sed -z.
+  _pp_template=$(printf '%s' "$_pp_template" | LC_ALL=C awk '
+    BEGIN { in_block = 0; buf = ""; nonblank = 0 }
+    /^[[:space:]]*<!--[[:space:]]*MEMORY_BLOCK_START[[:space:]]*-->[[:space:]]*$/ {
+      in_block = 1; buf = ""; nonblank = 0; next
+    }
+    /^[[:space:]]*<!--[[:space:]]*MEMORY_BLOCK_END[[:space:]]*-->[[:space:]]*$/ {
+      if (in_block) {
+        if (nonblank) {
+          # Emit body (sentinels themselves are skipped — body keeps its own
+          # newlines, so output is "${lens_…}\n<body>\nOUTPUT FORMAT…").
+          printf "%s", buf
+        }
+        # Empty body: emit nothing — the block + sentinels + their newlines
+        # all disappear. Off-mode then matches pre-2.3 byte-for-byte.
+        in_block = 0; buf = ""; nonblank = 0
+        next
+      }
+      print; next
+    }
+    {
+      if (in_block) {
+        buf = buf $0 "\n"
+        if ($0 ~ /[^[:space:]]/) nonblank = 1
+      } else {
+        print
+      }
+    }
+  ')
 
   printf '%s' "$_pp_template"
 }

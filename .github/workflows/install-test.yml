@@ -113,8 +113,8 @@ jobs:
 
       - name: Run bats suite on Ubuntu
         # The macOS dev loop runs bash 3.2; CI runs bash 5.x. Catches features
-        # that work on one and not the other.
-        run: bats test/
+        # that work on one and not the other. -r recurses into test/eval/.
+        run: bats -r test/
 
       - name: Smoke statusline against fixture
         run: |

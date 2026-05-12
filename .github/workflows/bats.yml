@@ -17,5 +17,5 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install bats-core
         run: sudo apt-get update && sudo apt-get install -y bats jq
-      - name: Run bats
-        run: bats test/
+      - name: Run bats (recursive — includes test/eval/ and any future subdirs)
+        run: bats -r test/

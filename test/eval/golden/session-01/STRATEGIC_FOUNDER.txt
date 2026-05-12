@@ -1,0 +1,1 @@
+STRAT|||One n+1 here suggests no perf-regression CI gate on the API layer|||This bug shipped because there's no per-endpoint p95 budget tracked in CI. After the fix, add a regression guard (load test on PR, or APM alert on 500ms+ endpoints) so the next n+1 fails the build. Add.

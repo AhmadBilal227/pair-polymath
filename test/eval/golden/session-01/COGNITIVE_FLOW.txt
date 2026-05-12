@@ -1,0 +1,1 @@
+META|||Patch claimed Done before typecheck was run — user just flagged it|||The assistant marked the EXPLAIN ANALYZE patch as Done without compiling. User explicitly asked for verification. Run tsc or pnpm typecheck before re-claiming done. Verify.

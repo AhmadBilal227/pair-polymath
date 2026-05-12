@@ -4,6 +4,11 @@ cache/
 *.bak
 *.bak.*
 
+# Eval-harness generated artifacts. test/eval/baseline.json (when added in a
+# follow-up PR) is the only file in this tree that's tracked — every other
+# artifact under runs/ is per-invocation output.
+test/eval/runs/
+
 # Local config overrides
 .env.local
 .env

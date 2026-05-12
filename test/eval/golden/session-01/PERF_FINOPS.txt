@@ -1,0 +1,1 @@
+OPS|||Per-request DB cost is 1+N queries — scales linearly with user count|||At 50 users that's 51 roundtrips per /api/users hit; at 500 users you breach connection-pool ceilings. Refactor to single join before the next traffic spike. Cap.

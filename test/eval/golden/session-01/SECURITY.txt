@@ -1,0 +1,1 @@
+SEC|||getUser exposes raw req.params.id to DB without input validation|||No type/format check on req.params.id before prisma.user.findUnique. If userId column is INT, a malformed string throws a runtime error rather than 400. Add zod schema. Verify.

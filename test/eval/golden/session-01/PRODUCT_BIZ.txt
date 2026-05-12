@@ -1,0 +1,1 @@
+PROD|||Endpoint timeout at >50 users is a user-visible regression risk|||Whichever surface calls /api/users will 5xx for accounts above the threshold. Decide: fix-forward this cycle, or feature-flag the offending screen and ship the join next deploy. Schedule.

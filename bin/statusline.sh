@@ -829,6 +829,7 @@ $lens_evidence"
             # content; the generic scaffold is the smaller share.
             lens_system_prompt_addition="${PP_LENS_SYSTEM_PROMPT_ADDITION[$lens_idx]}"
             lens_examples="${PP_LENS_EXAMPLES[$lens_idx]}"
+            lens_silent_example="${PP_LENS_SILENT_EXAMPLE[$lens_idx]}"
 
             analyst_prompt=$(pp_render_prompt analyst-primary)
             lens_suggestion=""

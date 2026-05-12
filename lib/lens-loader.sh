@@ -55,6 +55,7 @@ pp_load_lenses() {
         (.enabled // true | tostring),
         ((.extras.system_prompt_addition // "") | b64),
         ((.extras.examples // []) | join("\n") | b64),
+        ((.extras.silent_example // "") | b64),
         $src
       ]
       | @tsv
@@ -68,6 +69,7 @@ pp_load_lenses() {
   PP_LENS_ENABLED=()
   PP_LENS_SYSTEM_PROMPT_ADDITION=()
   PP_LENS_EXAMPLES=()
+  PP_LENS_SILENT_EXAMPLE=()
 
   # Dedupe by id (last entry wins → user overrides built-in), then sort by
   # display_order with id as stable tiebreak. Re-emit with \x1f between
@@ -86,7 +88,7 @@ pp_load_lenses() {
   ' "$tmp" | sort -t $'\x1f' -k1,1n -k2,2 | cut -d $'\x1f' -f3-)
 
   local loaded=0
-  while IFS=$'\x1f' read -r order id hats focus color enabled sys_b64 ex_b64 src; do
+  while IFS=$'\x1f' read -r order id hats focus color enabled sys_b64 ex_b64 silent_b64 src; do
     [ -z "$id" ] && continue
     [ "$enabled" = "false" ] && continue
     if [ "$loaded" -ge "$max" ]; then
@@ -102,13 +104,19 @@ pp_load_lenses() {
     fi
     if [ -n "$ex_b64" ]; then
       examples=$(printf '%s' "$ex_b64" | base64 -d 2>/dev/null)
-      # R2 fix (code-reviewer M2): bake the section header into the value so
-      # the prompt template's "Worked examples" header is only rendered when
-      # examples actually exist. Empty examples → empty rendering, no dangling
-      # header for back-compat lens files.
+      # Bake header into value so back-compat lenses without examples don't
+      # render a dangling 'EXAMPLES OF VALID OUTPUT FORMAT:' header.
       if [ -n "$examples" ]; then
-        examples="Worked examples for THIS lens:
+        examples="EXAMPLES OF VALID OUTPUT FORMAT (HAT: hook|||body — exact shape):
 $examples"
+      fi
+    fi
+    local silent_example=""
+    if [ -n "$silent_b64" ]; then
+      silent_example=$(printf '%s' "$silent_b64" | base64 -d 2>/dev/null)
+      if [ -n "$silent_example" ]; then
+        silent_example="WHEN TO OUTPUT 'SILENT' instead (example pattern for this lens):
+$silent_example"
       fi
     fi
     PP_LENS_IDS+=("$id")
@@ -118,6 +126,7 @@ $examples"
     PP_LENS_ENABLED+=("$enabled")
     PP_LENS_SYSTEM_PROMPT_ADDITION+=("$sys_prompt")
     PP_LENS_EXAMPLES+=("$examples")
+    PP_LENS_SILENT_EXAMPLE+=("$silent_example")
     loaded=$((loaded + 1))
   done <<< "$awk_out"
 

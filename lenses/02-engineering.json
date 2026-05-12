@@ -17,8 +17,8 @@
     "examples": [
       "ARCH: handleSubmit catches Error but rethrows nothing|||checkout/route.ts:42 wraps the Stripe call in try/catch then returns 200 on failure \u2014 silent payment loss. Add error boundary that surfaces the failure to the caller.",
       "BACKEND: Invariant 'order has at least one line item' not enforced|||OrderRepo.create accepts an empty items array; downstream invoice job panics on items[0]. Add a guard at construction.",
-      "DEVOPS: CI publishes from any branch, not just main|||release.yml:on.push.branches is '*'. Tag pushes from a feature branch ship to prod. Restrict to main + verify with a dry-run job.",
-      "(grounded facts show only marketing-copy edits with no code paths \u2192 SILENT)"
-    ]
+      "DEVOPS: CI publishes from any branch, not just main|||release.yml:on.push.branches is '*'. Tag pushes from a feature branch ship to prod. Restrict to main + verify with a dry-run job."
+    ],
+    "silent_example": "(grounded facts show only marketing-copy edits with no code paths \u2192 SILENT)"
   }
 }

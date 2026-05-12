@@ -17,8 +17,8 @@
     "examples": [
       "PRODUCT: Activation moment is buried 3 screens deep|||OnboardingFlow.tsx routes new users through 'pick a team' before showing value. JTBD says they came to see the dashboard \u2014 defer team-pick to a banner.",
       "BIZ: No usage metric tied to the pricing line item|||Plan 'Pro' charges per seat but logs no per-seat activity; you can't defend the price at renewal. Add a daily-active-user counter; surface in admin.",
-      "MARKET: Competitor shipped public sharable reports last week|||Without an unauthenticated share URL the artifact stays invisible. Add a read-only share token; verify activation lifts via cohort.",
-      "(grounded facts contain only test refactors, no user-facing product surface \u2192 SILENT)"
-    ]
+      "MARKET: Competitor shipped public sharable reports last week|||Without an unauthenticated share URL the artifact stays invisible. Add a read-only share token; verify activation lifts via cohort."
+    ],
+    "silent_example": "(grounded facts contain only test refactors, no user-facing product surface \u2192 SILENT)"
   }
 }

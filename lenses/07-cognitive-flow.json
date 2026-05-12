@@ -16,8 +16,8 @@
     "examples": [
       "FLOW: Six unrelated files touched in 40 minutes \u2014 load on working memory|||Recent edits jump from auth/ to ui/ to ci/ to docs/. Pick ONE thread, finish it, then schedule the rest. Defer the others to a single batched window.",
       "REST: 11 commits past midnight in the last 3 days \u2014 rest debt accruing|||Late-window edits correlate with the regressions in the failing CI run. Schedule a hard stop tonight; deliberate-practice the next feature with fresh context.",
-      "FOCUS: Three half-finished branches, all in 'almost done' state|||Decision fatigue from rerunning the same merge call. Pick one, ship or kill it before opening branch four.",
-      "(grounded facts show focused single-file work with no signs of context-switch or fatigue \u2192 SILENT)"
-    ]
+      "FOCUS: Three half-finished branches, all in 'almost done' state|||Decision fatigue from rerunning the same merge call. Pick one, ship or kill it before opening branch four."
+    ],
+    "silent_example": "(grounded facts show focused single-file work with no signs of context-switch or fatigue \u2192 SILENT)"
   }
 }

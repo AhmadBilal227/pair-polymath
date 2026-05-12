@@ -16,8 +16,8 @@
     "examples": [
       "UX: Submit button has no loading state on slow networks|||PaymentForm.tsx fires onSubmit but never disables or shows spinner \u2014 users double-tap and pay twice. Add disabled+spinner gated on isSubmitting.",
       "A11Y: Custom dropdown traps keyboard focus on Esc|||MultiSelect.tsx onKeyDown swallows Escape without restoring focus to trigger; screen-reader users get stuck. Fix focus return.",
-      "VISUAL: Error microcopy says what failed, not how to recover|||LoginScreen.tsx renders 'Invalid input' for 6 distinct cases. Replace with field-scoped guidance that ends in a verb the user can act on.",
-      "(grounded facts contain only backend handler diffs with no UI/route surface \u2192 SILENT)"
-    ]
+      "VISUAL: Error microcopy says what failed, not how to recover|||LoginScreen.tsx renders 'Invalid input' for 6 distinct cases. Replace with field-scoped guidance that ends in a verb the user can act on."
+    ],
+    "silent_example": "(grounded facts contain only backend handler diffs with no UI/route surface \u2192 SILENT)"
   }
 }

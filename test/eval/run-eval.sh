@@ -207,6 +207,21 @@ for fix in $fixtures; do
   external_llm=1
   [ "$dry_run" = "1" ] && external_llm=0
 
+  # Preserve llm's config path so the sandbox HOME doesn't break key
+  # resolution. Without LLM_USER_PATH, llm under the sandboxed HOME finds
+  # no keys.json and either fails with 429 'insufficient_quota' from an
+  # anonymous/fallback path OR returns empty silently. Metrics still
+  # increment (statusline counts before the call) but every analyst's
+  # lens_suggestion comes back empty → 0 observations. Discovered during
+  # post-Phase-2.1 baseline establishment when 7/7 analysts came back
+  # blank despite the cycle being billed.
+  llm_config_dir=""
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) llm_config_dir="$HOME/Library/Application Support/io.datasette.llm" ;;
+    Linux)  llm_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/io.datasette.llm" ;;
+    *)      llm_config_dir="$HOME/.config/io.datasette.llm" ;;
+  esac
+
   set +e
   HOME="$sandbox" \
     CLAUDE_DIR="$sandbox/.claude" \
@@ -216,6 +231,7 @@ for fix in $fixtures; do
     PP_EXTERNAL_LLM="$external_llm" \
     PP_PARALLEL_INTERVAL_S=1 \
     PP_IDLE_THRESHOLD_S=999999 \
+    LLM_USER_PATH="$llm_config_dir" \
     bash "$_statusline" < "$input_resolved" > "$obs_file" 2> "$err_file"
   rc=$?
   set -e

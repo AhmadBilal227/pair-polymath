@@ -1,0 +1,7 @@
+{
+  "run_ts": "20260512T070825Z",
+  "fixtures_processed": 1,
+  "errors_per_fixture": {"session-01": 0},
+  "total_observations": 6,
+  "dry_run": 0
+}

@@ -16,8 +16,8 @@
     "examples": [
       "STRATEGY: Three weeks on the design polish; activation funnel untouched|||Recent commits show 14 visual tweaks in src/ui/ and 0 in onboarding. The constraint is activation, not aesthetics. Defer polish; ship a measurable funnel test.",
       "FOCUS: One-way door \u2014 public API surface shipped without versioning|||/api/v1 went live in 2 PRs with no deprecation policy; rollback costs grow daily. Add a version header and write a kill-criteria doc before the next /v1 PR.",
-      "OPPORTUNITY: Two open PRs older than 14 days \u2014 Hofstadter's Law in action|||Both touch the same module; each blocks the other. Force a merge or close decision today; do not start a third PR on that module.",
-      "(grounded facts show only a 2-line bugfix on a finished feature \u2192 SILENT)"
-    ]
+      "OPPORTUNITY: Two open PRs older than 14 days \u2014 Hofstadter's Law in action|||Both touch the same module; each blocks the other. Force a merge or close decision today; do not start a third PR on that module."
+    ],
+    "silent_example": "(grounded facts show only a 2-line bugfix on a finished feature \u2192 SILENT)"
   }
 }

@@ -33,8 +33,14 @@ for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
   [ ! -f "$mon_cache" ] && continue
   [ ! -s "$mon_cache" ] && continue
 
-  # Cache freshness (≤30 min)
-  cache_age=$((now - $(stat -f %m "$mon_cache" 2>/dev/null || echo 0)))
+  # Cache freshness (≤30 min).
+  # v0.4.3 fix: was `stat -f %m` only (BSD/macOS form). On Linux, GNU stat
+  # interprets `-f` as "filesystem info" — silently returns the mount point
+  # path (e.g. "/"), the `|| echo 0` never fires, the arithmetic errors out,
+  # `cache_age` becomes empty, `[ "" -gt 1800 ]` is false → freshness check
+  # is silently disabled and stale observations are injected indefinitely.
+  # Mirror bin/statusline.sh:22 `pp_mtime` pattern: GNU first, BSD fallback.
+  cache_age=$((now - $(stat -c %Y "$mon_cache" 2>/dev/null || stat -f %m "$mon_cache" 2>/dev/null || echo 0)))
   [ "$cache_age" -gt 1800 ] && continue
 
   mon=$(head -1 "$mon_cache")

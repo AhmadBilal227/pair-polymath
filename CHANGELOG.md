@@ -3,6 +3,40 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.4.3] — 2026-05-13
+
+The **post-release hardening release**. A cumulative review of v0.4.0–v0.4.2 (GPT-5 review-code on the cumulative diff + `code-refactoring:code-reviewer` agent + `debugging-toolkit:debugger` agent — the security-auditor seat was rate-limited and will run on a v0.4.4 follow-up) surfaced 3 Critical + 5 Important silent-failure modes. All addressed inline before merge. **416 bats tests** (+13). **17 doctor checks** unchanged.
+
+The most amusing trigger: polymath caught **its own** midnight-rollover bug via a lens-self-observation and surfaced it to the maintainer in the advisory rotation. v0.4.3 fixes the bug the system told us about.
+
+### Fixed
+
+- **Critical (P0-1): `lib/budget.sh:9` midnight bug.** `PP_BUDGET_FILE="${PP_CACHE_DIR}/pp-budget-$(date +%Y%m%d).txt"` was evaluated at SOURCE time. Since `bin/statusline.sh` refreshes every 2s for days, after midnight all `budget_inc` / `budget_reserve` writes kept hitting yesterday's file. Today's budget pressure read 0/cap → cycles fired thinking they had headroom that was actually exhausted under the wrong key. Fix: new `pp_budget_file_path()` function re-evaluates the date per call; internal helpers route through it. The lock path is intentionally date-INDEPENDENT (`$PP_CACHE_DIR/pp-budget.lock`) so writers on either side of midnight serialize through one lock instead of grabbing per-day locks and racing on the new-day file. Source-time `PP_BUDGET_FILE` snapshot retained for test back-compat.
+- **Critical (P0-2): `hooks/inject-monitor-insight.sh:37` Linux silent break.** Used `stat -f %m` only. On GNU/Linux, `stat -f` means "filesystem info" and prints the mount point path (e.g. `/`), not failing. The `|| echo 0` guard never fires, the arithmetic errors out, `cache_age` becomes empty, `[ "" -gt 1800 ]` is false → the 30-minute cache-freshness gate was silently disabled and stale lens observations from abandoned sessions were injected into prompts indefinitely. Fix: GNU `stat -c %Y` first, BSD `-f %m` fallback (same pattern `bin/statusline.sh:22` `pp_mtime` already uses).
+- **Critical (P0-3): `PP_MAX_DAILY_CALLS` triple-default desync.** Three sites disagreed when the env var was unset: `lib/budget.sh:53` `:-3500`, `lib/budget.sh:76` `:-10000`, `bin/polymath:115` `:-3500`. (`config/default.env` shipped 10000.) `polymath status` would have printed `Calls: 5107/3500 (145%)` while the line-1 pip + doctor reported pressure against 10000. Fix: single-source via `: "${PP_MAX_DAILY_CALLS:=10000}"` at the top of `lib/budget.sh` so the default fires once on source; downstream callers all read the same value.
+- **Important (P1-1): `polymath cache clear` left preserved budget files at legacy mode 644.** Doctor check #17 stayed yellow forever after a clear because pre-v0.4.2 budget files were created at 644 and the clear-but-preserve sweep didn't tighten them. Fix: `find ... -name 'cc-monitor-budget-*' -exec chmod 600 {} \;` after the rm sweep.
+- **Important (P1-2): `polymath cache clear` didn't sweep idempotency files.** `cc-monitor-injected-hash-*` / `cc-monitor-injected-time-*` persisted across clears, so injection suppression state outlived the lens observations that produced it. Fix: include them in the rm pattern (`all` + `--orphans`).
+- **Important (P1-3): `polymath cache clear --orphans -mtime +1` claimed ">24h" but matched ">~48h".** POSIX `-mtime +N` semantics are "more than N truncated 24h periods" — `+1` matches files at least 2 days old. Fix: portable date marker via `touch -t $(date -v -1d ...)` (BSD) or `touch -d '1 day ago'` (GNU), then `find ... ! -newer "$marker"`. Falls back to the original `-mtime +1` with an explicit ">48h" message if neither date form is available.
+- **Important (P1-4): `README.md:78` doc drift.** Still claimed cache files were `0644` and instructed users to run `chmod -R go-rwx` manually. v0.4.2 made `0600` automatic. Fixed to point at `polymath cache clear` for legacy remediation.
+- **Important (P1-5): `bin/polymath` budget-pressure pretty-print missed two clamp guards.** `bin/statusline.sh:273-289` and `lib/doctor.sh:363-374` both have a 4-step clamp ladder (default → non-numeric → upper-bound → lower-bound → inversion-reset). `bin/polymath:127-130` had only the first three. Under `PP_BUDGET_WARN_PCT=0` `polymath status` would have rendered permanent yellow; under inversion it would have silently skipped yellow and gone straight to red — disagreeing with the line-1 pip the user just looked at. Backported the missing two clamps.
+
+### Tests
+
+13 new bats tests in `test/v0.4.3-hardening.bats` covering every fix above. Midnight test shadows `pp_budget_file_path` to simulate clock advance without time-mocking. Full suite 403 → 416 green. Doctor checks unchanged (17).
+
+### Review-cycle attribution
+
+| Source | Finding |
+|---|---|
+| polymath self-observation (lens agent) | P0-1 midnight bug (surfaced in user's advisory rotation as `⚠ BUG: PP_BUDGET_FILE set at load time will miscount across midnight`) |
+| `debugging-toolkit:debugger` agent | P0-2 hook stat fallback, P1-3 orphan-sweep -mtime semantics |
+| `code-refactoring:code-reviewer` agent | P1-4 README drift, P1-5 threshold clamp gap |
+| GPT-5 `review-code` (cumulative diff) | P0-3 cap default desync, P1-1 cache clear permission preservation, P1-2 idempotency sweep |
+
+Security-auditor agent rate-limited mid-dispatch; will run on v0.4.4 follow-up. Several minor findings deferred (magic-constant readonly extraction, hash 16→32 chars, install.sh umask declaration, shared bats helper).
+
+---
+
 ## [0.4.2] — 2026-05-13
 
 The **privacy-scope release**. Resolves the dogfood-discovered "why am I seeing insights from other projects?" bug: `cc-tips.txt` was a single global file, so tips generated from project A's `CLAUDE.md` (e.g. *"App.tsx is technical debt — 26+ useState hooks"*) leaked into every other project's statusline rotation. Cache files were also mode `644` (world-readable on multi-user systems). **403 bats tests** (+18 in `test/cache-privacy.bats`). **17 doctor checks** (+1).

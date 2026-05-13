@@ -112,7 +112,11 @@ case "$cmd" in
 
   status)
     today_calls=$(budget_get)
-    cap="${PP_MAX_DAILY_CALLS:-3500}"
+    # v0.4.3: was `:-3500` here while lib/budget.sh pressure used :-10000
+    # and config/default.env shipped 10000 — three sources, one truth.
+    # Now sourced from lib/budget.sh's `: "${PP_MAX_DAILY_CALLS:=10000}"`
+    # which fires on `lib/budget.sh` source at bin/polymath:13.
+    cap="$PP_MAX_DAILY_CALLS"
     used_pct=0
     if [ "$cap" -gt 0 ]; then
       used_pct=$((today_calls * 100 / cap))
@@ -128,6 +132,20 @@ case "$cmd" in
     pressure_red="${PP_BUDGET_RED_PCT:-95}"
     case "$pressure_warn" in ''|*[!0-9]*) pressure_warn=80 ;; esac
     case "$pressure_red"  in ''|*[!0-9]*) pressure_red=95  ;; esac
+    # v0.4.3 cumulative-review fix: backport the 4-step clamp ladder
+    # from bin/statusline.sh:273-289 + lib/doctor.sh:363-374 so all
+    # three budget-pressure surfaces speak the same numbers under
+    # misconfig. Missing here previously: lower-bound (WARN=0 would
+    # render permanent yellow) + inversion-reset (WARN >= RED would
+    # silently skip yellow and go straight to red).
+    [ "$pressure_warn" -gt 100 ] && pressure_warn=80
+    [ "$pressure_red"  -gt 100 ] && pressure_red=95
+    [ "$pressure_warn" -lt 1 ] && pressure_warn=80
+    [ "$pressure_red"  -lt 1 ] && pressure_red=95
+    if [ "$pressure_warn" -ge "$pressure_red" ]; then
+      pressure_warn=80
+      pressure_red=95
+    fi
     pressure_used=$((100 - pressure_pct))
     if [ "$pressure_used" -ge "$pressure_red" ]; then
       pressure_glyph=$(printf '\033[31m⚠ RED\033[0m')
@@ -240,19 +258,56 @@ case "$cmd" in
             ;;
           --orphans)
             # Tricky: there's no "current session" notion outside Claude Code,
-            # so wipe everything older than 24h. New cycles regenerate fresh.
-            # Review G4: include the legacy `cc-tips.txt` (no project key)
-            # in the sweep — otherwise the v0.4.1-and-earlier global file
-            # persists forever and continues to be a privacy hazard for any
-            # tool that still reads it.
-            find "$_pp_cache_dir" -maxdepth 1 \( -name 'cc-monitor-*.txt' -o -name 'cc-tips-*.txt' -o -name 'cc-tips.txt' \) -type f -mtime +1 -exec rm -f {} \; 2>/dev/null
-            printf 'polymath: cleared orphan caches (mtime >24h) in %s\n' "$_pp_cache_dir"
+            # so wipe stale files. v0.4.3 cumulative-review fix (P1-3): the
+            # prior `-mtime +1` was claimed "older than 24h" but POSIX
+            # truncation makes it match files at least ~48h old. Use a
+            # marker file as the cutoff: portably means "older than exactly
+            # 24 hours" on both BSD (date -v) and GNU (date -d).
+            _pp_orphan_marker=$(mktemp -t pp-orphan-cutoff-XXXXXX) || _pp_orphan_marker=""
+            if [ -n "$_pp_orphan_marker" ]; then
+              # Try BSD-style first then GNU; if both fail, fall back to
+              # the original -mtime +1 (>48h) semantics with a tighter
+              # message so we don't lie.
+              if touch -t "$(date -v -1d +%Y%m%d%H%M.%S 2>/dev/null)" "$_pp_orphan_marker" 2>/dev/null \
+                || touch -d '1 day ago' "$_pp_orphan_marker" 2>/dev/null; then
+                # Include legacy cc-tips.txt (no project key) in the sweep.
+                find "$_pp_cache_dir" -maxdepth 1 \
+                  \( -name 'cc-monitor-*.txt' -o -name 'cc-tips-*.txt' -o -name 'cc-tips.txt' \
+                     -o -name 'cc-monitor-injected-hash-*' -o -name 'cc-monitor-injected-time-*' \) \
+                  -type f ! -name 'cc-monitor-budget-*' \
+                  ! -newer "$_pp_orphan_marker" -exec rm -f {} \; 2>/dev/null
+                rm -f "$_pp_orphan_marker"
+                printf 'polymath: cleared orphan caches (mtime >24h) in %s\n' "$_pp_cache_dir"
+              else
+                rm -f "$_pp_orphan_marker"
+                find "$_pp_cache_dir" -maxdepth 1 \
+                  \( -name 'cc-monitor-*.txt' -o -name 'cc-tips-*.txt' -o -name 'cc-tips.txt' \
+                     -o -name 'cc-monitor-injected-hash-*' -o -name 'cc-monitor-injected-time-*' \) \
+                  -type f ! -name 'cc-monitor-budget-*' \
+                  -mtime +1 -exec rm -f {} \; 2>/dev/null
+                printf 'polymath: cleared orphan caches (no portable 24h date support; using ~48h fallback) in %s\n' "$_pp_cache_dir"
+              fi
+            fi
             ;;
           all|"")
             # Preserve budget files (date-stamped, inert, needed for daily cap).
-            find "$_pp_cache_dir" -maxdepth 1 \( -name 'cc-monitor-*.txt' -o -name 'cc-tips*' \) -type f ! -name 'cc-monitor-budget-*' -exec rm -f {} \; 2>/dev/null
+            # v0.4.3 cumulative-review fixes:
+            #   - GPT-3: chmod 600 the preserved budget files so doctor #17
+            #     doesn't stay yellow forever after `cache clear` (legacy
+            #     pre-v0.4.2 budget files were created at 644).
+            #   - GPT-4: also sweep the per-lens idempotency hash/time files
+            #     so injection suppression state doesn't outlive the lens
+            #     observations that produced it.
+            find "$_pp_cache_dir" -maxdepth 1 \
+              \( -name 'cc-monitor-*.txt' -o -name 'cc-tips*' \) \
+              -type f ! -name 'cc-monitor-budget-*' -exec rm -f {} \; 2>/dev/null
+            find "$_pp_cache_dir" -maxdepth 1 \
+              \( -name 'cc-monitor-injected-hash-*' -o -name 'cc-monitor-injected-time-*' \) \
+              -type f -exec rm -f {} \; 2>/dev/null
+            # Chmod surviving budget files to the privacy invariant.
+            find "$_pp_cache_dir" -maxdepth 1 -name 'cc-monitor-budget-*' -type f -exec chmod 600 {} \; 2>/dev/null
             chmod 700 "$_pp_cache_dir" 2>/dev/null || true
-            printf 'polymath: cleared lens + tip caches in %s (budget files preserved)\n' "$_pp_cache_dir"
+            printf 'polymath: cleared lens + tip + idempotency caches in %s (budget files preserved and locked to 600)\n' "$_pp_cache_dir"
             ;;
           *)
             printf 'polymath cache clear: unknown flag %s (use --tips | --orphans | all)\n' "$_pp_clear_what" >&2

@@ -75,7 +75,7 @@ The installer is interactive (needs a TTY for the API key prompt and the dep-ins
 2. **Asks for your OpenAI API key** (input is no-echo). Stored via `llm keys set openai`. Skip to configure later.
 3. **Backs up `~/.claude/settings.json`** to a timestamped file, then atomically merges in the statusLine + 2 hooks via `jq`. If a different statusLine is already configured (e.g. ccusage), you're prompted before replacing — default keeps yours, our hooks still install.
 4. **Smoke-tests the statusline before activating it.** Specifically: pipes the bundled sample stdin fixture into `bin/statusline.sh` and verifies exit-0. A broken checkout aborts before any `settings.json` mutation. The smoke test does not exercise the LLM-call path — it's a syntax + plumbing check, not an end-to-end test.
-5. **Creates `~/.claude/pair-polymath/{lenses,prompts,cache,config}`** with directory mode `0700`. Cache files written later are mode `0644` by default; if your env contains anything sensitive in a transcript that gets cached, tighten with `chmod -R go-rwx ~/.claude/pair-polymath/cache`.
+5. **Creates `~/.claude/pair-polymath/{lenses,prompts,cache,config}`** with directory mode `0700`. Cache files written by v0.4.2+ are mode `0600` automatically (every cache-writing entry point declares `umask 077`). If you're upgrading from a pre-v0.4.2 install, run `polymath cache clear` once to remediate any legacy `0644` files left over from the old default — `polymath doctor` will flag them as check #17 "cache permissions" until you do.
 
 Then restart Claude Code. The first cycle completes within ~5 minutes of activity. Verify:
 

@@ -226,6 +226,50 @@ doctor_check_prompts() {
   return 2
 }
 
+doctor_check_transcript_libs() {
+  # v0.4 Phase 1 — verify lib/transcript.sh + lib/tool-summary.sh load, that
+  # jq can parse a synthetic JSONL, that pairing by tool_use.id works, AND
+  # that the canonical redactor pp_memory_redact_body is actually reached
+  # (not the 4-pattern fallback). The redaction probe is the load-bearing
+  # part — without it, doctor was unable to catch the v0.4 'phantom
+  # pp_redact_secrets' regression that the 4-way ralph review found.
+  if [ ! -r "$PP_ROOT/lib/transcript.sh" ] || [ ! -r "$PP_ROOT/lib/tool-summary.sh" ]; then
+    _pp_doctor_red "transcript libs" "lib files missing"
+    return 2
+  fi
+  local _probe
+  _probe=$( \
+    . "$PP_ROOT/lib/transcript.sh" 2>/dev/null && \
+    . "$PP_ROOT/lib/tool-summary.sh" 2>/dev/null && \
+    type pp_transcript_filter >/dev/null 2>&1 && \
+    type pp_tool_summary_render >/dev/null 2>&1 && \
+    {
+      _t=$(mktemp) || exit 99
+      printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_probe","name":"Read","input":{"file_path":"/probe.ts"}}]}}' > "$_t"
+      printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_probe","content":[{"type":"text","text":"ok pair found"}]}]}}' >> "$_t"
+      _json=$(pp_transcript_tool_calls "$_t")
+      rm -f "$_t"
+      printf '%s' "$_json" | jq -e '.[0].id == "tu_probe" and (.[0].summary | contains("ok pair"))' >/dev/null 2>&1 || exit 2
+      # Canonical-redactor probe: send a Bearer token + email through filter;
+      # only pp_memory_redact_body (11-pattern) handles those — the awk
+      # fallback misses both.
+      _t2=$(mktemp) || exit 99
+      printf '%s\n' '{"type":"user","message":{"role":"user","content":"key Bearer abcdef12345678901234567890XYZ for alice@example.com"}}' > "$_t2"
+      _filtered=$(pp_transcript_filter "$_t2")
+      rm -f "$_t2"
+      printf '%s' "$_filtered" | grep -q 'REDACTED-BEARER' || exit 3
+      printf '%s' "$_filtered" | grep -q 'REDACTED-EMAIL' || exit 4
+      printf 'ok'
+    }
+  )
+  case "$_probe" in
+    ok) _pp_doctor_green "transcript libs" "filter+tool_calls+canonical-redactor wired"
+        return 0 ;;
+    *) _pp_doctor_red "transcript libs" "probe failed (canonical redactor not wired or jq pairing broken)"
+       return 2 ;;
+  esac
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -287,7 +331,7 @@ pp_doctor_run() {
   local checks="doctor_check_bash doctor_check_jq doctor_check_llm doctor_check_openai_key \
                 doctor_check_settings_json doctor_check_statusline_wired doctor_check_hooks_wired \
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
-                doctor_check_prompts doctor_check_statusline_smoke"
+                doctor_check_prompts doctor_check_transcript_libs doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

@@ -216,3 +216,43 @@ EOFCSV
   [ "$status" -eq 1 ]
   [[ "$output" == *"CSV not found"* ]]
 }
+
+@test "eval: v0.4 Phase 1 useful% delta gate (skip when no baselines)" {
+  # Phase 1 plan Task 7. Activates ONLY when both baselines are checked
+  # in. Until then this test is a no-op so CI stays green. Capture:
+  #   bash test/eval/run-eval.sh --all --out test/eval/runs/v0.4-phase1
+  #   bash test/eval/score.sh --runs-dir test/eval/runs/v0.4-phase1 \
+  #        --out test/eval/baselines/v0.4-phase1/score-report.json
+  # And run against a v0.3.0 baseline likewise stashed at
+  # test/eval/baselines/v0.3.0/score-report.json.
+  base="$EVAL_DIR/baselines/v0.3.0/score-report.json"
+  cur="$EVAL_DIR/baselines/v0.4-phase1/score-report.json"
+  [ -f "$base" ] || skip "no v0.3.0 baseline (capture via run-eval.sh + score.sh)"
+  [ -f "$cur" ]  || skip "no v0.4-phase1 baseline (Phase 1 gate inactive)"
+
+  : "${PP_EVAL_USEFUL_DELTA_MIN_PP:=5}"
+  lenses_improved=0
+  lenses_regressed_halluc=0
+  while IFS= read -r lens; do
+    b_use=$(jq -r --arg l "$lens" '.per_lens[$l].useful // 0' "$base")
+    c_use=$(jq -r --arg l "$lens" '.per_lens[$l].useful // 0' "$cur")
+    b_hal=$(jq -r --arg l "$lens" '.per_lens[$l].hallucinated // 0' "$base")
+    c_hal=$(jq -r --arg l "$lens" '.per_lens[$l].hallucinated // 0' "$cur")
+    delta=$(LC_ALL=C awk -v b="$b_use" -v c="$c_use" 'BEGIN{printf "%.1f", c-b}')
+    if LC_ALL=C awk -v d="$delta" -v m="$PP_EVAL_USEFUL_DELTA_MIN_PP" 'BEGIN{exit !(d>=m)}'; then
+      lenses_improved=$((lenses_improved + 1))
+    fi
+    # Hallucination must NOT regress beyond a 1pp jitter tolerance.
+    if LC_ALL=C awk -v b="$b_hal" -v c="$c_hal" 'BEGIN{exit !(c>b+1)}'; then
+      lenses_regressed_halluc=$((lenses_regressed_halluc + 1))
+    fi
+  done < <(jq -r '.per_lens | keys[]' "$base")
+
+  # Gate per docs/v0.4-intelligence-roadmap.md Phase 1:
+  #   useful% delta >=PP_EVAL_USEFUL_DELTA_MIN_PP on >=4 of 7 lenses
+  #   AND no lens regresses on hallucination%
+  echo "useful%-improved-lenses: $lenses_improved" >&3
+  echo "halluc%-regressed-lenses: $lenses_regressed_halluc" >&3
+  [ "$lenses_improved" -ge 4 ]
+  [ "$lenses_regressed_halluc" -eq 0 ]
+}

@@ -324,3 +324,61 @@ pp_is_secret_file() {
   [ "$_pp_isf_saved_f" -eq 1 ] || set +f
   return 1
 }
+
+# pp_project_key CWD
+# Derives a stable 16-char hex key identifying the project a cwd lives in.
+# Used by per-project cache files (TIP_CACHE in bin/statusline.sh) so tips
+# generated from project A's CLAUDE.md never leak into project B's view.
+#
+# Resolution order:
+#   1. If CWD is inside a git repo: sha of `git rev-parse --show-toplevel`.
+#      All cwds under the same repo collapse to the same key, so working
+#      in a subdir doesn't fragment a project's tip cache.
+#   2. Otherwise: sha of the cwd itself, after pwd -P realpath resolution.
+#   3. Empty/unreadable cwd: 16 chars of '0' (the "unknown project" bucket;
+#      degrades to global cache behavior — never silently absent).
+#
+# Tool chain (review G5): shasum is perl-based and ships on macOS + most
+# Linuxes; sha256sum is coreutils (Linux); sha256 is BSD/FreeBSD; md5sum
+# is a weak final fallback (cryptographic strength irrelevant — we just
+# need stable bucketing). All fallbacks emit hex, so the slice is uniform.
+# 16 hex chars (64 bits) instead of 12 (review G6) — cheap reduction in
+# birthday collision risk at scale.
+pp_project_key() {
+  local _cwd="${1:-}"
+  [ -z "$_cwd" ] && { printf '0000000000000000'; return 0; }
+  [ ! -d "$_cwd" ] && { printf '0000000000000000'; return 0; }
+
+  local _scope=""
+  # Prefer git toplevel so subdirs of the same repo share one cache.
+  if command -v git >/dev/null 2>&1; then
+    _scope=$(git -C "$_cwd" -c core.fsmonitor=false rev-parse --show-toplevel 2>/dev/null)
+  fi
+  # Fall back to realpath of cwd outside git.
+  if [ -z "$_scope" ]; then
+    _scope=$(cd "$_cwd" 2>/dev/null && pwd -P) || _scope="$_cwd"
+  fi
+
+  local _hash=""
+  if command -v shasum >/dev/null 2>&1; then
+    _hash=$(printf '%s' "$_scope" | shasum -a 256 2>/dev/null | cut -c1-16)
+  elif command -v sha256sum >/dev/null 2>&1; then
+    _hash=$(printf '%s' "$_scope" | sha256sum 2>/dev/null | cut -c1-16)
+  elif command -v sha256 >/dev/null 2>&1; then
+    # BSD/FreeBSD: `sha256 -q` prints just the digest, no filename suffix.
+    _hash=$(printf '%s' "$_scope" | sha256 -q 2>/dev/null | cut -c1-16)
+  elif command -v md5sum >/dev/null 2>&1; then
+    _hash=$(printf '%s' "$_scope" | md5sum 2>/dev/null | cut -c1-16)
+  fi
+  [ -z "$_hash" ] && _hash="0000000000000000"
+  printf '%s' "$_hash"
+}
+
+# pp_file_mode PATH
+# Stdout: octal permission bits (e.g. "600", "644"). Empty if stat absent
+# or PATH unreadable. Single source of truth for cache-permission checks
+# in lib/doctor.sh and bin/polymath. (Review fix G1: previously `%Lp` was
+# BSD-only; on GNU Linux it returned empty and the check silently skipped.)
+pp_file_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}

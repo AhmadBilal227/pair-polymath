@@ -384,6 +384,44 @@ doctor_check_budget_pressure() {
   return 0
 }
 
+doctor_check_cache_permissions() {
+  # v0.4.2 check #17 — surface lax-mode cache files. Cache contents include
+  # code excerpts, file paths, and whatever the LLM echoed back; these must
+  # be owner-only (0600 files / 0700 dir) on multi-user systems. Older
+  # installs created files at 0644 via the default umask 022. The fix is one
+  # command: `polymath cache clear`.
+  # Review G1: route through pp_file_mode (GNU `-c %a` + BSD `-f %Lp`) so
+  # the check actually runs on Linux. Review G11: collect both findings
+  # before returning so a mixed misconfig (loose dir + loose files) shows
+  # both reasons in one diagnostic.
+  if ! type pp_file_mode >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/grounding.sh" 2>/dev/null || true
+  fi
+  local _cdir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+  if [ ! -d "$_cdir" ]; then
+    _pp_doctor_green "cache permissions" "no cache dir yet"
+    return 0
+  fi
+  local _dir_mode _loose
+  _dir_mode=$(pp_file_mode "$_cdir")
+  _loose=$(find "$_cdir" -maxdepth 1 -type f ! -perm 600 2>/dev/null | wc -l | tr -d ' ')
+  local _problems=""
+  if [ -n "$_dir_mode" ] && [ "$_dir_mode" != "700" ]; then
+    _problems="dir mode is ${_dir_mode} (want 700)"
+  fi
+  if [ "$_loose" -gt 0 ]; then
+    [ -n "$_problems" ] && _problems="${_problems}; "
+    _problems="${_problems}${_loose} file(s) mode != 600"
+  fi
+  if [ -n "$_problems" ]; then
+    _pp_doctor_yellow "cache permissions" "${_problems}; run: polymath cache clear (or chmod 700 ${_cdir})"
+    return 1
+  fi
+  _pp_doctor_green "cache permissions" "dir 700, files 600"
+  return 0
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -446,7 +484,8 @@ pp_doctor_run() {
                 doctor_check_settings_json doctor_check_statusline_wired doctor_check_hooks_wired \
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
                 doctor_check_prompts doctor_check_transcript_libs doctor_check_router_libs \
-                doctor_check_coreutils doctor_check_budget_pressure doctor_check_statusline_smoke"
+                doctor_check_coreutils doctor_check_budget_pressure \
+                doctor_check_cache_permissions doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

@@ -4,6 +4,14 @@
 # Designed for refreshInterval: 2 in settings.json.
 # Spec: ~/.claude/specs/2026-05-11-claude-code-statusline-design.md
 
+# v0.4.2 privacy fix: lock down cache files to owner-only (0600) at the
+# umask level so every subsequent write inherits the tight perms — covers
+# TIP_CACHE, cc-monitor-* lens caches, cc-monitor-injected-hash-*, and the
+# .tmp dance files. The parent dir is chmod-ed to 0700 below. (Cache files
+# contain code excerpts, file paths, and whatever the LLM echoed back —
+# previously 644 = world-readable on multi-user systems.)
+umask 077
+
 # Locale handling: the awk float-parse bug (de_DE.UTF-8 comma decimal) lives
 # on a small handful of specific awk calls (load_1m parsing at ~line 282).
 # Round 1 of the Ralph loop set `LC_ALL=C; export LC_ALL` file-globally, but
@@ -397,14 +405,25 @@ fi
 # To re-enable: case $tick in 0) trail="⋆";; 1) trail="✦";; ... esac; line="${line} ${MAGENTA}${trail}${R}"
 
 # === Line 2: LLM-analyzed HN digests (refreshed every 30min in background) ===
-TIP_CACHE="${HOME}/.claude/cache/cc-tips.txt"
-# TIP_LOCK was previously keyed per-session, but TIP_CACHE is a single global
-# file — so two Claude Code windows with different session_ids both passed
-# the lock check independently and raced the cache write. The second writer's
-# `mv` silently clobbered the first (Ralph round 2 BUG 4). Now: lock scope
-# matches cache scope (global).
-TIP_LOCK="/tmp/cc-tips-fetch.lock"
-mkdir -p "${HOME}/.claude/cache" 2>/dev/null
+# v0.4.2 privacy fix: TIP_CACHE used to be a single global file
+# (~/.claude/cache/cc-tips.txt). Tips are personalized from $cwd/CLAUDE.md +
+# recent commits + HN/arxiv — so the cache contents are project-specific
+# (e.g. "App.tsx is technical debt") but the cache key was not. Two Claude
+# Code sessions in different projects shared one file: tips generated from
+# project A's CLAUDE.md leaked into project B's rotation. Per-project keying
+# closes the leak; the lock follows the cache scope for the same Ralph-R2-
+# BUG-4 reason (lock scope must match write scope).
+_pp_proj_key=$(pp_project_key "$cwd")
+# Review G3: respect $PP_CACHE_DIR / $CLAUDE_DIR so this stays consistent
+# with bin/polymath and lib/doctor.sh. Hardcoded $HOME/.claude/cache split
+# the cache location and left stale files undiscovered by `cache list`.
+_pp_cache_root="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+TIP_CACHE="${_pp_cache_root}/cc-tips-${_pp_proj_key}.txt"
+TIP_LOCK="/tmp/cc-tips-fetch-${_pp_proj_key}.lock"
+mkdir -p "$_pp_cache_root" 2>/dev/null
+# v0.4.2 privacy fix: tighten cache parent dir to 700 so other local users
+# can't enumerate session_ids or read project keys via the directory listing.
+chmod 700 "$_pp_cache_root" 2>/dev/null || true
 
 cache_age=$(($(date +%s) - $(pp_mtime "$TIP_CACHE" || echo 0)))
 if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then

@@ -3,6 +3,41 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.4.2] — 2026-05-13
+
+The **privacy-scope release**. Resolves the dogfood-discovered "why am I seeing insights from other projects?" bug: `cc-tips.txt` was a single global file, so tips generated from project A's `CLAUDE.md` (e.g. *"App.tsx is technical debt — 26+ useState hooks"*) leaked into every other project's statusline rotation. Cache files were also mode `644` (world-readable on multi-user systems). **403 bats tests** (+18 in `test/cache-privacy.bats`). **17 doctor checks** (+1).
+
+### Fixed
+- **Privacy: TIP_CACHE is now per-project.** `~/.claude/cache/cc-tips.txt` (one global file) → `cc-tips-<16hex>.txt` keyed by `sha256(git-toplevel)` with realpath-of-cwd fallback for non-git dirs. Subdirs of the same repo collapse to one key so working in `/proj/src/deep` and `/proj/docs` shares the same tip rotation. New helper `lib/grounding.sh::pp_project_key`. 16 hex chars (64 bits) to keep birthday-collision risk negligible at scale.
+- **Privacy: cache file permissions locked to 0600.** Every cache-touching entrypoint (`bin/statusline.sh`, `hooks/inject-monitor-insight.sh`, `bin/polymath`) declares `umask 077` at the top so every new file inherits owner-only mode. Parent dir tightened to `0700` on every statusline cycle.
+- **Privacy: `bin/statusline.sh` now honors `$PP_CACHE_DIR` / `$CLAUDE_DIR`** for the TIP_CACHE path (GPT review G3). Previously hardcoded to `$HOME/.claude/cache`, which split cache location vs. `polymath cache` / `doctor` and left stale files undiscovered.
+
+### Added
+- **`polymath cache` subcommand** — three modes:
+  - `polymath cache list` — reports total / tips / lens-hook / budget file counts + dir mode + warning if any file has mode > 600
+  - `polymath cache clear` — wipes lens + tip caches; **preserves budget files** (date-stamped daily-cap accounting can't be reset)
+  - `polymath cache clear --tips` — wipes only tip caches (per-project)
+  - `polymath cache clear --orphans` — wipes lens + tip caches older than 24h, including the legacy `cc-tips.txt` (GPT review G4)
+- **Doctor check #17 — "cache permissions"**. Green when dir is `700` and all files are `600`; yellow otherwise with a one-command remediation hint (`polymath cache clear`). Collects both findings (dir mode + file modes) before returning so mixed misconfigs show both reasons.
+- **`lib/grounding.sh::pp_file_mode` helper** — portable octal-mode reader (`stat -c %a` on GNU, `stat -f %Lp` on BSD/macOS). Single source of truth used by `polymath cache list` + doctor check #17.
+
+### Review-cycle fixes (GPT-5 `review-code` pass)
+- **G1**: `stat -c %Lp` is BSD-only; on Linux it returned empty and the doctor dir-mode check silently passed. Routed through new `pp_file_mode` helper.
+- **G3**: `bin/statusline.sh` hardcoded `$HOME/.claude/cache`, ignoring env overrides used by sibling commands.
+- **G4**: `cache clear --orphans` pattern excluded legacy `cc-tips.txt`; it would have persisted forever.
+- **G5**: `pp_project_key` had no fallback for systems with `sha256` (BSD/FreeBSD) but not `shasum`/`sha256sum`. Added `sha256` + `md5sum` final fallbacks; emit `0000000000000000` only when all four are absent.
+- **G6**: Hash truncated to 12 hex (48 bits) → bumped to 16 (64 bits). Cheap, defangs birthday collisions at any plausible scale.
+- **G9**: `cache list` "lens/hook" count included budget files, skewing reports. Excluded; budget count is now its own column.
+- **G10**: Test "no legacy global" assertion was tautological (`-ge 0`). Tightened: any `cc-tips*` file present must match `^cc-tips-[0-9a-f]{16}\.txt$`.
+- **G11**: Doctor returned after first issue, hiding mixed misconfigs. Now collects dir-mode + file-mode findings before reporting.
+
+False alarms (verified, no fix): `find -maxdepth` IS portable on BSD/macOS (already used in many places); TIP_LOCK already uses atomic `mkdir`; global `umask 077` in `bin/polymath` is intentional (only user.env + cache writes happen).
+
+### Migration
+Existing users have ~hundreds of mode-644 cache files from prior versions. One command remediates: `polymath cache clear`. Doctor check #17 surfaces the issue before the user notices the leak themselves.
+
+---
+
 ## [0.4.1] — 2026-05-13
 
 The **budget-visibility release**. Resolves the dogfood-discovered "only seeing tip rotation, no lens insights" bug: when the daily LLM call cap exhausts mid-day (especially common in multi-session use), cycles silently stopped producing observations and the user had no way to tell *why*. v0.4.1 surfaces budget pressure at every diagnostic surface — line-1 chrome, line-2 idle fallback, `polymath doctor`, and `polymath status`. **385 bats tests** (+17 in `test/budget-visibility.bats`).

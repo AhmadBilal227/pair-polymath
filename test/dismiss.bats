@@ -49,3 +49,32 @@ teardown() { rm -rf "$HOME"; }
   printf '%s' "$output" | grep -qF "Rule A"
   ! printf '%s' "$output" | grep -qF "Rule B"
 }
+
+@test "dismiss_list: TTL-expired rules are excluded" {
+  pp_dismiss_add "Old expired rule" project
+  local _file _id
+  _file=$(pp_dismiss_file_path)
+  _id=$(jq -r '.id' "$_file" | head -1)
+  local _backdate _tmp
+  _backdate=$(date -u -v -10d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%SZ)
+  _tmp=$(mktemp)
+  jq -c "if .id == \"$_id\" then .ts = \"$_backdate\" | .ttl_days = 5 else . end" "$_file" > "$_tmp"
+  mv "$_tmp" "$_file"
+  run pp_dismiss_list
+  [ "$status" -eq 0 ]
+  ! printf '%s' "$output" | grep -qF "Old expired rule"
+}
+
+@test "dismiss_list: TTL-not-yet-expired rules ARE included" {
+  pp_dismiss_add "Fresh rule with ttl" project
+  local _file _id _tmp
+  _file=$(pp_dismiss_file_path)
+  _id=$(jq -r '.id' "$_file" | head -1)
+  _tmp=$(mktemp)
+  jq -c "if .id == \"$_id\" then .ttl_days = 30 else . end" "$_file" > "$_tmp"
+  mv "$_tmp" "$_file"
+  run pp_dismiss_list
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "Fresh rule with ttl"
+}

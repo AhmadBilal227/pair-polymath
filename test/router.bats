@@ -171,6 +171,29 @@ _enable() {
   [ "$line_count" -le 3 ]
 }
 
+@test "pick: C4 — PP_ROUTER_ENABLE=0 produces identical output to fan-out-all" {
+  # When the router is disabled, the picked set must EQUAL the enabled
+  # set (one per line, in registry order). This is the byte-identical
+  # v0.3 fallback invariant the GPT plan review (C4) demanded a test for.
+  _enable engineering security ux-design perf-finops product-biz cognitive-flow strategic-founder
+  PP_ROUTER_ENABLE=0 run pp_router_pick_lenses '' ''
+  [ "$status" -eq 0 ]
+  # Picked must be the same 7 entries in the same order as enabled set.
+  expected=$(printf '%s\n' engineering security ux-design perf-finops product-biz cognitive-flow strategic-founder)
+  [ "$output" = "$expected" ]
+}
+
+@test "pick: C4 — PP_ROUTER_ENABLE=1 with fail-open also returns full enabled set" {
+  # When the router LLM is unavailable / EMPTY result, fail-open returns
+  # all enabled. This + the C4 byte-identical test above together cover
+  # the safety net: 'router can never silently silence polymath'.
+  _enable engineering security ux-design
+  PP_ROUTER_ENABLE=1 PP_ROUTER_FORCE_OUTPUT='' run pp_router_pick_lenses '' ''
+  [ "$status" -eq 0 ]
+  expected=$(printf '%s\n' engineering security ux-design)
+  [ "$output" = "$expected" ]
+}
+
 @test "surprise: doesn't duplicate when injected lens already in picked set" {
   # If somehow not_picked contains a lens already in picked, dedupe.
   PP_ROUTER_SURPRISE_PROB=1.0 PP_RANDOM_SEED=42 \

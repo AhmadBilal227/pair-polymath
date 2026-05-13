@@ -33,6 +33,18 @@
 if [ -n "${_PP_ROUTER_SOURCED:-}" ]; then return 0; fi
 _PP_ROUTER_SOURCED=1
 
+# GPT review C1: ensure pp_render_prompt is sourced. Router gets called
+# from bin/statusline.sh which already loads prompt-loader, but a future
+# caller (doctor check, scripted test) could invoke us in a fresh
+# context. Idempotent source-in.
+_pp_router_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! command -v pp_render_prompt >/dev/null 2>&1; then
+  if [ -r "${_pp_router_self_dir}/prompt-loader.sh" ]; then
+    # shellcheck source=prompt-loader.sh
+    . "${_pp_router_self_dir}/prompt-loader.sh" 2>/dev/null || true
+  fi
+fi
+
 : "${PP_ROUTER_ENABLE:=1}"
 : "${PP_ROUTER_MAX:=3}"
 : "${PP_ROUTER_MIN:=1}"
@@ -85,9 +97,11 @@ pp_router_pick_lenses() {
     [ -z "$_norm" ] && continue
     # Lowercase (bash 3.2-portable: use tr, not ${var,,}).
     _norm=$(printf '%s' "$_norm" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-    # Strict regex: must match ^[a-z][a-z0-9-]*$. Rejects bullets,
+    # Strict regex: must match ^[a-z][a-z0-9_/-]*$. Rejects bullets,
     # numbered lists, anything with leading punctuation or quotes.
-    if ! printf '%s' "$_norm" | LC_ALL=C grep -qE '^[a-z][a-z0-9-]*$'; then
+    # Allows underscores and slashes — needed for v0.4 Phase 4 category-
+    # prefixed IDs like 'executive/cfo' (GPT review C2).
+    if ! printf '%s' "$_norm" | LC_ALL=C grep -qE '^[a-z][a-z0-9_/-]*$'; then
       continue
     fi
     # Must be in enabled set + not yet picked.

@@ -92,6 +92,16 @@ _enable() {
   ! printf '%s' "$output" | grep -qF 'SECURITY'
 }
 
+@test "pick: GPT-C2 — accepts category-prefixed IDs like 'executive/cfo' (Phase 4 prep)" {
+  _enable engineering security 'executive/cfo' 'meta/pre-mortem'
+  PP_ROUTER_ENABLE=1 \
+    PP_ROUTER_FORCE_OUTPUT=$'engineering\nexecutive/cfo\nmeta/pre-mortem' \
+    run pp_router_pick_lenses '' ''
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qxF 'executive/cfo'
+  printf '%s' "$output" | grep -qxF 'meta/pre-mortem'
+}
+
 @test "pick: I6 — strict regex rejects markdown bullets / numbered lists" {
   _enable engineering security
   PP_ROUTER_ENABLE=1 \

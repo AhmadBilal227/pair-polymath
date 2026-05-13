@@ -274,6 +274,38 @@ EOF
   rm -f "$tmp"
 }
 
+@test "tool_calls: handles tool_result.content as STRING (real Claude Code schema)" {
+  # Real Claude Code transcripts emit content as a bare string for some
+  # tool_result entries (not always an array). Earlier draft assumed array
+  # only → silently returned [] for the entire window. Caught by the v0.4
+  # end-to-end walkthrough on an 11 MB session.
+  tmp="$(mktemp)"
+  printf '%s\n' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_str","name":"Bash","input":{"command":"ls"}}]}}' \
+    '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_str","content":"plain string output line 1\nline 2"}]}}' \
+    > "$tmp"
+  run pp_transcript_tool_calls "$tmp"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.[0].id == "tu_str"' >/dev/null
+  echo "$output" | jq -e '.[0].summary | contains("plain string output")' >/dev/null
+  rm -f "$tmp"
+}
+
+@test "tool_calls: output is valid JSON even when commands contain literal newlines" {
+  # Regression: earlier draft used jq pretty mode which left raw newlines
+  # inside string values, producing invalid JSON downstream consumers
+  # couldn't parse. -c (compact) now mandatory.
+  tmp="$(mktemp)"
+  printf '%s\n' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_nl","name":"Bash","input":{"command":"line1\nline2\nline3"}}]}}' \
+    > "$tmp"
+  run pp_transcript_tool_calls "$tmp"
+  [ "$status" -eq 0 ]
+  # Must round-trip cleanly through jq (catches the unescaped-newline bug).
+  echo "$output" | jq -e '.[0].target | contains("line1") and contains("line3")' >/dev/null
+  rm -f "$tmp"
+}
+
 @test "tool_calls: handles Bash / Edit / Write / Grep / WebFetch tool kinds" {
   tmp="$(mktemp)"
   cat > "$tmp" <<EOF

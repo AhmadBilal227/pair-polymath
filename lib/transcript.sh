@@ -229,7 +229,13 @@ pp_transcript_tool_calls() {
   local _max_tools="${PP_TOOL_SUMMARY_MAX}"
 
   local _result
-  _result=$(printf '%s' "$_tailed" | jq -Rs \
+  # -c (compact) is REQUIRED here: pretty-print mode leaves literal control
+  # chars (newlines, tabs) inside string values, producing invalid JSON.
+  # Bash commands captured into `tool_use.input.command` routinely contain
+  # multi-line scripts; without -c the round-trip through downstream jq
+  # consumers parse-errors. (Caught by the v0.4 walkthrough on a real
+  # 11 MB session transcript.)
+  _result=$(printf '%s' "$_tailed" | jq -Rsc \
     --argjson trunc "$_tool_trunc" \
     --argjson max "$_max_tools" \
     '
@@ -263,7 +269,13 @@ pp_transcript_tool_calls() {
                 ),
                 summary: (
                   if $r != null then
-                    (($r.content // []) | map(select(.type == "text") | .text // "") | join(" "))
+                    (
+                      if ($r.content | type) == "array" then
+                        ($r.content | map(select(.type == "text") | .text // "") | join(" "))
+                      elif ($r.content | type) == "string" then
+                        $r.content
+                      else "" end
+                    )
                     | if length > $trunc then .[0:$trunc] + "..." else . end
                   else null end
                 )

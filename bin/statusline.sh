@@ -248,6 +248,44 @@ if [ "$cost_cents" -ge 1 ]; then
   line="${line} ${BOLD}${AMBER}\$${cost_fmt}${R}"
 fi
 
+# v0.4.1 Task 3: budget headroom pip immediately AFTER cost in line 1.
+# Amber ⚡N% at PP_BUDGET_WARN_PCT (80%) used. Red ⚠N% at PP_BUDGET_RED_PCT
+# (95%) used. Nothing when healthy. pp_budget_remaining_pct returns
+# the REMAINING %, so the threshold is "remaining <= 100 - used-cap".
+# Used as single source for the idle fallback below (Task 4).
+_pp_budget_pct=$(pp_budget_remaining_pct 2>/dev/null) || _pp_budget_pct=100
+# v0.4.1 review-fix (C2): bash treats `var=$(cmd)` as a successful
+# assignment regardless of cmd's exit, so the `||` fallback above is
+# dead — if the helper is unsourced or errors, _pp_budget_pct is
+# empty, and `[ "" -le N ]` would print "integer expression expected"
+# to stderr and skip the pip silently. Guard explicitly.
+case "$_pp_budget_pct" in
+  ''|*[!0-9]*) _pp_budget_pct=100 ;;
+esac
+_pp_warn_used="${PP_BUDGET_WARN_PCT:-80}"
+_pp_red_used="${PP_BUDGET_RED_PCT:-95}"
+# Clamp env values to [1, 100].
+case "$_pp_warn_used" in ''|*[!0-9]*) _pp_warn_used=80 ;; esac
+case "$_pp_red_used"  in ''|*[!0-9]*) _pp_red_used=95  ;; esac
+[ "$_pp_warn_used" -gt 100 ] && _pp_warn_used=80
+[ "$_pp_red_used"  -gt 100 ] && _pp_red_used=95
+# v0.4.1 review-fix (I2): lower-bound. WARN/RED=0 would make "100-0=100"
+# the threshold and fire the pip on every render (any pct ≤ 100).
+[ "$_pp_warn_used" -lt 1 ] && _pp_warn_used=80
+[ "$_pp_red_used"  -lt 1 ] && _pp_red_used=95
+# v0.4.1 review-fix (I1): inversion. WARN >= RED collapses the amber
+# zone (the if-elif takes red first; amber never matches). Reset both
+# to defaults; doctor #16 surfaces the misconfig with a yellow message.
+if [ "$_pp_warn_used" -ge "$_pp_red_used" ]; then
+  _pp_warn_used=80
+  _pp_red_used=95
+fi
+if [ "$_pp_budget_pct" -le "$(( 100 - _pp_red_used ))" ]; then
+  line="${line} ${SOFT_CRIMSON}⚠${_pp_budget_pct}%${R}"
+elif [ "$_pp_budget_pct" -le "$(( 100 - _pp_warn_used ))" ]; then
+  line="${line} ${SOFT_AMBER}⚡${_pp_budget_pct}%${R}"
+fi
+
 # 7. Duration removed per user — already covered by burn rate signal.
 
 # 8. Cache hit % (only when <90%, signals prompt cache underperforming)
@@ -898,15 +936,19 @@ GROUND
           export PP_SESSION_START_EPOCH
         fi
         if [ -z "${PP_BUDGET_REMAINING_PCT:-}" ]; then
-          # budget_get returns "used,max"; compute remaining percentage.
-          _pp_budget_used_max=$(budget_get 2>/dev/null || printf '0,${PP_MAX_DAILY_CALLS:-3500}')
-          _pp_budget_used=$(printf '%s' "$_pp_budget_used_max" | cut -d, -f1)
-          _pp_budget_max=$(printf '%s' "$_pp_budget_used_max" | cut -d, -f2)
-          if [ -n "$_pp_budget_max" ] && [ "$_pp_budget_max" -gt 0 ] 2>/dev/null; then
-            PP_BUDGET_REMAINING_PCT=$(( (_pp_budget_max - _pp_budget_used) * 100 / _pp_budget_max ))
-            [ "$PP_BUDGET_REMAINING_PCT" -lt 0 ] && PP_BUDGET_REMAINING_PCT=0
-            export PP_BUDGET_REMAINING_PCT
-          fi
+          # v0.4.1 review-fix (C1): the prior "budget_get returns used,max"
+          # comment was wrong — lib/budget.sh:62 returns a single integer.
+          # BSD `cut -d, -f2` on a non-CSV value returns the whole field,
+          # so (max-used)*100/max collapsed to 0 once any budget was
+          # spent, exporting PP_BUDGET_REMAINING_PCT=0 to router subshells
+          # and silently biasing lens selection toward "budget exhausted"
+          # forever. Use the canonical helper for the single source of
+          # truth invariant. Helper guards non-numeric internally.
+          PP_BUDGET_REMAINING_PCT=$(pp_budget_remaining_pct 2>/dev/null)
+          case "$PP_BUDGET_REMAINING_PCT" in
+            ''|*[!0-9]*) PP_BUDGET_REMAINING_PCT=100 ;;
+          esac
+          export PP_BUDGET_REMAINING_PCT
         fi
 
         _pp_router_signals=$(pp_router_extract_signals "${transcript_filtered:-}" "${_pp_tool_calls_json:-[]}" 2>/dev/null || printf '{}')
@@ -1337,6 +1379,29 @@ fi
 # Resolve monitor: rotate through PP_LENS_COUNT lenses based on time slot (30s per lens)
 # Plus 1 tip slot = (PP_LENS_COUNT + 1) total slots; with the default 7 lenses that's
 # an 8-slot, 4-minute full cycle.
+# v0.4.1 Task 2: PP_DISPLAY_STALE_S default scales with cycle interval.
+# Old hardcoded 600s was too tight: any cycle delayed by budget contention
+# or LLM latency made ALL lens caches stale at the same moment, silently
+# falling through to the tip cache. New default: max(900, 3*PP_PARALLEL_
+# INTERVAL_S). Users who bump the cycle interval get proportional headroom.
+if [ -z "${PP_DISPLAY_STALE_S:-}" ]; then
+  _pp_stale_default=$(( ${PP_PARALLEL_INTERVAL_S:-300} * 3 ))
+  [ "$_pp_stale_default" -lt 900 ] && _pp_stale_default=900
+  PP_DISPLAY_STALE_S="$_pp_stale_default"
+  unset _pp_stale_default
+fi
+# v0.4.1 review-fix (I3): non-numeric env (user misconfig) would crash
+# the integer comparisons + division below ("expected integer"). Fall
+# back to the scaled default — same formula as the unset branch.
+case "$PP_DISPLAY_STALE_S" in
+  ''|*[!0-9]*)
+    _pp_stale_default=$(( ${PP_PARALLEL_INTERVAL_S:-300} * 3 ))
+    [ "$_pp_stale_default" -lt 900 ] && _pp_stale_default=900
+    PP_DISPLAY_STALE_S="$_pp_stale_default"
+    unset _pp_stale_default
+    ;;
+esac
+
 mon_topic=""
 mon_body=""
 mon_age_s=0          # Age of the picked observation in seconds (0 if none).
@@ -1362,7 +1427,7 @@ while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
     _pp_mtime=$(stat -c %Y "$PP_CACHE_DISPLAY" 2>/dev/null \
              || stat -f %m "$PP_CACHE_DISPLAY" 2>/dev/null) || _pp_mtime=0
     _pp_age=$(( _pp_now - _pp_mtime ))
-    if [ "$_pp_age" -gt "${PP_DISPLAY_STALE_S:-600}" ]; then
+    if [ "$_pp_age" -gt "${PP_DISPLAY_STALE_S}" ]; then
       # Slot is stale — keep probing for a fresher one.
       _pp_probe_i=$((_pp_probe_i + 1))
       continue
@@ -1448,10 +1513,25 @@ elif [ "$tip_valid" -eq 1 ]; then
   topic_line="${aurora_hue}▸${R}  ${BOLD}${CYAN_SOFT}${tip_topic}${R}"
   body_line=""
 else
-  # v0.4 freshness "C": idle fallback when all lens slots are stale or
-  # empty AND no tip is available. Honest "no fresh insight" beats
-  # rendering a 30-min-old advisory the user has already addressed.
-  topic_line="${aurora_hue:-}◌${R}  ${DIM_A}idle — no fresh insight in last $((${PP_DISPLAY_STALE_S:-600}/60))m${R}"
+  # v0.4.1 Task 4: budget-aware idle fallback. When the daily budget is
+  # the actual cause of "no fresh observations", say so. Otherwise the
+  # honest generic "no fresh insight" message from v0.4. Reuses the
+  # _pp_budget_pct + threshold envs computed for the line-1 pip so all
+  # surfaces speak the same numbers. (GPT plan-review C2: env-driven,
+  # not hardcoded.) midnight = local time per current `date`.
+  _idle_pct="${_pp_budget_pct:-100}"
+  _idle_red="${_pp_red_used:-95}"
+  _idle_warn="${_pp_warn_used:-80}"
+  if [ "$_idle_pct" -le "$(( 100 - _idle_red ))" ]; then
+    # v0.4.1 review-fix (M1, GPT #4): "reached" implied 0%; reword to
+    # match actual state. "near cap" + "% headroom" stays self-consistent
+    # with the line-1 pip's "% remaining" framing.
+    topic_line="${aurora_hue:-}◌${R}  ${DIM_A}paused — daily budget near cap (${_idle_pct}% headroom); resets at local midnight${R}"
+  elif [ "$_idle_pct" -le "$(( 100 - _idle_warn ))" ]; then
+    topic_line="${aurora_hue:-}◌${R}  ${DIM_A}idle — budget at ${_idle_pct}% remaining; cycles may pause soon${R}"
+  else
+    topic_line="${aurora_hue:-}◌${R}  ${DIM_A}idle — no fresh insight in last $((${PP_DISPLAY_STALE_S}/60))m${R}"
+  fi
   body_line=""
 fi
 

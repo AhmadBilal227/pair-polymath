@@ -62,3 +62,31 @@ budget_reserve() {
 budget_get() {
   cat "$PP_BUDGET_FILE" 2>/dev/null || echo 0
 }
+
+# pp_budget_remaining_pct
+# Stdout: integer 0-100 representing remaining daily budget headroom.
+# Clamps to [0, 100] so >cap stays at 0, not negative. Single source of
+# truth for "how much budget is left" — consumed by statusline line-1
+# pip, budget-aware idle fallback, and doctor budget-pressure check.
+#
+# Reuses PP_BUDGET_FILE + budget_get to stay DRY with this lib's
+# date-stamped path logic. No lock; reads are racy with concurrent
+# budget_inc but we only need approximate state for UI/diagnostic.
+pp_budget_remaining_pct() {
+  local _max="${PP_MAX_DAILY_CALLS:-10000}"
+  # Guard: non-numeric or non-positive max → fall back to default cap.
+  case "$_max" in
+    ''|*[!0-9]*) _max=10000 ;;
+  esac
+  [ "$_max" -le 0 ] && _max=10000
+  local _used
+  _used=$(budget_get)
+  # Guard: non-numeric → treat as 0 (optimistic, but safer than nan).
+  case "$_used" in
+    ''|*[!0-9]*) _used=0 ;;
+  esac
+  local _pct=$(( 100 * (_max - _used) / _max ))
+  [ "$_pct" -lt 0 ] && _pct=0
+  [ "$_pct" -gt 100 ] && _pct=100
+  printf '%d' "$_pct"
+}

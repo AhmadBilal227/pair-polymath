@@ -338,6 +338,52 @@ doctor_check_coreutils() {
   return 1
 }
 
+doctor_check_budget_pressure() {
+  # v0.4.1 Task 5 — surface daily-budget pressure proactively in doctor.
+  # Green below PP_BUDGET_WARN_PCT used (default 80%).
+  # Yellow at PP_BUDGET_WARN_PCT-PP_BUDGET_RED_PCT (80-95%).
+  # Red at PP_BUDGET_RED_PCT+ (95%+): cycles will skip.
+  # Same thresholds as the line-1 pip + idle fallback — single source.
+  # (GPT plan-review C1: unified envs across all surfaces.)
+  if ! type pp_budget_remaining_pct >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/budget.sh" 2>/dev/null || true
+  fi
+  if ! type pp_budget_remaining_pct >/dev/null 2>&1; then
+    # v0.4.1 review-fix (I4, GPT #7): a missing budget helper is a broken
+    # install, not a degraded state. Red so the user re-runs install.sh
+    # instead of silently flying blind on budget pressure.
+    _pp_doctor_red "budget pressure" "lib/budget.sh pp_budget_remaining_pct helper unavailable — broken install; re-run install.sh"
+    return 2
+  fi
+  local _pct _used _warn _red
+  _pct=$(pp_budget_remaining_pct 2>/dev/null)
+  case "$_pct" in ''|*[!0-9]*) _pct=100 ;; esac
+  _used=$(( 100 - _pct ))
+  _warn="${PP_BUDGET_WARN_PCT:-80}"
+  _red="${PP_BUDGET_RED_PCT:-95}"
+  case "$_warn" in ''|*[!0-9]*) _warn=80 ;; esac
+  case "$_red"  in ''|*[!0-9]*) _red=95  ;; esac
+  # v0.4.1 review-fix (I2): lower-bound clamp. WARN/RED=0 → permanent red.
+  [ "$_warn" -lt 1 ] && _warn=80
+  [ "$_red"  -lt 1 ] && _red=95
+  # v0.4.1 review-fix (I1, all-three-reviewers): detect inverted thresholds
+  # and surface as yellow — the amber zone vanishes silently otherwise.
+  if [ "$_warn" -ge "$_red" ]; then
+    _pp_doctor_yellow "budget pressure" "PP_BUDGET_WARN_PCT (${_warn}) >= PP_BUDGET_RED_PCT (${_red}) — amber zone disabled; fix in user.env"
+    return 1
+  fi
+  if [ "$_used" -ge "$_red" ]; then
+    _pp_doctor_red "budget pressure" "${_pct}% remaining; cycles will skip — raise PP_MAX_DAILY_CALLS or wait for midnight reset"
+    return 2
+  elif [ "$_used" -ge "$_warn" ]; then
+    _pp_doctor_yellow "budget pressure" "${_pct}% remaining (${_used}% used); raise PP_MAX_DAILY_CALLS if cycles pause"
+    return 1
+  fi
+  _pp_doctor_green "budget pressure" "${_pct}% remaining"
+  return 0
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -400,7 +446,7 @@ pp_doctor_run() {
                 doctor_check_settings_json doctor_check_statusline_wired doctor_check_hooks_wired \
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
                 doctor_check_prompts doctor_check_transcript_libs doctor_check_router_libs \
-                doctor_check_coreutils doctor_check_statusline_smoke"
+                doctor_check_coreutils doctor_check_budget_pressure doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

@@ -3,6 +3,32 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.4.1] — 2026-05-13
+
+The **budget-visibility release**. Resolves the dogfood-discovered "only seeing tip rotation, no lens insights" bug: when the daily LLM call cap exhausts mid-day (especially common in multi-session use), cycles silently stopped producing observations and the user had no way to tell *why*. v0.4.1 surfaces budget pressure at every diagnostic surface — line-1 chrome, line-2 idle fallback, `polymath doctor`, and `polymath status`. **385 bats tests** (+17 in `test/budget-visibility.bats`).
+
+### Added
+- **`lib/budget.sh::pp_budget_remaining_pct`** — single-source-of-truth helper returning integer 0-100 representing remaining daily-budget headroom. Reused by the four downstream surfaces. Internal guards: non-numeric `PP_MAX_DAILY_CALLS` falls back to 10000; non-numeric/empty budget file treats `used=0` (optimistic); over-cap clamps to 0 (never negative).
+- **Line-1 budget pip** — amber `⚡N%` glyph fires when ≥`PP_BUDGET_WARN_PCT` (default 80%) used, red `⚠N%` at ≥`PP_BUDGET_RED_PCT` (default 95%). Inserted immediately after the cost segment so the warning is cost-adjacent. Nothing rendered when healthy.
+- **Budget-aware idle fallback** on line 2 — three variants ladder up: "paused — daily budget near cap (N% headroom); resets at local midnight" (≥95% used), "idle — budget at N% remaining; cycles may pause soon" (80-94% used), "idle — no fresh insight in last Mm" (healthy). Reuses the same env thresholds the line-1 pip consumes.
+- **Doctor check #16 — "budget pressure"**. Green <80% used, yellow 80-94%, red ≥95% with the hint "raise PP_MAX_DAILY_CALLS or wait for midnight reset". Doctor goes 15 → 16 checks.
+- **`polymath status` Budget line** — prints `✓ GREEN` / `⚡ YELLOW` / `⚠ RED (N% remaining)` using the same thresholds as the statusline + doctor.
+- **`PP_DISPLAY_STALE_S` default scaling** — old hardcoded 600s was too tight for the 300s cycle interval. New default: `max(900, 3*PP_PARALLEL_INTERVAL_S)`. Users who tune the cycle interval get proportional headroom.
+- **`PP_BUDGET_WARN_PCT` / `PP_BUDGET_RED_PCT`** — new user-tunable thresholds (commented in `config/default.env`, documented in `docs/customization.md`). Misconfigurations (inversion, out-of-range, non-numeric) are clamped to defaults; doctor surfaces inversion as a yellow diagnostic so the user knows the amber zone is disabled.
+
+### Fixed
+- **Critical: `PP_BUDGET_REMAINING_PCT` exported as 0 to router subshells** once any budget was spent. Pre-existing `bin/statusline.sh:920-927` code parsed `budget_get` output with `cut -d, -f2` expecting "used,max" CSV — but `lib/budget.sh::budget_get` always returned a single integer. BSD cut's missing-delimiter behavior collapses `(max-used)*100/max` to 0, silently biasing the router LLM toward "low-budget mode" forever. Caught by debugger-agent during the 4-way review. Now routes through the canonical helper.
+- **Critical: line-1 pip silently crashed** when `pp_budget_remaining_pct` returned empty. `var=$(cmd)` succeeds regardless of cmd exit, so the `||` fallback was dead code; `[ "" -le N ]` printed "integer expression expected" to stderr and skipped the pip. Caught by code-reviewer-agent.
+- **Important: inverted `WARN_PCT >= RED_PCT` silently collapsed the amber zone.** Caught by all three of: debugger, code-reviewer, GPT-5. Statusline now resets to defaults; doctor surfaces it as a yellow diagnostic.
+- **Important: `WARN_PCT=0` triggered permanent amber pip** ("remaining ≤ 100" always true). Added lower-bound clamp.
+- **Important: non-numeric `PP_DISPLAY_STALE_S` crashed integer arithmetic.** Case-guard with the same fallback as the unset branch.
+- **Important: missing `lib/budget.sh` degraded doctor to yellow.** A broken install is red, not soft-warning. Now emits "re-run install.sh" hint.
+
+### Reviewed
+PR went through a 4-way parallel "ralph cycle": GPT-5 review-code, `code-refactoring:code-reviewer` agent, `debugging-toolkit:debugger` agent, and `application-performance:observability-engineer` agent (the domain-specific seat — this PR is fundamentally an observability deliverable). Surfaced 2 Critical + 6 Important fixes captured above. Minor findings (TZ-aware reset language, `⚠0%` glyph ambiguity, exact-boundary tests at 79%/80%, doctor-#16 bats coverage) deferred to v0.5.
+
+---
+
 ## [0.4.0] — 2026-05-13
 
 The **navigator release**. Polymath moves from *forum* (all 7 lenses fire every cycle on thin context) to *navigator* (1–3 lenses fire on richer context, chosen by phase). Net per-cycle cost: **−30% to −50%**, with **~3× input token density** for the lenses that do fire. **368 bats tests** across all suites.

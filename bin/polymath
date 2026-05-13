@@ -116,11 +116,31 @@ case "$cmd" in
       used_pct=$((today_calls * 100 / cap))
     fi
 
+    # v0.4.1 review-fix (I5): surface budget pressure with the same
+    # thresholds + glyph language as the statusline pip so a user
+    # invoking `polymath status` sees the same warn/red signal that
+    # appears in their chrome. Reuses the canonical helper.
+    pressure_pct=$(pp_budget_remaining_pct 2>/dev/null)
+    case "$pressure_pct" in ''|*[!0-9]*) pressure_pct=100 ;; esac
+    pressure_warn="${PP_BUDGET_WARN_PCT:-80}"
+    pressure_red="${PP_BUDGET_RED_PCT:-95}"
+    case "$pressure_warn" in ''|*[!0-9]*) pressure_warn=80 ;; esac
+    case "$pressure_red"  in ''|*[!0-9]*) pressure_red=95  ;; esac
+    pressure_used=$((100 - pressure_pct))
+    if [ "$pressure_used" -ge "$pressure_red" ]; then
+      pressure_glyph=$(printf '\033[31m⚠ RED\033[0m')
+    elif [ "$pressure_used" -ge "$pressure_warn" ]; then
+      pressure_glyph=$(printf '\033[33m⚡ YELLOW\033[0m')
+    else
+      pressure_glyph=$(printf '\033[32m✓ GREEN\033[0m')
+    fi
+
     printf '\n\033[1mPair Polymath status\033[0m\n'
     printf '  Plugin root:     %s\n' "$PP_ROOT"
     printf '  Version:         %s\n' "$(cat "$PP_ROOT/VERSION")"
     printf '  Today (%s)\n' "$(date +%Y-%m-%d)"
     printf '    Calls:         %s / %s (%s%%)\n' "$today_calls" "$cap" "$used_pct"
+    printf '    Budget:        %s (%s%% remaining)\n' "$pressure_glyph" "$pressure_pct"
 
     # Lens registry summary
     # shellcheck disable=SC1091

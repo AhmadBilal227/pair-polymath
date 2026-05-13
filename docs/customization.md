@@ -6,9 +6,12 @@ All knobs live in `config/default.env`. To override, copy any line to `~/.claude
 
 | Var | Default | Controls |
 |---|---|---|
-| `PP_MAX_DAILY_CALLS` | `3500` | Hard cap on total LLM calls per UTC day. The cycle gate reserves the worst-case 23 calls atomically; if reserving would push the count over this cap, the cycle is skipped entirely. Raise it if you have a generous OpenAI quota; lower it if you're cost-conscious. |
+| `PP_MAX_DAILY_CALLS` | `10000` | Hard cap on total LLM calls per local-day budget file. The cycle gate reserves the worst-case 23 calls atomically; if reserving would push the count over this cap, the cycle is skipped entirely. Was 3500 in v0.2; bumped to 10000 in v0.4 because multi-session users were silently exhausting it mid-day. Raise it if you have a generous OpenAI quota; lower it if you're cost-conscious. |
 | `PP_PARALLEL_INTERVAL_S` | `300` | Minimum seconds between full lens cycles. 300 = 5 min. Lower for more frequent observations (costs more); raise for less. |
 | `PP_IDLE_THRESHOLD_S` | `1800` | Idle threshold in seconds. If your transcript hasn't changed in this long, the next cycle skips LLM calls entirely (passive mode). Raise if you do long sessions of just thinking; lower for tight-budget sessions. |
+| `PP_BUDGET_WARN_PCT` | `80` | % USED at which the line-1 statusline starts showing an amber pip (`⚡N%` remaining) and `polymath doctor` flips yellow for the "budget pressure" check. Set lower (e.g. `60`) to be warned earlier. Must be `< PP_BUDGET_RED_PCT`; inversions reset to defaults with a yellow doctor diagnostic. |
+| `PP_BUDGET_RED_PCT` | `95` | % USED at which line-1 turns the pip red (`⚠N%`), the line-2 idle fallback says "paused — daily budget near cap; resets at local midnight", and `polymath doctor` flips red with a remediation hint. |
+| `PP_DISPLAY_STALE_S` | `max(900, 3*PP_PARALLEL_INTERVAL_S)` | Maximum age in seconds before a cached lens observation is considered stale and skipped during rotation (line 2 falls through to the global tip or idle message). Default scales with the cycle interval so a delayed cycle doesn't stampede all lens caches into "stale" at once. The default is computed at runtime — override only if you want to pin a fixed window. |
 
 ## Models
 

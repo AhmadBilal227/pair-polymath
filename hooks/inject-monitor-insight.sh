@@ -6,6 +6,9 @@
 # within 30 min. Different lenses with different content always inject.
 
 set -u
+# v0.4.2 privacy fix: hash + time idempotency files written here must be
+# owner-only — they're per-session metadata about which lenses fired.
+umask 077
 
 input=$(cat 2>/dev/null || echo '{}')
 session_id=$(echo "$input" | jq -r '.session_id // empty' 2>/dev/null)

@@ -82,8 +82,18 @@ Update these if you've measured your actual usage and want sharper estimates.
 
 | Var | Default | Controls |
 |---|---|---|
-| `PP_CACHE_DIR` | `~/.claude/cache` | Where per-cycle observations, budget tracker, and metrics.jsonl live. |
+| `PP_CACHE_DIR` | `~/.claude/cache` | Where per-cycle observations, budget tracker, and metrics.jsonl live. Cache files are mode `600`, parent dir `700`, since v0.4.2. Run `polymath cache list` to inspect, `polymath cache clear` to remediate lax-mode legacy files. |
 | `PP_STATE_DIR` | `~/.claude/pair-polymath` | Where user-supplied lenses, prompts, and `user.env` are read from. |
+
+### Cache layout (v0.4.2+)
+
+| File pattern | What it holds | Lifetime |
+|---|---|---|
+| `cc-tips-<16hex>.txt` | LLM-personalized tip rotation, **scoped to one project** (sha256 of git-toplevel or cwd). Project A's tips never leak into project B. | 30 min |
+| `cc-monitor-<session>-<lens>.txt` | One lens observation per session/lens. Session-scoped, id-keyed (reordering lenses won't serve stale observations under the wrong identity). | 30 min |
+| `cc-monitor-injected-{hash,time}-*.txt` | Per-lens idempotency state for the inject hook. | session lifetime |
+| `cc-monitor-budget-<YYYYMMDD>.txt` | Daily LLM call counter; the daily cap accounting. **Never auto-deleted** (resets at local midnight via new file). | 1 day |
+| `last-cycle-payload.json` | Per-cycle privacy log: what was sent to LLMs (byte counts + 500-char previews). | 1 cycle |
 
 ## Memory subsystem (v0.3 Phase 2.3 — off-by-default)
 

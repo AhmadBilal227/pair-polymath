@@ -3,6 +3,8 @@
 # cost, update, self-test.
 
 set -u
+# v0.4.2 privacy fix: every cache + user.env write inherits 0600.
+umask 077
 
 PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
@@ -192,6 +194,77 @@ case "$cmd" in
     # shellcheck disable=SC1091
     . "$PP_ROOT/lib/doctor.sh"
     pp_doctor_run "$@"
+    ;;
+
+  cache)
+    # v0.4.2: cache hygiene subcommands.
+    #   cache clear         — wipe ALL lens caches + tip caches + injection idempotency files
+    #   cache clear --tips  — wipe only the tip caches (per-project)
+    #   cache clear --orphans — wipe only orphaned-session lens caches (not the current one)
+    #   cache list          — show what's there with mode + size + age
+    shift
+    _pp_cache_sub="${1:-list}"
+    _pp_cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+    case "$_pp_cache_sub" in
+      list)
+        # shellcheck disable=SC1091
+        . "$PP_ROOT/lib/grounding.sh"
+        printf '\n\033[1mPair Polymath cache (%s)\033[0m\n' "$_pp_cache_dir"
+        if [ ! -d "$_pp_cache_dir" ]; then
+          printf '  (empty / never run)\n\n'
+          exit 0
+        fi
+        _pp_cache_dir_mode=$(pp_file_mode "$_pp_cache_dir")
+        [ -z "$_pp_cache_dir_mode" ] && _pp_cache_dir_mode="?"
+        printf '  Dir mode: %s (target: 700)\n' "$_pp_cache_dir_mode"
+        _pp_cache_total=$(find "$_pp_cache_dir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+        _pp_cache_tips=$(find "$_pp_cache_dir" -maxdepth 1 -name 'cc-tips*' -type f 2>/dev/null | wc -l | tr -d ' ')
+        # Review G9: exclude budget files from the lens count; they're
+        # date-stamped daily-cap accounting, not lens observations.
+        _pp_cache_lens=$(find "$_pp_cache_dir" -maxdepth 1 -name 'cc-monitor-*' ! -name 'cc-monitor-budget-*' -type f 2>/dev/null | wc -l | tr -d ' ')
+        _pp_cache_budget=$(find "$_pp_cache_dir" -maxdepth 1 -name 'cc-monitor-budget-*' -type f 2>/dev/null | wc -l | tr -d ' ')
+        _pp_cache_loose=$(find "$_pp_cache_dir" -maxdepth 1 -type f ! -perm 600 2>/dev/null | wc -l | tr -d ' ')
+        printf '  Files:    %s total (%s tips, %s lens/hook, %s budget)\n' "$_pp_cache_total" "$_pp_cache_tips" "$_pp_cache_lens" "$_pp_cache_budget"
+        if [ "$_pp_cache_loose" -gt 0 ]; then
+          printf '  \033[33m! %s files with mode != 600 (run `polymath cache clear` to remediate)\033[0m\n' "$_pp_cache_loose"
+        fi
+        printf '\n'
+        ;;
+      clear)
+        shift
+        _pp_clear_what="${1:-all}"
+        case "$_pp_clear_what" in
+          --tips)
+            find "$_pp_cache_dir" -maxdepth 1 -name 'cc-tips*' -type f -exec rm -f {} \; 2>/dev/null
+            printf 'polymath: cleared tip caches in %s\n' "$_pp_cache_dir"
+            ;;
+          --orphans)
+            # Tricky: there's no "current session" notion outside Claude Code,
+            # so wipe everything older than 24h. New cycles regenerate fresh.
+            # Review G4: include the legacy `cc-tips.txt` (no project key)
+            # in the sweep — otherwise the v0.4.1-and-earlier global file
+            # persists forever and continues to be a privacy hazard for any
+            # tool that still reads it.
+            find "$_pp_cache_dir" -maxdepth 1 \( -name 'cc-monitor-*.txt' -o -name 'cc-tips-*.txt' -o -name 'cc-tips.txt' \) -type f -mtime +1 -exec rm -f {} \; 2>/dev/null
+            printf 'polymath: cleared orphan caches (mtime >24h) in %s\n' "$_pp_cache_dir"
+            ;;
+          all|"")
+            # Preserve budget files (date-stamped, inert, needed for daily cap).
+            find "$_pp_cache_dir" -maxdepth 1 \( -name 'cc-monitor-*.txt' -o -name 'cc-tips*' \) -type f ! -name 'cc-monitor-budget-*' -exec rm -f {} \; 2>/dev/null
+            chmod 700 "$_pp_cache_dir" 2>/dev/null || true
+            printf 'polymath: cleared lens + tip caches in %s (budget files preserved)\n' "$_pp_cache_dir"
+            ;;
+          *)
+            printf 'polymath cache clear: unknown flag %s (use --tips | --orphans | all)\n' "$_pp_clear_what" >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      *)
+        printf 'polymath cache: unknown subcommand %s (use list | clear)\n' "$_pp_cache_sub" >&2
+        exit 2
+        ;;
+    esac
     ;;
 
   disable)

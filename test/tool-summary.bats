@@ -113,6 +113,18 @@ teardown() { rm -rf "$HOME"; }
   ! echo "$output" | grep -qF 'hunter2'
 }
 
+@test "render: GPT gate-C1 — FAILS CLOSED when _pp_tx_redact is unavailable" {
+  # If the redactor isn't loaded (e.g., transcript.sh source-in failed),
+  # the renderer must NOT print raw target/summary content. It must emit
+  # the canonical empty-signal instead.
+  unset -f _pp_tx_redact 2>/dev/null || true
+  json='[{"tool":"Bash","id":"a","target":"echo sk-leaked12345abcdef1234567890","summary":"oops"}]'
+  run pp_tool_summary_render "$json"
+  [ "$status" -eq 0 ]
+  ! printf '%s' "$output" | grep -qF 'sk-leaked'
+  printf '%s' "$output" | grep -qF '(no recent tool calls)'
+}
+
 @test "render: all common tool kinds (Bash/Edit/Write/Read/Grep/WebFetch)" {
   json='[
     {"tool":"Read","id":"a","target":"/a","summary":null},

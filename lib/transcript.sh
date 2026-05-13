@@ -17,7 +17,7 @@
 #   PP_TRANSCRIPT_MAX               (16384) Output cap, tail-biased
 #   PP_TRANSCRIPT_USER_TRUNC        (2048)  Per-user-message cap
 #   PP_TRANSCRIPT_ASSISTANT_TRUNC   (4096)  Per-assistant-text cap
-#   PP_TRANSCRIPT_KEEP_THINKING     (1)     1=keep, 0=drop
+#   PP_TRANSCRIPT_KEEP_THINKING     (0)     1=keep, 0=drop (default 0 — CoT leak)
 #   PP_TRANSCRIPT_TOOL_TRUNC        (512)   Truncate tool target/summary
 #   PP_TOOL_SUMMARY_MAX             (20)   Max tool calls retained
 #
@@ -33,7 +33,11 @@ _PP_TRANSCRIPT_SOURCED=1
 : "${PP_TRANSCRIPT_MAX:=16384}"
 : "${PP_TRANSCRIPT_USER_TRUNC:=2048}"
 : "${PP_TRANSCRIPT_ASSISTANT_TRUNC:=4096}"
-: "${PP_TRANSCRIPT_KEEP_THINKING:=1}"
+# GPT gate-review C2: default 0. Sending Claude's chain-of-thought to
+# downstream analyst LLMs (OpenAI gpt-5 by default) is a cross-vendor
+# CoT-leak / compliance concern. Users who want the extra signal can
+# explicitly opt in via env (PP_TRANSCRIPT_KEEP_THINKING=1).
+: "${PP_TRANSCRIPT_KEEP_THINKING:=0}"
 : "${PP_TRANSCRIPT_TOOL_TRUNC:=512}"
 : "${PP_TOOL_SUMMARY_MAX:=20}"
 
@@ -59,24 +63,52 @@ if ! command -v pp_memory_redact_body >/dev/null 2>&1; then
 fi
 
 # Built-in fallback redactor. awk-based for BusyBox/Alpine compatibility
-# (no sed -E). Handles 4 canonical key shapes; the project's
-# lib/memory/redact.sh has the 11-pattern comprehensive list — this is
-# the safety net when redact.sh failed to source.
+# (no sed -E). Mirrors the full 11-pattern set from lib/memory/redact.sh
+# so the safety net has the same coverage as the canonical path.
+# GPT gate-review C3: 4-pattern fallback let Bearer/Stripe/Slack/DB-URI/
+# email/dotenv classes through silently if redact.sh failed to source.
+# Patterns now mirror pp_memory_redact_body line-for-line.
 _pp_tx_redact_fallback() {
   awk '
     {
       line = $0
+      # URI userpass MUST run before email so user:pass@host.com is not
+      # eaten as an email match. Captures the scheme to preserve it.
+      while (match(line, /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^[:space:]:\/?#@]+:[^[:space:]@]+@/)) {
+        scheme = line
+        sub(/:\/\/.*/, "", scheme)
+        # Take the part before "://"
+        line = substr(line, 1, RSTART-1) scheme "://[REDACTED-USERPASS]@" substr(line, RSTART+RLENGTH)
+      }
       while (match(line, /sk-[A-Za-z0-9_-]{20,}/)) {
         line = substr(line, 1, RSTART-1) "[REDACTED-OPENAI]" substr(line, RSTART+RLENGTH)
       }
-      while (match(line, /AKIA[0-9A-Z]{16}/)) {
+      while (match(line, /Bearer [A-Za-z0-9._-]{20,}/)) {
+        line = substr(line, 1, RSTART-1) "[REDACTED-BEARER]" substr(line, RSTART+RLENGTH)
+      }
+      while (match(line, /ghp_[A-Za-z0-9]{20,}/)) {
+        line = substr(line, 1, RSTART-1) "[REDACTED-GHP]" substr(line, RSTART+RLENGTH)
+      }
+      while (match(line, /github_pat_[A-Za-z0-9_]{20,}/)) {
+        line = substr(line, 1, RSTART-1) "[REDACTED-GHPAT]" substr(line, RSTART+RLENGTH)
+      }
+      while (match(line, /AKIA[A-Z0-9]{16}/)) {
         line = substr(line, 1, RSTART-1) "[REDACTED-AWS]" substr(line, RSTART+RLENGTH)
       }
-      while (match(line, /(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}/)) {
-        line = substr(line, 1, RSTART-1) "[REDACTED-GH]" substr(line, RSTART+RLENGTH)
+      while (match(line, /xox[abprs]-[A-Za-z0-9-]{20,}/)) {
+        line = substr(line, 1, RSTART-1) "[REDACTED-SLACK]" substr(line, RSTART+RLENGTH)
       }
-      while (match(line, /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/)) {
+      while (match(line, /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/)) {
+        line = substr(line, 1, RSTART-1) "[REDACTED-EMAIL]" substr(line, RSTART+RLENGTH)
+      }
+      while (match(line, /(pk|sk|rk)_(live|test)_[A-Za-z0-9]{20,}/)) {
+        line = substr(line, 1, RSTART-1) "[REDACTED-STRIPE]" substr(line, RSTART+RLENGTH)
+      }
+      while (match(line, /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/)) {
         line = substr(line, 1, RSTART-1) "[REDACTED-JWT]" substr(line, RSTART+RLENGTH)
+      }
+      while (match(line, /(postgres|postgresql|mysql|mongodb|mongodb\+srv|redis|amqp):\/\/[^[:space:]]+/)) {
+        line = substr(line, 1, RSTART-1) "[REDACTED-DBURI]" substr(line, RSTART+RLENGTH)
       }
       print line
     }

@@ -73,11 +73,15 @@ pp_tool_summary_render() {
   fi
 
   # Redact via the shared chain from transcript.sh.
+  # GPT gate-review C1: FAIL CLOSED, not open. If _pp_tx_redact is
+  # somehow unavailable (source-in failed, function unset by caller,
+  # etc.) we must NOT print raw tool targets/summaries — they may
+  # contain file paths or output snippets carrying secrets. Emit the
+  # canonical empty signal instead and let the analyst see "(no recent
+  # tool calls)". Better to silence the feature than to leak.
   if command -v _pp_tx_redact >/dev/null 2>&1; then
     printf '%s' "$_lines" | _pp_tx_redact
   else
-    # Last-resort: print verbatim. _pp_tx_redact should always be
-    # available when this lib is loaded, but defensive.
-    printf '%s' "$_lines"
+    printf '(no recent tool calls)'
   fi
 }

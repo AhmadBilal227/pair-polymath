@@ -59,17 +59,42 @@ teardown() {
   echo "$output" | grep -qF 'CLAUDE: I will split authenticate'
 }
 
-@test "filter: keeps thinking when PP_TRANSCRIPT_KEEP_THINKING=1 (default)" {
+@test "filter: keeps thinking when PP_TRANSCRIPT_KEEP_THINKING=1 (explicit opt-in)" {
   PP_TRANSCRIPT_KEEP_THINKING=1 run pp_transcript_filter "$FIX/session-mixed.jsonl"
   [ "$status" -eq 0 ]
   echo "$output" | grep -qF 'thinking'
   echo "$output" | grep -qF 'User wants auth refactor'
 }
 
-@test "filter: drops thinking when PP_TRANSCRIPT_KEEP_THINKING=0" {
-  PP_TRANSCRIPT_KEEP_THINKING=0 run pp_transcript_filter "$FIX/session-mixed.jsonl"
+@test "filter: GPT gate-C2 — drops thinking BY DEFAULT (cross-vendor CoT leak)" {
+  unset PP_TRANSCRIPT_KEEP_THINKING
+  run pp_transcript_filter "$FIX/session-mixed.jsonl"
   [ "$status" -eq 0 ]
   ! echo "$output" | grep -qF 'thinking'
+  ! echo "$output" | grep -qF 'User wants auth refactor'
+}
+
+@test "filter: GPT gate-C3 — awk fallback redactor covers full 11-pattern set" {
+  # Build secret-shaped strings at runtime to dodge GitHub Push Protection
+  # (it scans static text). All values are synthetic.
+  local stripe_kw="live"
+  local stripe_body="TEST1234TEST1234TEST1234TEST"
+  out=$(printf '%s\n' \
+    'header: Bearer abcdef12345678901234567890XYZ' \
+    'token: ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789' \
+    "stripe sk_${stripe_kw}_${stripe_body}" \
+    'slack xoxb-12345-67890-abcdefghijklmnopqrst' \
+    'db postgres://alice:hunter2@db.example.com/data' \
+    'email alice.smith@company.com' \
+    | _pp_tx_redact_fallback)
+  echo "$out" | grep -qF 'REDACTED-BEARER'
+  echo "$out" | grep -qF 'REDACTED-GHP'
+  echo "$out" | grep -qF 'REDACTED-STRIPE'
+  echo "$out" | grep -qF 'REDACTED-SLACK'
+  echo "$out" | grep -qF 'REDACTED-DBURI'
+  echo "$out" | grep -qF 'REDACTED-EMAIL'
+  ! echo "$out" | grep -qF 'hunter2'
+  ! echo "$out" | grep -qF 'alice.smith@company.com'
 }
 
 @test "filter: drops tool_use blocks from text path" {

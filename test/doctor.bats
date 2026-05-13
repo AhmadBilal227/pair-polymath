@@ -104,6 +104,19 @@ teardown() {
   [[ "$output" == *"7 loaded"* ]]
 }
 
+@test "doctor: router libs check #14 verifies prompt render + ID round-trip (v0.4 P2.5)" {
+  run bash "$PP_ROOT/bin/polymath" doctor
+  echo "$output" | grep -qF 'router libs'
+  echo "$output" | grep -qF 'pick + render + ID round-trip verified'
+}
+
+@test "doctor: coreutils check #15 recommends brew install on macOS when absent (v0.4 P2.5)" {
+  run bash "$PP_ROOT/bin/polymath" doctor
+  echo "$output" | grep -qF 'coreutils'
+  # Either green (timeout present) OR yellow with brew recommendation
+  echo "$output" | grep -qE 'coreutils.*(timeout binary present|brew install coreutils|install via apt)'
+}
+
 @test "doctor: transcript libs check fires and verifies canonical redactor (v0.4 Phase 1)" {
   # Hermetic HOME means doctor may exit non-zero on settings.json checks;
   # we only assert the new check line appears with the canonical-redactor

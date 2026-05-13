@@ -97,6 +97,37 @@ teardown() {
   ! echo "$output" | grep -qF 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AB'
 }
 
+@test "filter: redacts postgres URI (canonical redactor, AI-eng C1)" {
+  tmp="$(mktemp)"
+  printf '{"type":"user","message":{"role":"user","content":"connect postgres://alice:hunter2@db.example.com/mydb please"}}\n' > "$tmp"
+  run pp_transcript_filter "$tmp"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qF 'hunter2'
+  ! echo "$output" | grep -qF 'postgres://alice:'
+  echo "$output" | grep -qF 'REDACTED'
+  rm -f "$tmp"
+}
+
+@test "filter: redacts Bearer token (canonical redactor coverage)" {
+  tmp="$(mktemp)"
+  printf '{"type":"user","message":{"role":"user","content":"use Bearer abcdef12345678901234567890XYZ for auth"}}\n' > "$tmp"
+  run pp_transcript_filter "$tmp"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qF 'Bearer abcdef'
+  echo "$output" | grep -qF 'REDACTED'
+  rm -f "$tmp"
+}
+
+@test "filter: redacts email (canonical redactor coverage)" {
+  tmp="$(mktemp)"
+  printf '{"type":"user","message":{"role":"user","content":"ping me at alice.smith@company.com about the bug"}}\n' > "$tmp"
+  run pp_transcript_filter "$tmp"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qF 'alice.smith@company.com'
+  echo "$output" | grep -qF 'REDACTED-EMAIL'
+  rm -f "$tmp"
+}
+
 @test "filter: tail-clips to PP_TRANSCRIPT_MAX bytes" {
   big="$(mktemp)"
   i=0
@@ -109,6 +140,8 @@ teardown() {
   out_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
   [ "$out_bytes" -le 512 ]
   echo "$output" | grep -qF 'msg 499'
+  # Negative assertion — proves tail-bias actually drops the head (Debugger M1).
+  ! echo "$output" | grep -qE 'msg 0$'
   rm -f "$big"
 }
 
@@ -145,6 +178,23 @@ teardown() {
   echo "$output" | jq -e '.[] | select(.id == "toolu_001") | .tool == "Read"' >/dev/null
   echo "$output" | jq -e '.[] | select(.id == "toolu_001") | .target == "/repo/auth.ts"' >/dev/null
   echo "$output" | jq -e '.[] | select(.id == "toolu_001") | .summary | contains("authenticate")' >/dev/null
+}
+
+@test "tool_calls: null tool_use_id does NOT pigeon-hole collide (AI-eng C2)" {
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'EOF'
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_real","name":"Read","input":{"file_path":"/real.ts"}}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"orphan-no-id"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_real","content":[{"type":"text","text":"contents-of-real"}]}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"orphan-result-no-id"}]}]}}
+EOF
+  run pp_transcript_tool_calls "$tmp"
+  [ "$status" -eq 0 ]
+  # The orphan tool_use (no id) must NOT pick up the orphan tool_result's text.
+  ! echo "$output" | jq -e '.[] | select(.target == "orphan-no-id") | .summary | contains("orphan-result")' >/dev/null
+  # The real-id tool_use MUST correctly pair with its result.
+  echo "$output" | jq -e '.[] | select(.id == "tu_real") | .summary | contains("contents-of-real")' >/dev/null
+  rm -f "$tmp"
 }
 
 @test "tool_calls: interleaved use/use/result/result paired by ID (Critical #2)" {

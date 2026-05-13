@@ -23,7 +23,9 @@
 #
 # Bash 3.2-portable. Uses jq for parsing. Silently no-ops on missing
 # file. Malformed JSON lines are skipped (per-line try/catch in jq).
-# LC_ALL=C is scoped per-command (no global leakage).
+# No global LC_ALL=C (intentional — jq is locale-independent and awk
+# operations here are string-only; locale handling is the caller's
+# responsibility).
 
 if [ -n "${_PP_TRANSCRIPT_SOURCED:-}" ]; then return 0; fi
 _PP_TRANSCRIPT_SOURCED=1
@@ -35,20 +37,31 @@ _PP_TRANSCRIPT_SOURCED=1
 : "${PP_TRANSCRIPT_TOOL_TRUNC:=512}"
 : "${PP_TOOL_SUMMARY_MAX:=20}"
 
-# Optional sourcing of grounding.sh for pp_redact_secrets. Falls back to
-# a built-in awk-based redactor (BusyBox-compatible) if unavailable.
-if [ -z "${_PP_GROUNDING_SOURCED:-}" ]; then
-  _pp_tx_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [ -r "${_pp_tx_self_dir}/grounding.sh" ]; then
-    # shellcheck source=grounding.sh
-    . "${_pp_tx_self_dir}/grounding.sh" 2>/dev/null || true
+# Source the project's canonical redactor (lib/memory/redact.sh defines
+# pp_memory_redact_body, which covers 11 secret patterns including
+# URI-creds, Bearer, Stripe, Slack, JWT, DB-URIs, .env paths).
+# This is the IMPORTANT review fix from GPT plan-review round 2 / AI-eng
+# C1: the function name `pp_redact_secrets` (which earlier draft assumed)
+# does NOT exist in the codebase — only pp_memory_redact_body does.
+# Without this source, the fallback below runs 100% of cycles and leaks
+# 7 secret classes. Sourcing redact.sh is cheap (one-shot at load) and
+# the source-guard inside redact.sh makes re-sourcing a no-op.
+_pp_tx_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${_PP_GROUNDING_SOURCED:-}" ] && [ -r "${_pp_tx_self_dir}/grounding.sh" ]; then
+  # shellcheck source=grounding.sh
+  . "${_pp_tx_self_dir}/grounding.sh" 2>/dev/null || true
+fi
+if ! command -v pp_memory_redact_body >/dev/null 2>&1; then
+  if [ -r "${_pp_tx_self_dir}/memory/redact.sh" ]; then
+    # shellcheck source=memory/redact.sh
+    . "${_pp_tx_self_dir}/memory/redact.sh" 2>/dev/null || true
   fi
 fi
 
 # Built-in fallback redactor. awk-based for BusyBox/Alpine compatibility
-# (no sed -E). Handles canonical key shapes; the project's
-# lib/memory/redact.sh has the comprehensive list — this is the safety
-# net when nothing else loaded.
+# (no sed -E). Handles 4 canonical key shapes; the project's
+# lib/memory/redact.sh has the 11-pattern comprehensive list — this is
+# the safety net when redact.sh failed to source.
 _pp_tx_redact_fallback() {
   awk '
     {
@@ -70,12 +83,17 @@ _pp_tx_redact_fallback() {
   '
 }
 
-# Dispatch: prefer project redactor, fall back to built-in.
+# Dispatch: prefer the project's canonical pp_memory_redact_body (11
+# patterns), fall back to the 4-pattern awk built-in. pp_memory_redact_body
+# takes a BODY argument and writes redacted output to stdout — the
+# wrapper here adapts stdin → arg so callers can pipe in.
 _pp_tx_redact() {
-  if command -v pp_redact_secrets >/dev/null 2>&1; then
-    pp_redact_secrets
+  local _body
+  _body=$(cat)
+  if command -v pp_memory_redact_body >/dev/null 2>&1; then
+    pp_memory_redact_body "$_body"
   else
-    _pp_tx_redact_fallback
+    printf '%s' "$_body" | _pp_tx_redact_fallback
   fi
 }
 
@@ -194,15 +212,15 @@ pp_transcript_tool_calls() {
           else empty end
       ] as $events
     | ( $events
-        | map(select(.type == "tool_result"))
-        | map({key: (.tool_use_id // "?"), value: .})
+        | map(select(.type == "tool_result" and (.tool_use_id // "") != ""))
+        | map({key: .tool_use_id, value: .})
         | from_entries
       ) as $results_by_id
     | ( $events
         | map(select(.type == "tool_use"))
         | map(
             . as $u
-            | ($results_by_id[$u.id // "?"]) as $r
+            | (if ($u.id // "") != "" then $results_by_id[$u.id] else null end) as $r
             | {
                 tool:   ($u.name // "?"),
                 id:     ($u.id // null),

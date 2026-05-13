@@ -91,6 +91,28 @@ teardown() { rm -rf "$HOME"; }
   ! echo "$output" | grep -qF 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ'
 }
 
+@test "render: enforces PP_TOOL_SUMMARY_MAX even on uncapped input (GPT-C2 defense-in-depth)" {
+  json='[]'
+  i=0
+  while [ "$i" -lt 30 ]; do
+    json=$(printf '%s' "$json" | jq --arg n "$i" '. + [{tool:"Read",id:("u"+$n),target:("/f/"+$n),summary:null}]')
+    i=$((i + 1))
+  done
+  PP_TOOL_SUMMARY_MAX=5 run pp_tool_summary_render "$json"
+  [ "$status" -eq 0 ]
+  line_count=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
+  [ "$line_count" -eq 5 ]
+  echo "$output" | grep -qF '/f/29'
+  ! echo "$output" | grep -qF '/f/24 '
+}
+
+@test "render: redacts postgres URI in summary (canonical redactor)" {
+  json='[{"tool":"Bash","id":"a","target":"x","summary":"connect to postgres://alice:hunter2@db.example.com/db"}]'
+  run pp_tool_summary_render "$json"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qF 'hunter2'
+}
+
 @test "render: all common tool kinds (Bash/Edit/Write/Read/Grep/WebFetch)" {
   json='[
     {"tool":"Read","id":"a","target":"/a","summary":null},

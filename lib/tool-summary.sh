@@ -52,11 +52,13 @@ pp_tool_summary_render() {
     return 0
   fi
 
-  # Format. "%-6s %s" gives a 6-char tool-name column followed by target,
-  # then a separator + summary if present.
+  # Defense-in-depth cap (GPT review-code C2): the canonical cap lives in
+  # pp_transcript_tool_calls, but if a downstream caller in Phase 2 passes
+  # an uncapped array, the renderer applies the same cap as a safety net.
+  local _max="${PP_TOOL_SUMMARY_MAX:-20}"
   local _lines
-  _lines=$(printf '%s' "$_json" | jq -r '
-    .[]
+  _lines=$(printf '%s' "$_json" | jq -r --argjson n "$_max" '
+    (if length <= $n then . else .[length - $n:] end)[]
     | (
         ((.tool // "?") | .[0:6])
         + "   "

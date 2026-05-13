@@ -921,6 +921,20 @@ GROUND
           fi
         done
         _pp_router_picked=$(pp_router_surprise_inject "$_pp_router_picked" "$_pp_router_not_picked")
+
+        # v0.4 Phase 2.5 Track 2: emit per-cycle router telemetry BEFORE
+        # the blackout guard so picked_count reflects what the router
+        # actually returned, not what the guard restored. (AI-eng round-2
+        # M2.) Backgrounded with & so the lock retry (worst-case ~1s)
+        # can NEVER block the analyst fan-out. (Debugger round-2 I1 +
+        # Code-reviewer round-2 C1.) surprise_fired / failopen /
+        # llm_call_ms passed as `null` so consumers distinguish
+        # "instrumented + observed zero" from "not yet instrumented".
+        pp_router_metrics_emit \
+          "$_pp_router_signals" \
+          "$_pp_router_picked" \
+          null null null 2>/dev/null &
+
         # Debugger I2: blackout guard. If somehow the surprise inject
         # left us with an empty picked set (shouldn't happen via fail-open
         # but defensive), restore the full enabled set so the cycle never
@@ -928,16 +942,6 @@ GROUND
         if [ -z "$_pp_router_picked" ]; then
           _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         fi
-
-        # v0.4 Phase 2.5 Track 2: emit per-cycle router telemetry.
-        # surprise_fired / failopen / llm_call_ms are zero-passed for
-        # now; instrumentation through pp_router_pick_lenses is a
-        # follow-on commit. ts + phase + picked_count are immediately
-        # useful for measuring router behavior in production.
-        pp_router_metrics_emit \
-          "$_pp_router_signals" \
-          "$_pp_router_picked" \
-          0 0 0 2>/dev/null || true
 
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do

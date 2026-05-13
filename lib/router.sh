@@ -195,11 +195,17 @@ _pp_router_llm_call() {
   else
     # P2.5 Track 1.1: portable bounded-wait. Use `exec` inside the bg
     # subshell so the subshell BECOMES the llm process — killing $_pid
-    # then kills llm directly (no grandchild orphan). Belt-and-suspenders:
-    # also attempt process-group kill (kill -- -$_pid) for systems where
-    # llm forks children of its own (e.g., python wrapper spawning curl).
-    # GPT plan-review C1: was reintroducing bg-spawn + plain kill; now
-    # exec'd subshell + dual kill path eliminates the orphan-curl risk.
+    # then kills llm directly (no grandchild orphan from the SUBSHELL).
+    #
+    # Known limitation (AI-eng round-2 I1 / GPT round-2 C3): if `llm`
+    # itself forks a child (e.g., python -> curl), SIGKILL'ing the llm
+    # PID immediately makes curl an orphan that gets reparented to init
+    # and continues until the HTTP response. Worst case: ~$0.001 leaked
+    # per timeout (one outbound API call). Previous draft tried
+    # `kill -- -$_pid` for process-group cleanup, but without `set -m`
+    # the bg subshell inherits the parent's pgroup — that kill would
+    # either silently fail (best case) or signal the statusline parent
+    # itself (worst case). Removed; documented in docs/cost-model.md.
     local _outfile
     _outfile=$(mktemp)
     (
@@ -212,7 +218,6 @@ _pp_router_llm_call() {
       _waited=$((_waited + 1))
     done
     if kill -0 "$_pid" 2>/dev/null; then
-      kill -KILL -- "-$_pid" 2>/dev/null || true
       kill -KILL "$_pid" 2>/dev/null || true
     fi
     wait "$_pid" 2>/dev/null || true
@@ -317,7 +322,8 @@ pp_router_metrics_emit() {
   # set -e environment or if internal commands hiccup.
   (
     set +e
-    local _signals="${1:-{\}}"
+    local _signals="$1"
+    [ -z "$_signals" ] && _signals='{}'
     local _picked="${2:-}"
     local _surprise="${3:-0}"
     local _failopen="${4:-0}"
@@ -359,37 +365,55 @@ pp_router_metrics_emit() {
     [ -z "$_line" ] && exit 0
 
     # Bash 3.2-portable lock: mkdir is atomic across NFS too.
-    # GPT-I1: stale-lock auto-cleanup. If the .lock dir is older than 30s
-    # the previous writer probably crashed; reclaim.
+    # Stale-lock auto-cleanup: if .lock dir older than 60s the previous
+    # writer probably crashed; reclaim. (GPT-R2-M4: bump threshold above
+    # PP_ROUTER_TIMEOUT_S × retry_cap so a genuinely slow writer isn't
+    # mid-flight when reclaimed.)
     local _lockdir="${PP_ROUTER_METRICS_FILE}.lock"
     if [ -d "$_lockdir" ]; then
       local _now _ltime
       _now=$(date +%s 2>/dev/null) || _now=""
       _ltime=$(stat -c %Y "$_lockdir" 2>/dev/null || stat -f %m "$_lockdir" 2>/dev/null) || _ltime=""
-      if [ -n "$_now" ] && [ -n "$_ltime" ] && [ "$((_now - _ltime))" -gt 30 ]; then
+      if [ -n "$_now" ] && [ -n "$_ltime" ] && [ "$((_now - _ltime))" -gt 60 ]; then
         rmdir "$_lockdir" 2>/dev/null
       fi
     fi
 
-    # GPT-C2: cap retries strictly. 10 attempts × 1s sleep = 10s max wait.
-    # Beyond that, drop this sample to preserve cycle reliability.
+    # Lock retry matches the project's established pattern in
+    # lib/budget.sh:23-28 (250 × 0.02s = 5s worst case). 50 × 0.02s = 1s
+    # is the right cycle-reliable balance: enough attempts for concurrent
+    # writers to coordinate without blocking the cycle. (Code-reviewer
+    # round-2 C1 + Debugger round-2 I1: telemetry caller is now
+    # backgrounded in statusline.sh, so even this 1s worst case can't
+    # block the analyst fan-out.)
     local _tries=0
     while ! mkdir "$_lockdir" 2>/dev/null; do
       _tries=$((_tries + 1))
-      [ "$_tries" -ge 10 ] && exit 0
-      sleep 1
+      [ "$_tries" -ge 50 ] && exit 0
+      sleep 0.02 2>/dev/null || sleep 1
     done
+
+    # GPT-R2-C4: rotate BEFORE append, not after. Previous flow:
+    # append → check count → mv to .old. The just-appended line ended
+    # up in .old immediately on rotation, lost from the live tail.
+    # New flow: check size BEFORE append; if over cap, rotate; then
+    # append into the (now fresh) file. GPT-R2-C5: use `stat` for size
+    # in bytes instead of `wc -l` — O(1) instead of O(n) scan.
+    if [ -f "$PP_ROUTER_METRICS_FILE" ]; then
+      local _bytes
+      _bytes=$(stat -c %s "$PP_ROUTER_METRICS_FILE" 2>/dev/null \
+            || stat -f %z "$PP_ROUTER_METRICS_FILE" 2>/dev/null) || _bytes=0
+      # Rough heuristic: each JSONL line is ~150 bytes. Default cap
+      # 5000 lines ≈ 750 KB. Use bytes for O(1) check.
+      local _max_bytes
+      _max_bytes=$(( ${PP_ROUTER_METRICS_MAX_LINES:-5000} * 200 ))
+      if [ "${_bytes:-0}" -gt "$_max_bytes" ]; then
+        mv -f "$PP_ROUTER_METRICS_FILE" "${PP_ROUTER_METRICS_FILE}.old" 2>/dev/null
+      fi
+    fi
 
     # Append (direct, single-line, atomic on most POSIX FS for <PIPE_BUF bytes).
     printf '%s\n' "$_line" >> "$PP_ROUTER_METRICS_FILE" 2>/dev/null
-
-    # Rotate if over cap. Single rotation: overwrites any prior .old.
-    # GPT-I2: no unbounded .old growth.
-    local _count
-    _count=$(wc -l < "$PP_ROUTER_METRICS_FILE" 2>/dev/null | tr -d ' ') || _count=0
-    if [ -n "$_count" ] && [ "$_count" -gt "${PP_ROUTER_METRICS_MAX_LINES:-5000}" ]; then
-      mv -f "$PP_ROUTER_METRICS_FILE" "${PP_ROUTER_METRICS_FILE}.old" 2>/dev/null
-    fi
 
     rmdir "$_lockdir" 2>/dev/null
     exit 0

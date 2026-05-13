@@ -84,17 +84,17 @@ teardown() { rm -rf "$HOME"; }
   done < "$PP_ROUTER_METRICS_FILE"
 }
 
-@test "metrics: GPT-I1 — stale lockdir is auto-reclaimed if mtime > 30s" {
-  # Manually create a stale lockdir backdated by 60s.
+@test "metrics: stale lockdir is auto-reclaimed if mtime > 60s (P2.5 hardening)" {
+  # Manually create a stale lockdir backdated by 120s (well above the 60s
+  # threshold that handles slow writers).
   mkdir "${PP_ROUTER_METRICS_FILE}.lock"
-  # Set mtime to 60s ago. Both stat -c and stat -f tested per project convention.
-  if command -v touch >/dev/null 2>&1; then
-    # Coreutils touch -d (GNU) and BSD touch -t both work for past times.
-    touch -d "60 seconds ago" "${PP_ROUTER_METRICS_FILE}.lock" 2>/dev/null \
-      || touch -A -000100 "${PP_ROUTER_METRICS_FILE}.lock" 2>/dev/null \
-      || skip "no portable way to backdate mtime on this system"
+  if touch -d "120 seconds ago" "${PP_ROUTER_METRICS_FILE}.lock" 2>/dev/null; then
+    : # GNU touch
+  elif touch -A -000200 "${PP_ROUTER_METRICS_FILE}.lock" 2>/dev/null; then
+    : # BSD touch (HHMMSS offset, -000200 = -2 min)
+  else
+    skip "no portable way to backdate mtime on this system"
   fi
-  # Now emit — should reclaim the stale lock and succeed.
   pp_router_metrics_emit '{"phase":"x"}' "A" 0 0 0
   [ -f "$PP_ROUTER_METRICS_FILE" ]
   line_count=$(wc -l < "$PP_ROUTER_METRICS_FILE" | tr -d ' ')

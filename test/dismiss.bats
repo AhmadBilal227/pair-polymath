@@ -110,3 +110,45 @@ teardown() { rm -rf "$HOME"; }
   run pp_dismiss_show "$_id"
   printf '%s' "$output" | jq -e '.deleted == false' >/dev/null
 }
+
+@test "dismiss_render: empty file produces empty stdout" {
+  run pp_dismiss_render
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "dismiss_render: emits bullet list with one bullet per active rule" {
+  pp_dismiss_add "Rule one" project
+  pp_dismiss_add "Rule two" project
+  run pp_dismiss_render
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE '^- Rule one'
+  printf '%s' "$output" | grep -qE '^- Rule two'
+  [ "$(printf '%s\n' "$output" | grep -cE '^- ')" = "2" ]
+}
+
+@test "dismiss_render: dedups by exact reason_summary match" {
+  pp_dismiss_add "Same constraint" project
+  pp_dismiss_add "Same constraint" project
+  run pp_dismiss_render
+  [ "$(printf '%s\n' "$output" | grep -cE '^- Same constraint')" = "1" ]
+}
+
+@test "dismiss_render: caps total output at PP_DISMISS_RENDERED_MAX_BYTES" {
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    pp_dismiss_add "Rule number $_i with verbose padding text to consume bytes" project
+  done
+  PP_DISMISS_RENDERED_MAX_BYTES=200 run pp_dismiss_render
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | wc -c | tr -d ' ')" -le 200 ]
+}
+
+@test "dismiss_render: cache invalidates only when source JSONL mtime is newer" {
+  pp_dismiss_add "Rule for cache test" project
+  local _out1 _out2
+  _out1=$(pp_dismiss_render)
+  _out2=$(pp_dismiss_render)
+  [ "$_out1" = "$_out2" ]
+  [ -f "$PP_CACHE_DIR/cc-dismiss-rendered-$(pp_memory_project_hash "$PWD").txt" ]
+}

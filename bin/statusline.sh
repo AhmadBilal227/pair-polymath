@@ -1339,28 +1339,49 @@ fi
 # an 8-slot, 4-minute full cycle.
 mon_topic=""
 mon_body=""
+mon_age_s=0          # Age of the picked observation in seconds (0 if none).
+mon_fresh_pip=""     # ✨ for <60s, "" for 60s-5min, ◌ for 5min-stale-threshold.
+mon_age_label=""     # Short relative-time label, e.g., "2m" / "8m".
 _pp_slot_total=$((PP_LENS_COUNT + 1))
 lens_slot=$(( ($(date +%s) / 30) % _pp_slot_total ))
 # v0.4 Phase 2 fix: the router fires only 1-3 lenses per cycle, so most
-# rotation slots have no fresh cache. Probe the picked slot first; if its
-# cache is empty or missing, fall through to the next slot that DOES have
-# content. This also runs when rotation lands on the TIP slot
-# (lens_slot == PP_LENS_COUNT) — we still want a valid mon_topic if any
-# lens has fresh content, since the final display logic uses mon_topic
-# as the fallback when tip is missing. (Code-reviewer I1.)
+# rotation slots have no fresh cache. Probe slots starting at the
+# rotation index; SKIP slots older than PP_DISPLAY_STALE_S (default 600s
+# = 10 min) — better to show nothing than to show a 30-min-old advisory
+# that's likely already addressed (UX: insight-freshness advisory).
 _pp_probe_start=$lens_slot
 [ "$_pp_probe_start" -ge "$PP_LENS_COUNT" ] && _pp_probe_start=0
 _pp_probe_i=0
+_pp_now=$(date +%s 2>/dev/null)
 while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
   _pp_probe_idx=$(( (_pp_probe_start + _pp_probe_i) % PP_LENS_COUNT ))
   PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$_pp_probe_idx]}.txt"
   if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
+    # v0.4 freshness gate: check mtime vs PP_DISPLAY_STALE_S threshold.
+    # stat -c (GNU) then stat -f (BSD) per project convention.
+    _pp_mtime=$(stat -c %Y "$PP_CACHE_DISPLAY" 2>/dev/null \
+             || stat -f %m "$PP_CACHE_DISPLAY" 2>/dev/null) || _pp_mtime=0
+    _pp_age=$(( _pp_now - _pp_mtime ))
+    if [ "$_pp_age" -gt "${PP_DISPLAY_STALE_S:-600}" ]; then
+      # Slot is stale — keep probing for a fresher one.
+      _pp_probe_i=$((_pp_probe_i + 1))
+      continue
+    fi
     mon=$(head -1 "$PP_CACHE_DISPLAY")
     if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
       mon_topic="${mon%%|||*}"
       mon_body="${mon#*|||}"
-      # Only re-point lens_slot when we were ON a lens slot; tip slot
-      # stays so tip path still has priority when tip_topic is valid.
+      mon_age_s="$_pp_age"
+      # Freshness pip: ✨ for <60s, ◌ for 5min+, blank in between.
+      if   [ "$_pp_age" -lt 60 ];  then mon_fresh_pip="✨ "
+      elif [ "$_pp_age" -ge 300 ]; then mon_fresh_pip="◌ "
+      else                              mon_fresh_pip=""
+      fi
+      # Relative-time label: Xs / Xm. Short, fits the topic line.
+      if   [ "$_pp_age" -lt 60 ];   then mon_age_label="${_pp_age}s"
+      elif [ "$_pp_age" -lt 3600 ]; then mon_age_label="$((_pp_age / 60))m"
+      else                                mon_age_label="$((_pp_age / 3600))h"
+      fi
       [ "$lens_slot" -lt "$PP_LENS_COUNT" ] && lens_slot="$_pp_probe_idx"
       break
     fi
@@ -1416,11 +1437,21 @@ if [ "$slot" -eq 0 ] && [ "$tip_valid" -eq 1 ]; then
   body_line=""
 elif [ "$mon_valid" -eq 1 ]; then
   if [ $((tick % 2)) -eq 0 ]; then warn_hue=$SOFT_CRIMSON; else warn_hue=$SOFT_AMBER; fi
-  topic_line="${warn_hue}⚠${R}  ${BOLD}${SOFT_CRIMSON}${mon_topic}${R}"
-  # Body intentionally NOT shown on terminal — goes to Claude via hook
+  # v0.4 freshness: prepend pip (✨ fresh, ◌ aged, blank middle) and
+  # suffix the age label so the user knows whether this observation is
+  # current or stale-ish. (UX advisory: insight-freshness invisible.)
+  _age_suffix=""
+  [ -n "$mon_age_label" ] && _age_suffix=" ${DIM_A}(${mon_age_label})${R}"
+  topic_line="${warn_hue}⚠${R}  ${mon_fresh_pip}${BOLD}${SOFT_CRIMSON}${mon_topic}${R}${_age_suffix}"
   body_line=""
 elif [ "$tip_valid" -eq 1 ]; then
   topic_line="${aurora_hue}▸${R}  ${BOLD}${CYAN_SOFT}${tip_topic}${R}"
+  body_line=""
+else
+  # v0.4 freshness "C": idle fallback when all lens slots are stale or
+  # empty AND no tip is available. Honest "no fresh insight" beats
+  # rendering a 30-min-old advisory the user has already addressed.
+  topic_line="${aurora_hue:-}◌${R}  ${DIM_A}idle — no fresh insight in last $((${PP_DISPLAY_STALE_S:-600}/60))m${R}"
   body_line=""
 fi
 

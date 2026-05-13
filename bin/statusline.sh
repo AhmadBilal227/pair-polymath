@@ -46,6 +46,12 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/transcript.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/tool-summary.sh"
+# v0.4 Phase 2: router meta-lens (picks 1-3 lenses per cycle instead of 7).
+# PP_ROUTER_ENABLE=0 reverts to v0.3 fan-out-all behavior byte-identically.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/router-signals.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/router.sh"
 
 # Pair Polymath memory subsystem (Phase 2.3). Only sourced when enabled; the
 # default PP_MEMORY_ENABLE=0 keeps the cycle path byte-identical to pre-2.3
@@ -870,9 +876,33 @@ GROUND
         # === PARALLEL N-AGENT FAN-OUT ===
         # Run all loaded lenses in parallel subshells. Each writes to its own cache.
         # Lens metadata comes from $PP_LENS_IDS/HATS/FOCUS (loaded from lenses/*.json).
+
+        # v0.4 Phase 2: router meta-lens decides which lenses fire this cycle.
+        # Returns NEWLINE-delimited lens IDs. Fail-open → all enabled.
+        # PP_ROUTER_ENABLE=0 makes _pp_router_picked the full enabled set,
+        # restoring v0.3 fan-out-all behavior byte-identically.
+        _pp_router_signals=$(pp_router_extract_signals "${transcript_filtered:-}" "${_pp_tool_calls_json:-[]}" 2>/dev/null || printf '{}')
+        PP_LENS_IDS_AVAILABLE=$(printf '%s\n' "${PP_LENS_IDS[@]}")
+        export PP_LENS_IDS_AVAILABLE
+        _pp_router_picked=$(pp_router_pick_lenses "$_pp_router_signals" "${transcript_filtered:-}" 2>/dev/null)
+        # Build not-picked set (newline-delimited) for surprise inject.
+        _pp_router_not_picked=""
+        for _l in "${PP_LENS_IDS[@]}"; do
+          if ! printf '%s\n' "$_pp_router_picked" | LC_ALL=C grep -qxF "$_l"; then
+            _pp_router_not_picked="${_pp_router_not_picked}${_l}"$'\n'
+          fi
+        done
+        _pp_router_picked=$(pp_router_surprise_inject "$_pp_router_picked" "$_pp_router_not_picked")
+
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"
+          # v0.4 Phase 2: skip lenses not picked by the router this cycle.
+          # When PP_ROUTER_ENABLE=0 or fail-open, ALL lenses are in the
+          # picked set so this check passes through unchanged.
+          if ! printf '%s\n' "$_pp_router_picked" | LC_ALL=C grep -qxF "$lens_group"; then
+            continue
+          fi
           lens_hats="${PP_LENS_HATS[$lens_idx]}"
           lens_focus="${PP_LENS_FOCUS[$lens_idx]}"
           # Cache filenames keyed by lens id (not numeric index) — survives

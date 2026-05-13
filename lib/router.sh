@@ -186,33 +186,31 @@ _pp_router_llm_call() {
   elif command -v gtimeout >/dev/null 2>&1; then
     gtimeout "${PP_ROUTER_TIMEOUT_S:-8}" llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null
   else
-    # Background-spawn + watchdog. Emit output to a tmp file so we can
-    # read after the bounded wait. Debugger I1: enable job control so
-    # the subshell becomes its own process group; on timeout, kill the
-    # WHOLE group (-$_pid) so the grandchild `llm` process dies with
-    # the subshell. Otherwise `llm` orphans and continues the API call,
-    # leaking one full router-model call per timeout event.
+    # P2.5 Track 1.1: portable bounded-wait. Use `exec` inside the bg
+    # subshell so the subshell BECOMES the llm process — killing $_pid
+    # then kills llm directly (no grandchild orphan). Belt-and-suspenders:
+    # also attempt process-group kill (kill -- -$_pid) for systems where
+    # llm forks children of its own (e.g., python wrapper spawning curl).
+    # GPT plan-review C1: was reintroducing bg-spawn + plain kill; now
+    # exec'd subshell + dual kill path eliminates the orphan-curl risk.
     local _outfile
     _outfile=$(mktemp)
-    set -m 2>/dev/null || true
     (
-      llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null > "$_outfile"
+      exec llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null > "$_outfile"
     ) &
     local _pid=$!
-    set +m 2>/dev/null || true
     local _waited=0
-    while kill -0 "$_pid" 2>/dev/null; do
-      if [ "$_waited" -ge "${PP_ROUTER_TIMEOUT_S:-8}" ]; then
-        # Process-group kill: -$_pid targets every PID in the group.
-        kill -9 -- "-$_pid" 2>/dev/null || kill -9 "$_pid" 2>/dev/null
-        break
-      fi
+    while [ "$_waited" -lt "${PP_ROUTER_TIMEOUT_S:-8}" ] && kill -0 "$_pid" 2>/dev/null; do
       sleep 1
       _waited=$((_waited + 1))
     done
+    if kill -0 "$_pid" 2>/dev/null; then
+      kill -KILL -- "-$_pid" 2>/dev/null || true
+      kill -KILL "$_pid" 2>/dev/null || true
+    fi
     wait "$_pid" 2>/dev/null || true
-    cat "$_outfile"
-    rm -f "$_outfile"
+    cat "$_outfile" 2>/dev/null
+    rm -f "$_outfile" 2>/dev/null
   fi
 }
 

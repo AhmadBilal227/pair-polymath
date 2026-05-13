@@ -78,3 +78,35 @@ teardown() { rm -rf "$HOME"; }
   [ "$status" -eq 0 ]
   printf '%s' "$output" | grep -qF "Fresh rule with ttl"
 }
+
+@test "dismiss_show: prints full JSON record for a given id" {
+  local _id
+  _id=$(pp_dismiss_add "Showable rule" project)
+  run pp_dismiss_show "$_id"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.id == "'"$_id"'"' >/dev/null
+}
+
+@test "dismiss_show: unknown id exits non-zero with diagnostic to stderr" {
+  run pp_dismiss_show "d-does-not-exist"
+  [ "$status" -ne 0 ]
+}
+
+@test "dismiss_disable: flips deleted=true and records deleted_reason" {
+  local _id
+  _id=$(pp_dismiss_add "Disable me" project)
+  run pp_dismiss_disable "$_id" "user_disabled"
+  [ "$status" -eq 0 ]
+  run pp_dismiss_show "$_id"
+  printf '%s' "$output" | jq -e '.deleted == true and .deleted_reason == "user_disabled"' >/dev/null
+}
+
+@test "dismiss_enable: flips deleted=false on a previously-disabled rule" {
+  local _id
+  _id=$(pp_dismiss_add "Toggle me" project)
+  pp_dismiss_disable "$_id" "user_disabled"
+  run pp_dismiss_enable "$_id"
+  [ "$status" -eq 0 ]
+  run pp_dismiss_show "$_id"
+  printf '%s' "$output" | jq -e '.deleted == false' >/dev/null
+}

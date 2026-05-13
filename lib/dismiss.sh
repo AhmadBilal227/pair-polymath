@@ -54,3 +54,50 @@ pp_dismiss_list() {
     | "\(.id)  \(.scope)  \(.reason_summary)"
   ' "$_file"
 }
+
+# pp_dismiss_show ID
+# Prints the full JSON record (most-recent if id has multiple history entries).
+pp_dismiss_show() {
+  local _id="${1:?pp_dismiss_show requires an id}"
+  local _file
+  _file=$(pp_dismiss_file_path) || return 1
+  [ ! -f "$_file" ] && return 1
+  local _line
+  _line=$(jq -c "select(.id == \"$_id\")" "$_file" 2>/dev/null | tail -1)
+  if [ -z "$_line" ]; then
+    printf 'pp_dismiss: id %s not found\n' "$_id" >&2
+    return 1
+  fi
+  printf '%s\n' "$_line"
+}
+
+# pp_dismiss_disable ID [REASON=user_disabled]
+# Appends a new JSONL line for the rule with deleted=true. Append-only;
+# previous lines for the same id stay as audit history. pp_dismiss_show
+# returns the latest, so this is effectively a state transition.
+pp_dismiss_disable() {
+  local _id="${1:?pp_dismiss_disable requires an id}"
+  local _reason="${2:-user_disabled}"
+  local _file
+  _file=$(pp_dismiss_file_path) || return 1
+  local _current
+  _current=$(jq -c "select(.id == \"$_id\")" "$_file" 2>/dev/null | tail -1)
+  [ -z "$_current" ] && { printf 'pp_dismiss: id %s not found\n' "$_id" >&2; return 1; }
+  printf '%s\n' "$_current" \
+    | jq -c --arg r "$_reason" '. + {deleted: true, deleted_reason: $r}' \
+    >> "$_file"
+}
+
+# pp_dismiss_enable ID
+# Inverse of disable: appends a new line with deleted=false.
+pp_dismiss_enable() {
+  local _id="${1:?pp_dismiss_enable requires an id}"
+  local _file
+  _file=$(pp_dismiss_file_path) || return 1
+  local _current
+  _current=$(jq -c "select(.id == \"$_id\")" "$_file" 2>/dev/null | tail -1)
+  [ -z "$_current" ] && { printf 'pp_dismiss: id %s not found\n' "$_id" >&2; return 1; }
+  printf '%s\n' "$_current" \
+    | jq -c '. + {deleted: false, deleted_reason: null}' \
+    >> "$_file"
+}

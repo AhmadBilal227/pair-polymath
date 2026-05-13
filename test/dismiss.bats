@@ -219,3 +219,41 @@ teardown() { rm -rf "$HOME"; }
   [ "$status" -eq 2 ]
   printf '%s' "$output" | grep -qiE 'usage|polymath dismiss'
 }
+
+@test "hook: skips observations whose hash matches an active dismiss rule" {
+  local _sid="bats-hook-sid"
+  local _lens="ENGINEERING"
+  local _obs="ENGINEERING: do not flag this thing again please|||body text long enough to satisfy the regex defended at line 39"
+  local _hash
+  # Match the hook's hashing algorithm (uses `echo`, which appends a newline).
+  _hash=$(echo "$_obs" | shasum | cut -d' ' -f1)
+  # Pre-create lens cache.
+  printf '%s\n' "$_obs" > "$PP_CACHE_DIR/cc-monitor-${_sid}-${_lens}.txt"
+  # Add a dismiss rule that tags this hash.
+  local _id _file _tmp
+  _id=$(pp_dismiss_add "Suppress that ENGINEERING ping" project)
+  _file=$(pp_dismiss_file_path)
+  _tmp=$(mktemp)
+  jq -c "if .id == \"$_id\" then .hash = \"$_hash\" else . end" "$_file" > "$_tmp"
+  mv "$_tmp" "$_file"
+  # Mock minimal lens-loader env so the hook's loop doesn't bail.
+  PP_LENS_IDS="ENGINEERING" PP_LENS_COUNT=1
+  export PP_LENS_IDS PP_LENS_COUNT
+  run bash -c "printf '{\"session_id\":\"$_sid\"}' | bash '$PP_ROOT/hooks/inject-monitor-insight.sh'"
+  [ "$status" -eq 0 ]
+  # Output MUST NOT contain the suppressed body.
+  ! printf '%s' "$output" | grep -qF "body text long enough"
+}
+
+@test "hook: still injects observations whose hash does NOT match a rule" {
+  local _sid="bats-hook-no-suppress"
+  local _lens="SECURITY"
+  local _obs="SECURITY: legitimate concern about secrets handling|||body that should fire because no rule matches yet"
+  printf '%s\n' "$_obs" > "$PP_CACHE_DIR/cc-monitor-${_sid}-${_lens}.txt"
+  pp_dismiss_add "Other unrelated rule" project >/dev/null
+  PP_LENS_IDS="SECURITY" PP_LENS_COUNT=1
+  export PP_LENS_IDS PP_LENS_COUNT
+  run bash -c "printf '{\"session_id\":\"$_sid\"}' | bash '$PP_ROOT/hooks/inject-monitor-insight.sh'"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "body that should fire"
+}

@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":"read both files"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_A","name":"Read","input":{"file_path":"/repo/a.ts"}},{"type":"tool_use","id":"toolu_B","name":"Read","input":{"file_path":"/repo/b.ts"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_A","content":[{"type":"text","text":"contents of A"}]},{"type":"tool_result","tool_use_id":"toolu_B","content":[{"type":"text","text":"contents of B"}]}]}}

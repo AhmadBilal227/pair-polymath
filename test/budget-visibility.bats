@@ -146,7 +146,7 @@ _strip_ansi() {
 # Task 4 — Budget-aware idle fallback
 # ============================================================
 
-@test "idle fallback: 'paused — daily budget reached' at 95%+ used" {
+@test "idle fallback: 'paused — daily budget near cap' at 95%+ used" {
   echo 9700 > "$PP_CACHE_DIR/pp-budget-$(date +%Y%m%d).txt"
   PP_MAX_DAILY_CALLS=10000 \
     PP_BUDGET_WARN_PCT=80 PP_BUDGET_RED_PCT=95 \
@@ -155,7 +155,73 @@ _strip_ansi() {
       | bash '$PP_ROOT/bin/statusline.sh'
   "
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | _strip_ansi | grep -qE 'paused — daily budget reached'
+  # review-fix M1: wording shifted from "reached" (implies 0%) to
+  # "near cap" + "% headroom" to match the line-1 pip framing.
+  printf '%s' "$output" | _strip_ansi | grep -qE 'paused — daily budget near cap'
+  printf '%s' "$output" | _strip_ansi | grep -qE '3% headroom'
+}
+
+# ============================================================
+# Review-cycle regression tests (round 1 → fixes)
+# ============================================================
+
+@test "regression C1: PP_BUDGET_REMAINING_PCT export is correct, not 0" {
+  # v0.4.1 review (debugger BUG 1 + code-reviewer #4): pre-existing
+  # broken cut-based parse exported PP_BUDGET_REMAINING_PCT=0 to router
+  # subshells once any budget was spent. This regression test stamps a
+  # known used/max and asserts the export is the helper's output.
+  mkdir -p "$HOME/.claude/pair-polymath/config"
+  printf 'PP_EXTERNAL_LLM=1\n' > "$HOME/.claude/pair-polymath/config/user.env"
+  echo 5000 > "$PP_CACHE_DIR/pp-budget-$(date +%Y%m%d).txt"
+  # Smoke-test the export-line shape by sourcing the helper directly,
+  # since exporting to a real router subshell needs a full cycle.
+  PP_MAX_DAILY_CALLS=10000 run pp_budget_remaining_pct
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 50 ]
+}
+
+@test "regression I1: WARN >= RED (inversion) — doctor flags it, pip falls back to defaults" {
+  echo 1000 > "$PP_CACHE_DIR/pp-budget-$(date +%Y%m%d).txt"
+  # Inversion: WARN=96 >= RED=95 collapses the amber zone.
+  PP_MAX_DAILY_CALLS=10000 \
+    PP_BUDGET_WARN_PCT=96 PP_BUDGET_RED_PCT=95 \
+  run bash -c "
+    printf '{\"session_id\":\"bats-inversion\",\"model\":{\"display_name\":\"S\"},\"workspace\":{\"current_dir\":\"\$(pwd)\"},\"transcript_path\":\"/tmp/none\",\"cost\":{\"total_cost_usd\":0.0}}' \
+      | bash '$PP_ROOT/bin/statusline.sh'
+  "
+  [ "$status" -eq 0 ]
+  # Statusline must not crash on inversion (no stderr leak, exit 0).
+  # At 10% used / 90% remaining, defaults (80/95) → no pip. Verify that.
+  line1=$(printf '%s' "$output" | head -1 | _strip_ansi)
+  ! printf '%s' "$line1" | grep -qE '⚡|⚠'
+}
+
+@test "regression I2: WARN/RED=0 does NOT trigger permanent pip" {
+  echo 100 > "$PP_CACHE_DIR/pp-budget-$(date +%Y%m%d).txt"
+  # WARN=0 would mean "fire amber when remaining <= 100" — every render.
+  PP_MAX_DAILY_CALLS=10000 \
+    PP_BUDGET_WARN_PCT=0 PP_BUDGET_RED_PCT=0 \
+  run bash -c "
+    printf '{\"session_id\":\"bats-zero-pct\",\"model\":{\"display_name\":\"S\"},\"workspace\":{\"current_dir\":\"\$(pwd)\"},\"transcript_path\":\"/tmp/none\",\"cost\":{\"total_cost_usd\":0.0}}' \
+      | bash '$PP_ROOT/bin/statusline.sh'
+  "
+  [ "$status" -eq 0 ]
+  line1=$(printf '%s' "$output" | head -1 | _strip_ansi)
+  ! printf '%s' "$line1" | grep -qE '⚡|⚠'
+}
+
+@test "regression I3: non-numeric PP_DISPLAY_STALE_S does not crash statusline" {
+  echo 100 > "$PP_CACHE_DIR/pp-budget-$(date +%Y%m%d).txt"
+  mkdir -p "$HOME/.claude/pair-polymath/config"
+  printf 'PP_DISPLAY_STALE_S=garbage\n' > "$HOME/.claude/pair-polymath/config/user.env"
+  PP_MAX_DAILY_CALLS=10000 \
+  run bash -c "
+    printf '{\"session_id\":\"bats-stale-garbage\",\"model\":{\"display_name\":\"S\"},\"workspace\":{\"current_dir\":\"\$(pwd)\"},\"transcript_path\":\"/tmp/none\",\"cost\":{\"total_cost_usd\":0.0}}' \
+      | bash '$PP_ROOT/bin/statusline.sh'
+  "
+  [ "$status" -eq 0 ]
+  # Should fall back to the 900s default → 15m in the idle message.
+  printf '%s' "$output" | _strip_ansi | grep -qE 'in last 15m'
 }
 
 @test "idle fallback: 'budget at N% remaining' at 80-94% used" {

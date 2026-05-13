@@ -350,8 +350,11 @@ doctor_check_budget_pressure() {
     . "$PP_ROOT/lib/budget.sh" 2>/dev/null || true
   fi
   if ! type pp_budget_remaining_pct >/dev/null 2>&1; then
-    _pp_doctor_yellow "budget pressure" "lib/budget.sh pp_budget_remaining_pct helper unavailable"
-    return 1
+    # v0.4.1 review-fix (I4, GPT #7): a missing budget helper is a broken
+    # install, not a degraded state. Red so the user re-runs install.sh
+    # instead of silently flying blind on budget pressure.
+    _pp_doctor_red "budget pressure" "lib/budget.sh pp_budget_remaining_pct helper unavailable — broken install; re-run install.sh"
+    return 2
   fi
   local _pct _used _warn _red
   _pct=$(pp_budget_remaining_pct 2>/dev/null)
@@ -361,6 +364,15 @@ doctor_check_budget_pressure() {
   _red="${PP_BUDGET_RED_PCT:-95}"
   case "$_warn" in ''|*[!0-9]*) _warn=80 ;; esac
   case "$_red"  in ''|*[!0-9]*) _red=95  ;; esac
+  # v0.4.1 review-fix (I2): lower-bound clamp. WARN/RED=0 → permanent red.
+  [ "$_warn" -lt 1 ] && _warn=80
+  [ "$_red"  -lt 1 ] && _red=95
+  # v0.4.1 review-fix (I1, all-three-reviewers): detect inverted thresholds
+  # and surface as yellow — the amber zone vanishes silently otherwise.
+  if [ "$_warn" -ge "$_red" ]; then
+    _pp_doctor_yellow "budget pressure" "PP_BUDGET_WARN_PCT (${_warn}) >= PP_BUDGET_RED_PCT (${_red}) — amber zone disabled; fix in user.env"
+    return 1
+  fi
   if [ "$_used" -ge "$_red" ]; then
     _pp_doctor_red "budget pressure" "${_pct}% remaining; cycles will skip — raise PP_MAX_DAILY_CALLS or wait for midnight reset"
     return 2

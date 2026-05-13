@@ -47,6 +47,11 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/metrics.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/citations.sh"
+# v0.5 Phase 3: dismiss subsystem (project-constraints rendering for analyst
+# prompts). Sourced unconditionally — the render call short-circuits cheaply
+# when no rules exist (single stat + write of empty cache).
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/dismiss.sh"
 # v0.4 Phase 1: filtered transcript + structured tool-call summary
 # (always-on; replaces the cost/leak surface of the raw 5KB activity tail
 # in analyst context. activity_tail kept one version for privacy-log compat).
@@ -546,6 +551,18 @@ parallel_age=$(($(date +%s) - last_parallel))
 if [ "${PP_EVAL_MODE:-0}" = "1" ]; then
   is_active=1
   parallel_age=$((PP_PARALLEL_INTERVAL_S + 1))
+fi
+
+# v0.5 Phase 3: render project-constraints (cheap: cache-hit short-circuit on
+# repeat statusline refreshes; empty-no-op when no dismiss rules exist).
+# Exported so analyst subshells in the fan-out below inherit it and
+# prompts/analyst-primary.md's ${project_constraints} placeholder resolves.
+# Lifted ABOVE the cycle gate so the cache is populated even on refreshes
+# that don't open the gate — keeps the rendered block ready for the next
+# fan-out without an extra LLM call.
+if type pp_dismiss_render >/dev/null 2>&1; then
+  project_constraints=$(pp_dismiss_render 2>/dev/null)
+  export project_constraints
 fi
 
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \

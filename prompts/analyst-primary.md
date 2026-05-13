@@ -1,5 +1,8 @@
 ${lens_system_prompt_addition}
 
+Constraints from prior dismissals: ${project_constraints}.
+Do not flag these unless the diff materially changes the underlying state.
+
 <!-- MEMORY_BLOCK_START -->
 ${MEMORY_BLOCK}
 <!-- MEMORY_BLOCK_END -->

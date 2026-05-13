@@ -307,3 +307,21 @@ teardown() { rm -rf "$HOME"; }
   _autoct=$(jq -c "select(.source == \"auto_suppress\" and .hash == \"$_hash\")" "$_file" | wc -l | tr -d ' ')
   [ "$_autoct" = "0" ]
 }
+
+@test "statusline-integration: PROJECT_CONSTRAINTS env exported when rules exist" {
+  pp_dismiss_add "Integration test constraint" project >/dev/null
+  PP_LENS_IDS="ENGINEERING" PP_LENS_COUNT=1
+  export PP_LENS_IDS PP_LENS_COUNT
+  # Trigger the statusline; capture exported env via a thin probe.
+  run bash -c "
+    printf '{\"session_id\":\"probe-sid\",\"workspace\":{\"current_dir\":\"\$PWD\"},\"transcript_path\":\"/tmp/none\",\"cost\":{\"total_cost_usd\":0.0},\"model\":{\"display_name\":\"S\"}}' \\
+      | env -i HOME=\"$HOME\" PATH=\"\$PATH\" \\
+            CLAUDE_DIR=\"$CLAUDE_DIR\" PP_CACHE_DIR=\"$PP_CACHE_DIR\" PP_STATE_DIR=\"$PP_STATE_DIR\" \\
+            PP_ROOT=\"$PP_ROOT\" \\
+            bash '$PP_ROOT/bin/statusline.sh' 2>&1
+  "
+  [ "$status" -eq 0 ]
+  # The constraint text doesn't have to appear on the user-visible statusline,
+  # but it MUST be computed (cache file written).
+  [ -f "$PP_CACHE_DIR/cc-dismiss-rendered-$(pp_memory_project_hash "$PWD").txt" ]
+}

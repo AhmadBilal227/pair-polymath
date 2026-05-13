@@ -393,21 +393,15 @@ pp_router_metrics_emit() {
       sleep 0.02 2>/dev/null || sleep 1
     done
 
-    # GPT-R2-C4: rotate BEFORE append, not after. Previous flow:
-    # append → check count → mv to .old. The just-appended line ended
-    # up in .old immediately on rotation, lost from the live tail.
-    # New flow: check size BEFORE append; if over cap, rotate; then
-    # append into the (now fresh) file. GPT-R2-C5: use `stat` for size
-    # in bytes instead of `wc -l` — O(1) instead of O(n) scan.
+    # GPT-R2-C4: rotate BEFORE append (was append→mv which moved the
+    # just-written line into .old). GPT-R3: use line count to match the
+    # variable name PP_ROUTER_METRICS_MAX_LINES (was byte-estimate which
+    # caused semantic drift). Cost: O(n) wc -l per call, but n is capped
+    # at 5000 and we hold the lock anyway — negligible vs analyst calls.
     if [ -f "$PP_ROUTER_METRICS_FILE" ]; then
-      local _bytes
-      _bytes=$(stat -c %s "$PP_ROUTER_METRICS_FILE" 2>/dev/null \
-            || stat -f %z "$PP_ROUTER_METRICS_FILE" 2>/dev/null) || _bytes=0
-      # Rough heuristic: each JSONL line is ~150 bytes. Default cap
-      # 5000 lines ≈ 750 KB. Use bytes for O(1) check.
-      local _max_bytes
-      _max_bytes=$(( ${PP_ROUTER_METRICS_MAX_LINES:-5000} * 200 ))
-      if [ "${_bytes:-0}" -gt "$_max_bytes" ]; then
+      local _count
+      _count=$(wc -l < "$PP_ROUTER_METRICS_FILE" 2>/dev/null | tr -d ' ') || _count=0
+      if [ -n "$_count" ] && [ "$_count" -ge "${PP_ROUTER_METRICS_MAX_LINES:-5000}" ]; then
         mv -f "$PP_ROUTER_METRICS_FILE" "${PP_ROUTER_METRICS_FILE}.old" 2>/dev/null
       fi
     fi

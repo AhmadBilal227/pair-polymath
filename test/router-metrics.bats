@@ -45,19 +45,25 @@ teardown() { rm -rf "$HOME"; }
   [ "$count3" -eq 1 ]
 }
 
-@test "metrics: rotates to .old when over PP_ROUTER_METRICS_MAX_LINES" {
-  PP_ROUTER_METRICS_MAX_LINES=5
+@test "metrics: rotates to .old when over PP_ROUTER_METRICS_MAX_LINES (GPT-R3)" {
+  # Strengthened per GPT R3 finding: assert rotation actually fires
+  # (not just that "total ≤ N" which a no-rotation impl could satisfy
+  # by simply hitting the cap).
+  PP_ROUTER_METRICS_MAX_LINES=3
   i=0
-  while [ "$i" -lt 6 ]; do
+  while [ "$i" -lt 5 ]; do
     pp_router_metrics_emit '{"phase":"x"}' "A" 0 0 0
     i=$((i + 1))
   done
-  # After 6 writes, the 6th triggers rotation. .old exists; main file might
-  # be empty or have content depending on exact rotation moment.
-  [ -f "${PP_ROUTER_METRICS_FILE}.old" ] || [ -f "$PP_ROUTER_METRICS_FILE" ]
-  # Total lines across both files ≤ 6.
-  total=$(cat "$PP_ROUTER_METRICS_FILE" "${PP_ROUTER_METRICS_FILE}.old" 2>/dev/null | wc -l | tr -d ' ')
-  [ "$total" -le 6 ]
+  # After 5 writes with cap=3, rotation MUST have fired.
+  [ -f "${PP_ROUTER_METRICS_FILE}.old" ]
+  # .old contains the lines that were live at rotation time.
+  old_count=$(wc -l < "${PP_ROUTER_METRICS_FILE}.old" | tr -d ' ')
+  [ "$old_count" -ge 3 ]
+  # Live file has the most recent lines (reset after rotation).
+  [ -f "$PP_ROUTER_METRICS_FILE" ]
+  live_count=$(wc -l < "$PP_ROUTER_METRICS_FILE" | tr -d ' ')
+  [ "$live_count" -lt 3 ]
 }
 
 @test "metrics: silently no-ops when PP_ROUTER_METRICS_FILE unwritable (GPT-I7)" {

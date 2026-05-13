@@ -257,3 +257,53 @@ teardown() { rm -rf "$HOME"; }
   [ "$status" -eq 0 ]
   printf '%s' "$output" | grep -qF "body that should fire"
 }
+
+@test "ack: appends an ack record with source=ack" {
+  pp_dismiss_ack "abc12345"
+  local _file
+  _file=$(pp_dismiss_file_path)
+  [ -f "$_file" ]
+  jq -e 'select(.source == "ack" and (.hash | startswith("abc")))' "$_file" >/dev/null
+}
+
+@test "auto_suppress: with PP_DISMISS_AUTO_THRESHOLD fires across N sessions, creates rule with source=auto_suppress" {
+  local _hash="autosuppressabc123"
+  # Simulate 10 sessions' worth of injected-hash files keyed to the same hash.
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    printf '%s' "$_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
+  done
+  PP_DISMISS_AUTO_THRESHOLD=10 \
+    PP_DISMISS_AUTO_WINDOW_DAYS=30 \
+    run pp_dismiss_auto_suppress
+  [ "$status" -eq 0 ]
+  local _file
+  _file=$(pp_dismiss_file_path)
+  jq -e "select(.source == \"auto_suppress\" and .hash == \"$_hash\" and .ttl_days == 7)" "$_file" >/dev/null
+}
+
+@test "auto_suppress: below threshold does NOT create a rule" {
+  local _hash="belowthresholdxyz"
+  local _i
+  for _i in 1 2 3; do
+    printf '%s' "$_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
+  done
+  PP_DISMISS_AUTO_THRESHOLD=10 run pp_dismiss_auto_suppress
+  local _file
+  _file=$(pp_dismiss_file_path)
+  [ ! -f "$_file" ] || ! jq -e "select(.hash == \"$_hash\")" "$_file" >/dev/null
+}
+
+@test "auto_suppress: hash with prior ack is NOT auto-suppressed" {
+  local _hash="ackedhashzzz"
+  pp_dismiss_ack "$_hash"
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    printf '%s' "$_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
+  done
+  PP_DISMISS_AUTO_THRESHOLD=10 run pp_dismiss_auto_suppress
+  local _file _autoct
+  _file=$(pp_dismiss_file_path)
+  _autoct=$(jq -c "select(.source == \"auto_suppress\" and .hash == \"$_hash\")" "$_file" | wc -l | tr -d ' ')
+  [ "$_autoct" = "0" ]
+}

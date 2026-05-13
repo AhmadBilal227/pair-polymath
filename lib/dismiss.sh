@@ -211,3 +211,83 @@ pp_dismiss_enable() {
     | jq -c '. + {deleted: false, deleted_reason: null}' \
     >> "$_file"
 }
+
+# pp_dismiss_ack HASH_PREFIX
+# Records an explicit acknowledgement that this observation is useful and
+# should NOT be auto-suppressed regardless of recurrence.
+pp_dismiss_ack() {
+  local _hash_prefix="${1:?pp_dismiss_ack requires a hash prefix}"
+  local _file _id _ts
+  _file=$(pp_dismiss_file_path) || return 1
+  _id="a-$(date +%Y-%m-%d)-$(printf '%04x' $(( RANDOM * RANDOM % 65535 )))"
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc \
+    --arg id "$_id" \
+    --arg ts "$_ts" \
+    --arg hash "$_hash_prefix" \
+    '{
+       id: $id, ts: $ts,
+       reason_summary: "Acked — keep firing",
+       scope: "project", lens_id: null,
+       hash: $hash,
+       deleted: false, deleted_reason: null,
+       ttl_days: null, source: "ack"
+     }' >> "$_file"
+  printf '%s' "$_id"
+}
+
+# pp_dismiss_auto_suppress
+# Scans $PP_CACHE_DIR/cc-monitor-injected-hash-* across sessions, counts
+# how many times each hash appears. Threshold + window from env. Acked
+# hashes are skipped. Creates source=auto_suppress rules with ttl_days=7.
+pp_dismiss_auto_suppress() {
+  local _threshold="${PP_DISMISS_AUTO_THRESHOLD:-10}"
+  case "$_threshold" in ''|*[!0-9]*) _threshold=10 ;; esac
+  local _file
+  _file=$(pp_dismiss_file_path) || return 1
+  # Gather acked-hashes set.
+  local _acked=""
+  if [ -f "$_file" ]; then
+    _acked=$(jq -r 'select(.source == "ack") | .hash' "$_file" 2>/dev/null)
+  fi
+  # Walk injected-hash files, count per hash. Read each file as a single
+  # token (its contents may or may not end with a newline) and emit one
+  # hash per line, then count via sort | uniq -c.
+  local _counts _f _content
+  _counts=$(
+    find "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}" \
+      -maxdepth 1 -name 'cc-monitor-injected-hash-*' -type f 2>/dev/null \
+      | while IFS= read -r _f; do
+          _content=$(cat "$_f" 2>/dev/null | tr -d '\n')
+          [ -n "$_content" ] && printf '%s\n' "$_content"
+        done \
+      | sort | uniq -c | sort -nr
+  )
+  printf '%s\n' "$_counts" | while read -r _ct _hash; do
+    [ -z "$_hash" ] && continue
+    [ "${_ct:-0}" -lt "$_threshold" ] && continue
+    # Skip if acked.
+    if printf '%s\n' "$_acked" | grep -qF "$_hash"; then continue; fi
+    # Skip if already an active auto_suppress rule for this hash.
+    if [ -f "$_file" ]; then
+      if jq -e "select(.source == \"auto_suppress\" and .hash == \"$_hash\" and .deleted == false)" "$_file" >/dev/null 2>&1; then
+        continue
+      fi
+    fi
+    # Create auto-suppress rule.
+    local _id _ts
+    _id="d-$(date +%Y-%m-%d)-$(printf '%04x' $(( RANDOM * RANDOM % 65535 )))"
+    _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    jq -nc \
+      --arg id "$_id" --arg ts "$_ts" --arg hash "$_hash" \
+      --argjson ct "$_ct" \
+      '{
+         id: $id, ts: $ts,
+         reason_summary: "Auto-suppressed after \($ct) recurrences",
+         scope: "project", lens_id: null,
+         hash: $hash,
+         deleted: false, deleted_reason: null,
+         ttl_days: 7, source: "auto_suppress"
+       }' >> "$_file"
+  done
+}

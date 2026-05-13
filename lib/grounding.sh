@@ -369,6 +369,10 @@ pp_project_key() {
     _hash=$(printf '%s' "$_scope" | sha256 -q 2>/dev/null | cut -c1-16)
   elif command -v md5sum >/dev/null 2>&1; then
     _hash=$(printf '%s' "$_scope" | md5sum 2>/dev/null | cut -c1-16)
+  elif command -v md5 >/dev/null 2>&1; then
+    # Round-2 review G2-6: macOS lacks shasum/sha256sum/sha256/md5sum on
+    # stripped installs but ships /sbin/md5. `md5 -q` prints just the hex.
+    _hash=$(printf '%s' "$_scope" | md5 -q 2>/dev/null | cut -c1-16)
   fi
   [ -z "$_hash" ] && _hash="0000000000000000"
   printf '%s' "$_hash"

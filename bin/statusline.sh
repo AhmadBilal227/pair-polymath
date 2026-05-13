@@ -419,7 +419,11 @@ _pp_proj_key=$(pp_project_key "$cwd")
 # the cache location and left stale files undiscovered by `cache list`.
 _pp_cache_root="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
 TIP_CACHE="${_pp_cache_root}/cc-tips-${_pp_proj_key}.txt"
-TIP_LOCK="/tmp/cc-tips-fetch-${_pp_proj_key}.lock"
+# Round-2 review G2-5: lock path in world-writable /tmp is a DoS surface
+# — another local user can pre-create the lock dir to permanently block
+# tip refresh. Namespace by UID so cross-user pre-creation can't squat.
+_pp_lock_uid="${UID:-$(id -u 2>/dev/null || echo 0)}"
+TIP_LOCK="/tmp/cc-tips-fetch-${_pp_lock_uid}-${_pp_proj_key}.lock"
 mkdir -p "$_pp_cache_root" 2>/dev/null
 # v0.4.2 privacy fix: tighten cache parent dir to 700 so other local users
 # can't enumerate session_ids or read project keys via the directory listing.

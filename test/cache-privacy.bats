@@ -105,7 +105,7 @@ teardown() { rm -rf "$HOME"; }
   run bash -c "umask 077; : > '$PP_CACHE_DIR/probe.txt'"
   [ "$status" -eq 0 ]
   local _mode
-  _mode=$(stat -c %Lp "$PP_CACHE_DIR/probe.txt" 2>/dev/null || stat -f %Lp "$PP_CACHE_DIR/probe.txt" 2>/dev/null)
+  _mode=$(pp_file_mode "$PP_CACHE_DIR/probe.txt")
   [ "$_mode" = "600" ]
 }
 
@@ -117,7 +117,7 @@ teardown() { rm -rf "$HOME"; }
   "
   [ "$status" -eq 0 ]
   local _mode
-  _mode=$(stat -c %Lp "$PP_CACHE_DIR" 2>/dev/null || stat -f %Lp "$PP_CACHE_DIR" 2>/dev/null)
+  _mode=$(pp_file_mode "$PP_CACHE_DIR")
   [ "$_mode" = "700" ]
 }
 

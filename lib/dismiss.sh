@@ -175,6 +175,29 @@ EOF
   printf '%s' "$_rendered"
 }
 
+# pp_dismiss_is_suppressed HASH
+# Returns 0 if any active rule has hash == HASH; else 1.
+# Active = deleted=false (LATEST line for the id) AND not-ttl-expired.
+pp_dismiss_is_suppressed() {
+  local _hash="${1:?pp_dismiss_is_suppressed requires a hash}"
+  local _file
+  _file=$(pp_dismiss_file_path) || return 1
+  [ ! -f "$_file" ] && return 1
+  local _now_ms
+  _now_ms=$(date +%s)
+  local _match
+  _match=$(jq -s --arg h "$_hash" --arg now "$_now_ms" '
+    group_by(.id) | map(last)
+    | map(select(.deleted == false))
+    | map(select(.ttl_days == null or (
+        (.ts | fromdateiso8601) + (.ttl_days * 86400) > ($now | tonumber)
+      )))
+    | map(select(.hash == $h))
+    | length
+  ' "$_file")
+  [ "${_match:-0}" -gt 0 ]
+}
+
 # pp_dismiss_enable ID
 # Inverse of disable: appends a new line with deleted=false.
 pp_dismiss_enable() {

@@ -152,3 +152,32 @@ teardown() { rm -rf "$HOME"; }
   [ "$_out1" = "$_out2" ]
   [ -f "$PP_CACHE_DIR/cc-dismiss-rendered-$(pp_memory_project_hash "$PWD").txt" ]
 }
+
+@test "is_suppressed: returns 0 (suppressed) when hash matches an active rule" {
+  local _id _file _tmp
+  _id=$(pp_dismiss_add "Hash-tagged rule" project)
+  _file=$(pp_dismiss_file_path)
+  _tmp=$(mktemp)
+  jq -c "if .id == \"$_id\" then .hash = \"abc123\" else . end" "$_file" > "$_tmp"
+  mv "$_tmp" "$_file"
+  run pp_dismiss_is_suppressed "abc123"
+  [ "$status" -eq 0 ]
+}
+
+@test "is_suppressed: returns 1 (not suppressed) when no rule matches" {
+  pp_dismiss_add "Some rule" project
+  run pp_dismiss_is_suppressed "no-such-hash"
+  [ "$status" -ne 0 ]
+}
+
+@test "is_suppressed: returns 1 when rule's hash matches but rule is deleted" {
+  local _id _file _tmp
+  _id=$(pp_dismiss_add "Will be disabled" project)
+  pp_dismiss_disable "$_id" user_disabled
+  _file=$(pp_dismiss_file_path)
+  _tmp=$(mktemp)
+  jq -c "if .id == \"$_id\" then .hash = \"def456\" else . end" "$_file" > "$_tmp"
+  mv "$_tmp" "$_file"
+  run pp_dismiss_is_suppressed "def456"
+  [ "$status" -ne 0 ]
+}

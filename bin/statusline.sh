@@ -1330,25 +1330,29 @@ lens_slot=$(( ($(date +%s) / 30) % _pp_slot_total ))
 # v0.4 Phase 2 fix: the router fires only 1-3 lenses per cycle, so most
 # rotation slots have no fresh cache. Probe the picked slot first; if its
 # cache is empty or missing, fall through to the next slot that DOES have
-# content. Caps at PP_LENS_COUNT iterations so the tip-slot (= PP_LENS_COUNT)
-# can still take over when no lens has any content.
-if [ "$lens_slot" -lt "$PP_LENS_COUNT" ]; then
-  _pp_probe_i=0
-  while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
-    _pp_probe_idx=$(( (lens_slot + _pp_probe_i) % PP_LENS_COUNT ))
-    PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$_pp_probe_idx]}.txt"
-    if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
-      mon=$(head -1 "$PP_CACHE_DISPLAY")
-      if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
-        mon_topic="${mon%%|||*}"
-        mon_body="${mon#*|||}"
-        lens_slot="$_pp_probe_idx"
-        break
-      fi
+# content. This also runs when rotation lands on the TIP slot
+# (lens_slot == PP_LENS_COUNT) — we still want a valid mon_topic if any
+# lens has fresh content, since the final display logic uses mon_topic
+# as the fallback when tip is missing. (Code-reviewer I1.)
+_pp_probe_start=$lens_slot
+[ "$_pp_probe_start" -ge "$PP_LENS_COUNT" ] && _pp_probe_start=0
+_pp_probe_i=0
+while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
+  _pp_probe_idx=$(( (_pp_probe_start + _pp_probe_i) % PP_LENS_COUNT ))
+  PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$_pp_probe_idx]}.txt"
+  if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
+    mon=$(head -1 "$PP_CACHE_DISPLAY")
+    if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
+      mon_topic="${mon%%|||*}"
+      mon_body="${mon#*|||}"
+      # Only re-point lens_slot when we were ON a lens slot; tip slot
+      # stays so tip path still has priority when tip_topic is valid.
+      [ "$lens_slot" -lt "$PP_LENS_COUNT" ] && lens_slot="$_pp_probe_idx"
+      break
     fi
-    _pp_probe_i=$((_pp_probe_i + 1))
-  done
-fi
+  fi
+  _pp_probe_i=$((_pp_probe_i + 1))
+done
 
 # === 2-line output: status + alternating advisor topic ===
 # Line 1: ultra-compact status (~55-65 cells, fits narrow pane with notification margin)

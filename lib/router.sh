@@ -267,3 +267,113 @@ EOF
   # No injection: emit picked as-is, strip blank lines.
   printf '%s\n' "$_picked" | LC_ALL=C grep -v '^$'
 }
+
+# ============================================================================
+# v0.4 Phase 2.5 Track 2 — Router telemetry
+# ============================================================================
+#
+# pp_router_metrics_emit <signals_json> <picked_newline_or_space>
+#                        <surprise_fired_bool> <failopen_bool> <llm_call_ms>
+#
+# Appends one JSONL line to PP_ROUTER_METRICS_FILE for the cycle.
+# Schema: {ts, phase, picked_count, surprise_fired, failopen, llm_call_ms}
+#
+# Critical contract: this function NEVER blocks the cycle path. On any
+# error (lock contention, unwritable file, missing jq, ...) it silently
+# no-ops. Telemetry quality is sacrificed for cycle reliability.
+#
+# GPT plan-review fixes applied:
+#  - C2: lock retry capped at 10 attempts × 1s = 10s max → then drop sample
+#  - C3: picked_count uses `tr ' ' '\n' | grep -c` (was wrong tr pattern)
+#  - I1: stale lockdir auto-cleanup if mtime > 30 seconds
+#  - I2: rotation truncates .old (single rotation, no unbounded growth)
+#  - I7: comment matches implementation (direct append under lock; no tmpfile)
+
+: "${PP_ROUTER_METRICS_FILE:=${HOME}/.claude/cache/router-metrics.jsonl}"
+: "${PP_ROUTER_METRICS_MAX_LINES:=5000}"
+
+pp_router_metrics_emit() {
+  # Defensive: never propagate a failure to the cycle path. Wrapping in
+  # a subshell with set +e ensures we always return 0 even under bats's
+  # set -e environment or if internal commands hiccup.
+  (
+    set +e
+    local _signals="${1:-{\}}"
+    local _picked="${2:-}"
+    local _surprise="${3:-0}"
+    local _failopen="${4:-0}"
+    local _llm_ms="${5:-0}"
+
+    command -v jq >/dev/null 2>&1 || exit 0
+    local _dir
+    _dir=$(dirname "$PP_ROUTER_METRICS_FILE" 2>/dev/null)
+    [ -z "$_dir" ] && exit 0
+    mkdir -p "$_dir" 2>/dev/null || exit 0
+    [ -w "$_dir" ] || exit 0
+
+    # Phase from signals (jq -r; defaults to "unknown" on parse failure).
+    local _phase
+    _phase=$(printf '%s' "$_signals" | jq -r '.phase // "unknown"' 2>/dev/null) || _phase="unknown"
+    [ -z "$_phase" ] && _phase="unknown"
+
+    # Count picked entries. GPT-C3: `tr ' \n' '\n\n'` was wrong (single-
+    # quoted '\n' is literal two chars, not newline). Correct: normalize
+    # delimiters to newline, then count lines with any non-whitespace char.
+    local _picked_count=0
+    if [ -n "$_picked" ]; then
+      _picked_count=$(printf '%s' "$_picked" | tr ' ' '\n' | LC_ALL=C grep -c '^[^[:space:]]' 2>/dev/null) || _picked_count=0
+      [ -z "$_picked_count" ] && _picked_count=0
+    fi
+
+    # Build JSONL line (compact, single-line).
+    local _ts _line
+    _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || _ts="1970-01-01T00:00:00Z"
+    _line=$(jq -n -c \
+      --arg ts "$_ts" \
+      --arg phase "$_phase" \
+      --argjson picked_count "$_picked_count" \
+      --argjson surprise_fired "$_surprise" \
+      --argjson failopen "$_failopen" \
+      --argjson llm_call_ms "$_llm_ms" \
+      '{ts: $ts, phase: $phase, picked_count: $picked_count, surprise_fired: $surprise_fired, failopen: $failopen, llm_call_ms: $llm_call_ms}' \
+      2>/dev/null) || _line=""
+    [ -z "$_line" ] && exit 0
+
+    # Bash 3.2-portable lock: mkdir is atomic across NFS too.
+    # GPT-I1: stale-lock auto-cleanup. If the .lock dir is older than 30s
+    # the previous writer probably crashed; reclaim.
+    local _lockdir="${PP_ROUTER_METRICS_FILE}.lock"
+    if [ -d "$_lockdir" ]; then
+      local _now _ltime
+      _now=$(date +%s 2>/dev/null) || _now=""
+      _ltime=$(stat -c %Y "$_lockdir" 2>/dev/null || stat -f %m "$_lockdir" 2>/dev/null) || _ltime=""
+      if [ -n "$_now" ] && [ -n "$_ltime" ] && [ "$((_now - _ltime))" -gt 30 ]; then
+        rmdir "$_lockdir" 2>/dev/null
+      fi
+    fi
+
+    # GPT-C2: cap retries strictly. 10 attempts × 1s sleep = 10s max wait.
+    # Beyond that, drop this sample to preserve cycle reliability.
+    local _tries=0
+    while ! mkdir "$_lockdir" 2>/dev/null; do
+      _tries=$((_tries + 1))
+      [ "$_tries" -ge 10 ] && exit 0
+      sleep 1
+    done
+
+    # Append (direct, single-line, atomic on most POSIX FS for <PIPE_BUF bytes).
+    printf '%s\n' "$_line" >> "$PP_ROUTER_METRICS_FILE" 2>/dev/null
+
+    # Rotate if over cap. Single rotation: overwrites any prior .old.
+    # GPT-I2: no unbounded .old growth.
+    local _count
+    _count=$(wc -l < "$PP_ROUTER_METRICS_FILE" 2>/dev/null | tr -d ' ') || _count=0
+    if [ -n "$_count" ] && [ "$_count" -gt "${PP_ROUTER_METRICS_MAX_LINES:-5000}" ]; then
+      mv -f "$PP_ROUTER_METRICS_FILE" "${PP_ROUTER_METRICS_FILE}.old" 2>/dev/null
+    fi
+
+    rmdir "$_lockdir" 2>/dev/null
+    exit 0
+  ) 2>/dev/null
+  return 0
+}

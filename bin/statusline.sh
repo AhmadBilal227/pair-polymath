@@ -929,6 +929,16 @@ GROUND
           _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         fi
 
+        # v0.4 Phase 2.5 Track 2: emit per-cycle router telemetry.
+        # surprise_fired / failopen / llm_call_ms are zero-passed for
+        # now; instrumentation through pp_router_pick_lenses is a
+        # follow-on commit. ts + phase + picked_count are immediately
+        # useful for measuring router behavior in production.
+        pp_router_metrics_emit \
+          "$_pp_router_signals" \
+          "$_pp_router_picked" \
+          0 0 0 2>/dev/null || true
+
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"

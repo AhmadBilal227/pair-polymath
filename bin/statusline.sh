@@ -881,6 +881,34 @@ GROUND
         # Returns NEWLINE-delimited lens IDs. Fail-open → all enabled.
         # PP_ROUTER_ENABLE=0 makes _pp_router_picked the full enabled set,
         # restoring v0.3 fan-out-all behavior byte-identically.
+        #
+        # Wire the env-derived signals before invoking the router so that
+        # session_age_min and budget_remaining_pct actually reach the
+        # signal extractor (Code-Reviewer C3: previously both were dead).
+        if [ -z "${PP_SESSION_START_EPOCH:-}" ] && [ -n "${session_id:-}" ]; then
+          # Use the first time we see this session as a proxy; persist so
+          # the value stabilizes across cycles within the same session.
+          _pp_sess_age_file="${PP_CACHE_DIR}/cc-monitor-${session_id}-start.txt"
+          if [ -r "$_pp_sess_age_file" ]; then
+            PP_SESSION_START_EPOCH=$(cat "$_pp_sess_age_file" 2>/dev/null)
+          else
+            PP_SESSION_START_EPOCH=$(date +%s 2>/dev/null)
+            printf '%s' "$PP_SESSION_START_EPOCH" > "$_pp_sess_age_file" 2>/dev/null || true
+          fi
+          export PP_SESSION_START_EPOCH
+        fi
+        if [ -z "${PP_BUDGET_REMAINING_PCT:-}" ]; then
+          # budget_get returns "used,max"; compute remaining percentage.
+          _pp_budget_used_max=$(budget_get 2>/dev/null || printf '0,${PP_MAX_DAILY_CALLS:-3500}')
+          _pp_budget_used=$(printf '%s' "$_pp_budget_used_max" | cut -d, -f1)
+          _pp_budget_max=$(printf '%s' "$_pp_budget_used_max" | cut -d, -f2)
+          if [ -n "$_pp_budget_max" ] && [ "$_pp_budget_max" -gt 0 ] 2>/dev/null; then
+            PP_BUDGET_REMAINING_PCT=$(( (_pp_budget_max - _pp_budget_used) * 100 / _pp_budget_max ))
+            [ "$PP_BUDGET_REMAINING_PCT" -lt 0 ] && PP_BUDGET_REMAINING_PCT=0
+            export PP_BUDGET_REMAINING_PCT
+          fi
+        fi
+
         _pp_router_signals=$(pp_router_extract_signals "${transcript_filtered:-}" "${_pp_tool_calls_json:-[]}" 2>/dev/null || printf '{}')
         PP_LENS_IDS_AVAILABLE=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         export PP_LENS_IDS_AVAILABLE
@@ -893,6 +921,13 @@ GROUND
           fi
         done
         _pp_router_picked=$(pp_router_surprise_inject "$_pp_router_picked" "$_pp_router_not_picked")
+        # Debugger I2: blackout guard. If somehow the surprise inject
+        # left us with an empty picked set (shouldn't happen via fail-open
+        # but defensive), restore the full enabled set so the cycle never
+        # produces zero observations silently.
+        if [ -z "$_pp_router_picked" ]; then
+          _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
+        fi
 
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do

@@ -87,24 +87,25 @@ pp_router_pick_lenses() {
     return 0
   fi
 
-  # Normalize: lowercase + trim + strict regex post-filter (I1 + I6).
-  # Strict regex: a valid lens ID is [a-z][a-z0-9-]* — no bullets,
-  # punctuation, commas, markdown.
+  # Normalize: trim + strict regex post-filter (I1 + I6). Case is
+  # PRESERVED — real lens IDs in this repo are UPPERCASE_UNDERSCORE
+  # (UX_DESIGN, ENGINEERING, ...). Earlier draft lowercased here, which
+  # would have rejected every real ID after the regex pass and silently
+  # collapsed to fail-open in production (caught by the 4-way ralph
+  # review). Regex now accepts both cases plus underscores and slashes
+  # so v0.4 Phase 4 category-prefixed IDs (executive/cfo) also pass.
   local _validated="" _seen="" _line _norm
   while IFS= read -r _line; do
     # Trim leading/trailing whitespace.
     _norm=$(printf '%s' "$_line" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [ -z "$_norm" ] && continue
-    # Lowercase (bash 3.2-portable: use tr, not ${var,,}).
-    _norm=$(printf '%s' "$_norm" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-    # Strict regex: must match ^[a-z][a-z0-9_/-]*$. Rejects bullets,
-    # numbered lists, anything with leading punctuation or quotes.
-    # Allows underscores and slashes — needed for v0.4 Phase 4 category-
-    # prefixed IDs like 'executive/cfo' (GPT review C2).
-    if ! printf '%s' "$_norm" | LC_ALL=C grep -qE '^[a-z][a-z0-9_/-]*$'; then
+    # Strict regex: must match ^[A-Za-z][A-Za-z0-9_/-]*$. Rejects
+    # bullets, numbered lists, anything with leading punctuation/quotes.
+    if ! printf '%s' "$_norm" | LC_ALL=C grep -qE '^[A-Za-z][A-Za-z0-9_/-]*$'; then
       continue
     fi
-    # Must be in enabled set + not yet picked.
+    # Must be in enabled set + not yet picked. Case-sensitive: registry
+    # owns the canonical casing.
     if _pp_router_emit_enabled | LC_ALL=C grep -qxF "$_norm"; then
       case " $_seen " in
         *" $_norm "*) ;;
@@ -186,16 +187,26 @@ _pp_router_llm_call() {
     gtimeout "${PP_ROUTER_TIMEOUT_S:-8}" llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null
   else
     # Background-spawn + watchdog. Emit output to a tmp file so we can
-    # read after the bounded wait.
+    # read after the bounded wait. Debugger I1: enable job control so
+    # the subshell becomes its own process group; on timeout, kill the
+    # WHOLE group (-$_pid) so the grandchild `llm` process dies with
+    # the subshell. Otherwise `llm` orphans and continues the API call,
+    # leaking one full router-model call per timeout event.
     local _outfile
     _outfile=$(mktemp)
+    set -m 2>/dev/null || true
     (
       llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null > "$_outfile"
     ) &
     local _pid=$!
+    set +m 2>/dev/null || true
     local _waited=0
     while kill -0 "$_pid" 2>/dev/null; do
-      [ "$_waited" -ge "${PP_ROUTER_TIMEOUT_S:-8}" ] && { kill -9 "$_pid" 2>/dev/null; break; }
+      if [ "$_waited" -ge "${PP_ROUTER_TIMEOUT_S:-8}" ]; then
+        # Process-group kill: -$_pid targets every PID in the group.
+        kill -9 -- "-$_pid" 2>/dev/null || kill -9 "$_pid" 2>/dev/null
+        break
+      fi
       sleep 1
       _waited=$((_waited + 1))
     done

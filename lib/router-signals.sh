@@ -59,13 +59,15 @@ pp_router_extract_signals() {
   # count.
   _test_with_fail=$(printf '%s' "$_tools_json" | jq '
     [ .[] | select(.tool == "Bash"
-                   and (.target // "" | test("(test|spec|jest|mocha|pytest|go test|pnpm test|npm test|cargo test|bats|rspec)"; "i"))
+                   and (.target // "" | test("(test|spec|jest|mocha|vitest|pytest|playwright|cypress|go test|pnpm test|npm test|cargo test|bats|rspec|nx (test|e2e))"; "i"))
                    and (.summary // "" | test("(FAIL|ERROR|✗|exit 1|[1-9][0-9]* (failing|failed))"; "i"))
                   )
     ] | length' 2>/dev/null)
 
   local _plan_hits
-  _plan_hits=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE 'let me think|consider the|trade-?off|approach|should we|think about' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
+  # AI-eng I2: bare 'approach' fires on "my approach to caching".
+  # Dropped; planning markers must be meta-discussion phrases.
+  _plan_hits=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE 'let me think|consider the|trade-?off|should we|think about|let.?s plan' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
 
   if [ "${_test_with_fail:-0}" -ge 1 ]; then
     _phase="debugging"
@@ -77,8 +79,10 @@ pp_router_extract_signals() {
 
   # ---------- confidence detection ----------
   local _hedges _definites _confidence="medium"
-  _hedges=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE 'i think|maybe|perhaps|might|not sure|could be|probably' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
-  _definites=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE 'fixed|verified|works|completed|done|tested|confirmed' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
+  _hedges=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE '\b(i think|maybe|perhaps|might|not sure|could be|probably)\b' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
+  # AI-eng M3: word boundaries — earlier regex matched "prefixed",
+  # "frameworks", "undone" as definite-verb hits.
+  _definites=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE '\b(fixed|verified|works|completed|done|tested|confirmed)\b' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
   if [ "${_hedges:-0}" -gt "${_definites:-0}" ] && [ "${_hedges:-0}" -ge 2 ]; then
     _confidence="low"
   elif [ "${_definites:-0}" -gt "${_hedges:-0}" ] && [ "${_definites:-0}" -ge 2 ]; then
@@ -94,7 +98,7 @@ pp_router_extract_signals() {
   local _test_with_pass
   _test_with_pass=$(printf '%s' "$_tools_json" | jq '
     [ .[] | select(.tool == "Bash"
-                   and (.target // "" | test("(test|spec|jest|mocha|pytest|go test|pnpm test|npm test|cargo test|bats|rspec)"; "i"))
+                   and (.target // "" | test("(test|spec|jest|mocha|vitest|pytest|playwright|cypress|go test|pnpm test|npm test|cargo test|bats|rspec|nx (test|e2e))"; "i"))
                    and (.summary // "" | test("(PASS|passing|passed|✓|all .* pass)"; "i"))
                   )
     ] | length' 2>/dev/null)
@@ -107,9 +111,13 @@ pp_router_extract_signals() {
   fi
 
   # ---------- tone ----------
-  # Frustration ~ 2+ negation markers in user messages (^USER: prefix).
+  # AI-eng C2: tighter regex. Bare 'no' was matching "no problem",
+  # "no worries", "non-stop" → false-positive frustration on cordial
+  # sessions. Require CONTEXTUAL phrases (no comma, no that, "that is
+  # wrong", "not working", "why isn't"/"why won't") to register as a
+  # frustration marker.
   local _frustration _tone="neutral"
-  _frustration=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE '^USER:.*\b(no|wrong|stop|why are you|not working|not getting|that is wrong)\b' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
+  _frustration=$(printf '%s' "$_tx" | LC_ALL=C grep -oiE '^USER:.*(\bno,|\bno that|\bno the|\bthat.?s wrong|\bnot working|\bnot getting|\bstop doing|\bwhy (are|isn.?t|won.?t)|\bdoesn.?t work)' 2>/dev/null | LC_ALL=C wc -l | tr -d ' \n')
   if [ "${_frustration:-0}" -ge 2 ]; then
     _tone="frustrated"
   fi

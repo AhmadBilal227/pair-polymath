@@ -23,25 +23,46 @@ _enable() {
   export PP_LENS_IDS_AVAILABLE
 }
 
+# Real lens IDs from lenses/*.json (UPPERCASE_UNDERSCORE convention).
+# Reviewer C1 — earlier draft used fake kebab-case IDs that no real
+# polymath cycle would ever see, masking the lowercasing + regex bug
+# that broke the router in production. Tests now use the canonical
+# registry so a future regression on case handling fails loudly.
+_REAL_IDS=(UX_DESIGN ENGINEERING SECURITY PERF_FINOPS PRODUCT_BIZ COGNITIVE_FLOW STRATEGIC_FOUNDER)
+
 # ----- ENABLE=0 / EVAL_MODE bypass (v0.3 fallback) -----
 
-@test "pick: PP_ROUTER_ENABLE=0 returns ALL enabled lens IDs" {
-  _enable engineering security ux-design
+@test "pick: PP_ROUTER_ENABLE=0 returns ALL enabled lens IDs (real UPPERCASE_UNDERSCORE ids)" {
+  _enable UX_DESIGN ENGINEERING SECURITY
   PP_ROUTER_ENABLE=0 run pp_router_pick_lenses '' ''
   [ "$status" -eq 0 ]
   line_count=$(printf '%s\n' "$output" | grep -c '^.' )
   [ "$line_count" -eq 3 ]
-  printf '%s' "$output" | grep -qF 'engineering'
-  printf '%s' "$output" | grep -qF 'security'
-  printf '%s' "$output" | grep -qF 'ux-design'
+  printf '%s' "$output" | grep -qxF 'UX_DESIGN'
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  printf '%s' "$output" | grep -qxF 'SECURITY'
 }
 
 @test "pick: PP_EVAL_MODE=1 bypasses router and returns ALL enabled" {
-  _enable engineering security
+  _enable ENGINEERING SECURITY
   PP_EVAL_MODE=1 PP_ROUTER_ENABLE=1 run pp_router_pick_lenses '' ''
   [ "$status" -eq 0 ]
   line_count=$(printf '%s\n' "$output" | grep -c '^.' )
   [ "$line_count" -eq 2 ]
+}
+
+@test "pick: REGRESSION — real UPPERCASE_UNDERSCORE IDs round-trip through validation (Code-Reviewer C1)" {
+  _enable UX_DESIGN ENGINEERING SECURITY
+  # Simulate router returning real IDs verbatim.
+  PP_ROUTER_ENABLE=1 \
+    PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nENGINEERING\nSECURITY' \
+    run pp_router_pick_lenses '' ''
+  [ "$status" -eq 0 ]
+  # All three must survive validation — earlier draft lowercased them
+  # and the regex rejected the underscore, collapsing to fail-open.
+  printf '%s' "$output" | grep -qxF 'UX_DESIGN'
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  printf '%s' "$output" | grep -qxF 'SECURITY'
 }
 
 # ----- MIN / MAX bounds -----
@@ -79,17 +100,47 @@ _enable() {
   printf '%s' "$output" | grep -qF 'security'
 }
 
-@test "pick: I1 — lowercases and trims router output before validation" {
-  _enable engineering security
+@test "pick: I1 — trims whitespace but PRESERVES case (registry owns canonical casing)" {
+  # Corrected after Code-Reviewer C1: earlier draft lowercased, which
+  # broke against the real UPPERCASE_UNDERSCORE registry. Now: trim
+  # only, case-sensitive match against registry. Whitespace and tabs
+  # around an otherwise-valid ID are forgiven.
+  _enable ENGINEERING SECURITY
   PP_ROUTER_ENABLE=1 \
-    PP_ROUTER_FORCE_OUTPUT=$'  Engineering   \nSECURITY ' \
+    PP_ROUTER_FORCE_OUTPUT=$'  ENGINEERING   \nSECURITY ' \
     run pp_router_pick_lenses '' ''
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF 'engineering'
-  printf '%s' "$output" | grep -qF 'security'
-  # No capitalized version leaked through
-  ! printf '%s' "$output" | grep -qF 'Engineering'
-  ! printf '%s' "$output" | grep -qF 'SECURITY'
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  printf '%s' "$output" | grep -qxF 'SECURITY'
+}
+
+@test "render: AI-eng C1 — prompts/router.md placeholders substitute (allowlist regression)" {
+  # The router prompt declares 5 placeholders that earlier weren't in
+  # PP_PROMPT_VAR_ALLOWLIST, so pp_render_prompt silently rendered them
+  # empty and the router LLM saw a useless prompt. This test renders
+  # the actual prompt with a synthetic signals JSON + registry, asserts
+  # the substitution worked end-to-end.
+  PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  # shellcheck source=../lib/prompt-loader.sh
+  . "$PP_ROOT/lib/prompt-loader.sh"
+  signals_json='{"phase":"debugging","confidence":"high","outcome":"test_failed"}'
+  transcript_tail_5='USER: tests failing'$'\n''CLAUDE: looking now'
+  lens_registry=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  PP_ROUTER_MIN=1
+  PP_ROUTER_MAX=3
+  export signals_json transcript_tail_5 lens_registry PP_ROUTER_MIN PP_ROUTER_MAX
+  run pp_render_prompt router
+  [ "$status" -eq 0 ]
+  # Each placeholder MUST have its content visible in the rendered output.
+  printf '%s' "$output" | grep -qF '"phase":"debugging"'
+  printf '%s' "$output" | grep -qF 'USER: tests failing'
+  printf '%s' "$output" | grep -qxF 'UX_DESIGN'
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  # MIN/MAX numbers substitute too (the prompt references them).
+  printf '%s' "$output" | grep -qE 'MIN=1'
+  printf '%s' "$output" | grep -qE 'MAX=3'
+  # Negative: the literal '${signals_json}' must NOT remain in output.
+  ! printf '%s' "$output" | grep -qF '${signals_json}'
 }
 
 @test "pick: GPT-C2 — accepts category-prefixed IDs like 'executive/cfo' (Phase 4 prep)" {

@@ -46,6 +46,12 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/transcript.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/tool-summary.sh"
+# v0.4 Phase 2: router meta-lens (picks 1-3 lenses per cycle instead of 7).
+# PP_ROUTER_ENABLE=0 reverts to v0.3 fan-out-all behavior byte-identically.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/router-signals.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/router.sh"
 
 # Pair Polymath memory subsystem (Phase 2.3). Only sourced when enabled; the
 # default PP_MEMORY_ENABLE=0 keeps the cycle path byte-identical to pre-2.3
@@ -870,9 +876,68 @@ GROUND
         # === PARALLEL N-AGENT FAN-OUT ===
         # Run all loaded lenses in parallel subshells. Each writes to its own cache.
         # Lens metadata comes from $PP_LENS_IDS/HATS/FOCUS (loaded from lenses/*.json).
+
+        # v0.4 Phase 2: router meta-lens decides which lenses fire this cycle.
+        # Returns NEWLINE-delimited lens IDs. Fail-open → all enabled.
+        # PP_ROUTER_ENABLE=0 makes _pp_router_picked the full enabled set,
+        # restoring v0.3 fan-out-all behavior byte-identically.
+        #
+        # Wire the env-derived signals before invoking the router so that
+        # session_age_min and budget_remaining_pct actually reach the
+        # signal extractor (Code-Reviewer C3: previously both were dead).
+        if [ -z "${PP_SESSION_START_EPOCH:-}" ] && [ -n "${session_id:-}" ]; then
+          # Use the first time we see this session as a proxy; persist so
+          # the value stabilizes across cycles within the same session.
+          _pp_sess_age_file="${PP_CACHE_DIR}/cc-monitor-${session_id}-start.txt"
+          if [ -r "$_pp_sess_age_file" ]; then
+            PP_SESSION_START_EPOCH=$(cat "$_pp_sess_age_file" 2>/dev/null)
+          else
+            PP_SESSION_START_EPOCH=$(date +%s 2>/dev/null)
+            printf '%s' "$PP_SESSION_START_EPOCH" > "$_pp_sess_age_file" 2>/dev/null || true
+          fi
+          export PP_SESSION_START_EPOCH
+        fi
+        if [ -z "${PP_BUDGET_REMAINING_PCT:-}" ]; then
+          # budget_get returns "used,max"; compute remaining percentage.
+          _pp_budget_used_max=$(budget_get 2>/dev/null || printf '0,${PP_MAX_DAILY_CALLS:-3500}')
+          _pp_budget_used=$(printf '%s' "$_pp_budget_used_max" | cut -d, -f1)
+          _pp_budget_max=$(printf '%s' "$_pp_budget_used_max" | cut -d, -f2)
+          if [ -n "$_pp_budget_max" ] && [ "$_pp_budget_max" -gt 0 ] 2>/dev/null; then
+            PP_BUDGET_REMAINING_PCT=$(( (_pp_budget_max - _pp_budget_used) * 100 / _pp_budget_max ))
+            [ "$PP_BUDGET_REMAINING_PCT" -lt 0 ] && PP_BUDGET_REMAINING_PCT=0
+            export PP_BUDGET_REMAINING_PCT
+          fi
+        fi
+
+        _pp_router_signals=$(pp_router_extract_signals "${transcript_filtered:-}" "${_pp_tool_calls_json:-[]}" 2>/dev/null || printf '{}')
+        PP_LENS_IDS_AVAILABLE=$(printf '%s\n' "${PP_LENS_IDS[@]}")
+        export PP_LENS_IDS_AVAILABLE
+        _pp_router_picked=$(pp_router_pick_lenses "$_pp_router_signals" "${transcript_filtered:-}" 2>/dev/null)
+        # Build not-picked set (newline-delimited) for surprise inject.
+        _pp_router_not_picked=""
+        for _l in "${PP_LENS_IDS[@]}"; do
+          if ! printf '%s\n' "$_pp_router_picked" | LC_ALL=C grep -qxF "$_l"; then
+            _pp_router_not_picked="${_pp_router_not_picked}${_l}"$'\n'
+          fi
+        done
+        _pp_router_picked=$(pp_router_surprise_inject "$_pp_router_picked" "$_pp_router_not_picked")
+        # Debugger I2: blackout guard. If somehow the surprise inject
+        # left us with an empty picked set (shouldn't happen via fail-open
+        # but defensive), restore the full enabled set so the cycle never
+        # produces zero observations silently.
+        if [ -z "$_pp_router_picked" ]; then
+          _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
+        fi
+
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"
+          # v0.4 Phase 2: skip lenses not picked by the router this cycle.
+          # When PP_ROUTER_ENABLE=0 or fail-open, ALL lenses are in the
+          # picked set so this check passes through unchanged.
+          if ! printf '%s\n' "$_pp_router_picked" | LC_ALL=C grep -qxF "$lens_group"; then
+            continue
+          fi
           lens_hats="${PP_LENS_HATS[$lens_idx]}"
           lens_focus="${PP_LENS_FOCUS[$lens_idx]}"
           # Cache filenames keyed by lens id (not numeric index) — survives
@@ -1262,15 +1327,27 @@ mon_topic=""
 mon_body=""
 _pp_slot_total=$((PP_LENS_COUNT + 1))
 lens_slot=$(( ($(date +%s) / 30) % _pp_slot_total ))
+# v0.4 Phase 2 fix: the router fires only 1-3 lenses per cycle, so most
+# rotation slots have no fresh cache. Probe the picked slot first; if its
+# cache is empty or missing, fall through to the next slot that DOES have
+# content. Caps at PP_LENS_COUNT iterations so the tip-slot (= PP_LENS_COUNT)
+# can still take over when no lens has any content.
 if [ "$lens_slot" -lt "$PP_LENS_COUNT" ]; then
-  PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$lens_slot]}.txt"
-  if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
-    mon=$(head -1 "$PP_CACHE_DISPLAY")
-    if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
-      mon_topic="${mon%%|||*}"
-      mon_body="${mon#*|||}"
+  _pp_probe_i=0
+  while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
+    _pp_probe_idx=$(( (lens_slot + _pp_probe_i) % PP_LENS_COUNT ))
+    PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$_pp_probe_idx]}.txt"
+    if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
+      mon=$(head -1 "$PP_CACHE_DISPLAY")
+      if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
+        mon_topic="${mon%%|||*}"
+        mon_body="${mon#*|||}"
+        lens_slot="$_pp_probe_idx"
+        break
+      fi
     fi
-  fi
+    _pp_probe_i=$((_pp_probe_i + 1))
+  done
 fi
 
 # === 2-line output: status + alternating advisor topic ===

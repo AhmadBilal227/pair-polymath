@@ -322,6 +322,54 @@ case "$cmd" in
     esac
     ;;
 
+  dismiss)
+    # v0.5 Phase 3: suppression rules + memory-as-constraint.
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/dismiss.sh"
+    shift
+    _pp_dismiss_sub="${1:-help}"
+    case "$_pp_dismiss_sub" in
+      help|-h|--help|"")
+        cat <<'USAGE'
+Usage: polymath dismiss <command> [args]
+
+Commands:
+  polymath dismiss "<reason>" [scope=project|global]   add a rule
+  polymath dismiss list                                 show active rules
+  polymath dismiss show <id>                            print JSON for id
+  polymath dismiss disable <id>                         soft-delete
+  polymath dismiss enable <id>                          un-delete
+  polymath dismiss ack <hash-prefix>                    affirm observation is useful
+USAGE
+        [ -z "${1:-}" ] && exit 2 || exit 0
+        ;;
+      list)
+        pp_dismiss_list
+        ;;
+      show)
+        [ -n "${2:-}" ] || { printf 'polymath dismiss show: id required\n' >&2; exit 2; }
+        pp_dismiss_show "$2"
+        ;;
+      disable)
+        [ -n "${2:-}" ] || { printf 'polymath dismiss disable: id required\n' >&2; exit 2; }
+        pp_dismiss_disable "$2" "user_disabled"
+        ;;
+      enable)
+        [ -n "${2:-}" ] || { printf 'polymath dismiss enable: id required\n' >&2; exit 2; }
+        pp_dismiss_enable "$2"
+        ;;
+      ack)
+        [ -n "${2:-}" ] || { printf 'polymath dismiss ack: hash-prefix required\n' >&2; exit 2; }
+        pp_dismiss_ack "$2"
+        ;;
+      *)
+        # Treat as a reason text (the most common case).
+        _id=$(pp_dismiss_add "$_pp_dismiss_sub" "${2:-project}")
+        printf '%s\n' "$_id"
+        ;;
+    esac
+    ;;
+
   disable)
     _pp_set_user_env_var PP_EXTERNAL_LLM 0 || exit 1
     printf 'LLM cycle disabled. Status-only mode active; new cycles take effect within 5 min.\n'

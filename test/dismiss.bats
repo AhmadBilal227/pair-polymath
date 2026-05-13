@@ -181,3 +181,41 @@ teardown() { rm -rf "$HOME"; }
   run pp_dismiss_is_suppressed "def456"
   [ "$status" -ne 0 ]
 }
+
+@test "cli: 'polymath dismiss <reason>' creates a rule and prints id" {
+  run bash "$PP_ROOT/bin/polymath" dismiss "Test rule via CLI"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE '^d-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{4}$'
+}
+
+@test "cli: 'polymath dismiss list' shows active rules" {
+  bash "$PP_ROOT/bin/polymath" dismiss "First rule" >/dev/null
+  bash "$PP_ROOT/bin/polymath" dismiss "Second rule" >/dev/null
+  run bash "$PP_ROOT/bin/polymath" dismiss list
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "First rule"
+  printf '%s' "$output" | grep -qF "Second rule"
+}
+
+@test "cli: 'polymath dismiss show <id>' returns JSON for the id" {
+  local _id
+  _id=$(bash "$PP_ROOT/bin/polymath" dismiss "Showable" 2>/dev/null | tail -1)
+  run bash "$PP_ROOT/bin/polymath" dismiss show "$_id"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.id' >/dev/null
+}
+
+@test "cli: 'polymath dismiss disable <id>' soft-deletes" {
+  local _id
+  _id=$(bash "$PP_ROOT/bin/polymath" dismiss "Disable me" 2>/dev/null | tail -1)
+  run bash "$PP_ROOT/bin/polymath" dismiss disable "$_id"
+  [ "$status" -eq 0 ]
+  run bash "$PP_ROOT/bin/polymath" dismiss show "$_id"
+  printf '%s' "$output" | jq -e '.deleted == true' >/dev/null
+}
+
+@test "cli: 'polymath dismiss' with no args prints help" {
+  run bash "$PP_ROOT/bin/polymath" dismiss
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | grep -qiE 'usage|polymath dismiss'
+}

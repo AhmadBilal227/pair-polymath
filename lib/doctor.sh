@@ -270,6 +270,74 @@ doctor_check_transcript_libs() {
   esac
 }
 
+doctor_check_router_libs() {
+  # v0.4 Phase 2.5 Track 1.2 — verify the router meta-lens stack is
+  # wired correctly. Three integration probes:
+  #   (a) lib/router-signals.sh + lib/router.sh source cleanly
+  #   (b) prompts/router.md placeholders substitute via pp_render_prompt
+  #       (catches the v0.4 Phase 2 allowlist-gap class of regression)
+  #   (c) pp_router_pick_lenses returns the forced ID under FORCE_OUTPUT
+  #       (catches the case-handling / regex / membership-check class)
+  if [ ! -r "$PP_ROOT/lib/router.sh" ] || [ ! -r "$PP_ROOT/lib/router-signals.sh" ]; then
+    _pp_doctor_red "router libs" "lib files missing"
+    return 2
+  fi
+  local _probe
+  _probe=$( \
+    . "$PP_ROOT/lib/prompt-loader.sh" 2>/dev/null && \
+    . "$PP_ROOT/lib/router-signals.sh" 2>/dev/null && \
+    . "$PP_ROOT/lib/router.sh" 2>/dev/null && \
+    type pp_router_pick_lenses >/dev/null 2>&1 && \
+    type pp_router_extract_signals >/dev/null 2>&1 && \
+    {
+      # Probe (b): render the prompt with synthetic placeholders.
+      _signals='{"phase":"debugging","outcome":"test_failed","confidence":"medium","tone":"neutral","session_age_min":5,"budget_remaining_pct":90,"last_test_failed":true,"recent_edit_density":2}'
+      _rendered=$(
+        signals_json="$_signals" \
+        transcript_tail_5="probe" \
+        lens_registry="ENGINEERING"$'\n'"SECURITY" \
+        PP_ROUTER_MIN=1 PP_ROUTER_MAX=2 \
+        pp_render_prompt router 2>/dev/null
+      )
+      # Substitution worked → signals JSON appears in rendered prompt.
+      printf '%s' "$_rendered" | grep -qF 'debugging' || exit 2
+      printf '%s' "$_rendered" | grep -qF 'ENGINEERING' || exit 3
+      # Probe (c): forced-output round-trips real UPPERCASE_UNDERSCORE ID.
+      PP_LENS_IDS_AVAILABLE="ENGINEERING"$'\n'"SECURITY" \
+        PP_ROUTER_FORCE_OUTPUT="ENGINEERING" \
+        _picked=$(pp_router_pick_lenses "$_signals" "probe")
+      printf '%s' "$_picked" | grep -qxF 'ENGINEERING' || exit 4
+      printf 'ok'
+    }
+  )
+  case "$_probe" in
+    ok) _pp_doctor_green "router libs" "pick + render + ID round-trip verified"
+        return 0 ;;
+    *) _pp_doctor_red "router libs" "probe failed (allowlist or case-handling regression)"
+       return 2 ;;
+  esac
+}
+
+doctor_check_coreutils() {
+  # v0.4 Phase 2.5 Track 1.2 — coreutils provides timeout/gtimeout,
+  # used by the router LLM call's primary path. Without them the
+  # router falls back to a bounded-wait subshell that works but is
+  # less robust. INFO-level (yellow, not red).
+  if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    _pp_doctor_green "coreutils" "timeout binary present"
+    return 0
+  fi
+  case "$(uname -s)" in
+    Darwin)
+      _pp_doctor_yellow "coreutils" "absent; recommend: brew install coreutils"
+      ;;
+    *)
+      _pp_doctor_yellow "coreutils" "absent; install via apt/yum/apk"
+      ;;
+  esac
+  return 1
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -331,7 +399,8 @@ pp_doctor_run() {
   local checks="doctor_check_bash doctor_check_jq doctor_check_llm doctor_check_openai_key \
                 doctor_check_settings_json doctor_check_statusline_wired doctor_check_hooks_wired \
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
-                doctor_check_prompts doctor_check_transcript_libs doctor_check_statusline_smoke"
+                doctor_check_prompts doctor_check_transcript_libs doctor_check_router_libs \
+                doctor_check_coreutils doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

@@ -64,9 +64,16 @@ pp_router_pick_lenses() {
   local _signals="${1:-}"
   local _tx="${2:-}"
 
+  # P2.5 Track 3: cache the enabled-set once per call. Previously
+  # invoked _pp_router_emit_enabled 4+ times per call (printf | grep
+  # subshell each time). Net saving: ~50-100ms per cycle on cold macOS
+  # where fork-exec is expensive. (Code-reviewer M2, AI-engineer I7.)
+  local _enabled_cached
+  _enabled_cached=$(_pp_router_emit_enabled)
+
   # Hard bypass: ENABLE=0 OR EVAL_MODE=1 → return all enabled.
   if [ "${PP_ROUTER_ENABLE:-1}" != "1" ] || [ "${PP_EVAL_MODE:-0}" = "1" ]; then
-    _pp_router_emit_enabled
+    printf '%s\n' "$_enabled_cached" | LC_ALL=C grep -v '^$' || true
     return 0
   fi
 
@@ -83,7 +90,7 @@ pp_router_pick_lenses() {
   # mask this — fan out to ALL enabled instead so polymath never goes
   # dark when the router fails.
   if [ -z "$_raw" ]; then
-    _pp_router_emit_enabled
+    printf '%s\n' "$_enabled_cached" | LC_ALL=C grep -v '^$' || true
     return 0
   fi
 
@@ -106,7 +113,7 @@ pp_router_pick_lenses() {
     fi
     # Must be in enabled set + not yet picked. Case-sensitive: registry
     # owns the canonical casing.
-    if _pp_router_emit_enabled | LC_ALL=C grep -qxF "$_norm"; then
+    if printf '%s\n' "$_enabled_cached" | LC_ALL=C grep -qxF "$_norm"; then
       case " $_seen " in
         *" $_norm "*) ;;
         *)
@@ -137,14 +144,14 @@ EOF
       esac
       [ "$_count" -ge "${PP_ROUTER_MIN:-1}" ] && break
     done <<EOF
-$(_pp_router_emit_enabled)
+$_enabled_cached
 EOF
   fi
 
   # Fail-open: if STILL nothing validated (e.g., empty enabled set or
   # router returned only invalid IDs), return everything enabled.
   if [ -z "$_validated" ]; then
-    _pp_router_emit_enabled
+    printf '%s\n' "$_enabled_cached" | LC_ALL=C grep -v '^$' || true
     return 0
   fi
 
@@ -186,33 +193,36 @@ _pp_router_llm_call() {
   elif command -v gtimeout >/dev/null 2>&1; then
     gtimeout "${PP_ROUTER_TIMEOUT_S:-8}" llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null
   else
-    # Background-spawn + watchdog. Emit output to a tmp file so we can
-    # read after the bounded wait. Debugger I1: enable job control so
-    # the subshell becomes its own process group; on timeout, kill the
-    # WHOLE group (-$_pid) so the grandchild `llm` process dies with
-    # the subshell. Otherwise `llm` orphans and continues the API call,
-    # leaking one full router-model call per timeout event.
+    # P2.5 Track 1.1: portable bounded-wait. Use `exec` inside the bg
+    # subshell so the subshell BECOMES the llm process — killing $_pid
+    # then kills llm directly (no grandchild orphan from the SUBSHELL).
+    #
+    # Known limitation (AI-eng round-2 I1 / GPT round-2 C3): if `llm`
+    # itself forks a child (e.g., python -> curl), SIGKILL'ing the llm
+    # PID immediately makes curl an orphan that gets reparented to init
+    # and continues until the HTTP response. Worst case: ~$0.001 leaked
+    # per timeout (one outbound API call). Previous draft tried
+    # `kill -- -$_pid` for process-group cleanup, but without `set -m`
+    # the bg subshell inherits the parent's pgroup — that kill would
+    # either silently fail (best case) or signal the statusline parent
+    # itself (worst case). Removed; documented in docs/cost-model.md.
     local _outfile
     _outfile=$(mktemp)
-    set -m 2>/dev/null || true
     (
-      llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null > "$_outfile"
+      exec llm -m "${PP_ROUTER_MODEL:-gpt-5-mini}" -s "$_prompt" "Pick lenses." 2>/dev/null > "$_outfile"
     ) &
     local _pid=$!
-    set +m 2>/dev/null || true
     local _waited=0
-    while kill -0 "$_pid" 2>/dev/null; do
-      if [ "$_waited" -ge "${PP_ROUTER_TIMEOUT_S:-8}" ]; then
-        # Process-group kill: -$_pid targets every PID in the group.
-        kill -9 -- "-$_pid" 2>/dev/null || kill -9 "$_pid" 2>/dev/null
-        break
-      fi
+    while [ "$_waited" -lt "${PP_ROUTER_TIMEOUT_S:-8}" ] && kill -0 "$_pid" 2>/dev/null; do
       sleep 1
       _waited=$((_waited + 1))
     done
+    if kill -0 "$_pid" 2>/dev/null; then
+      kill -KILL "$_pid" 2>/dev/null || true
+    fi
     wait "$_pid" 2>/dev/null || true
-    cat "$_outfile"
-    rm -f "$_outfile"
+    cat "$_outfile" 2>/dev/null
+    rm -f "$_outfile" 2>/dev/null
   fi
 }
 
@@ -226,8 +236,20 @@ pp_router_surprise_inject() {
   local _prob="${PP_ROUTER_SURPRISE_PROB:-0.2}"
 
   # Roll the dice (deterministic if PP_RANDOM_SEED set).
+  # P2.5 Track 5 portability note (Debugger I3): awk's srand()
+  # implementation differs across gawk / mawk / BusyBox awk. The same
+  # integer seed produces DIFFERENT float sequences across
+  # implementations. Within a single process (same awk binary, same
+  # session) PP_RANDOM_SEED is reliably idempotent for tests. For
+  # cross-machine reproducibility (CI matrix asserting exact lens
+  # choice on macOS+Linux+Alpine), use PP_RANDOM_SEED_MODULO instead:
+  # it bypasses awk via integer modulo (deterministic everywhere bash
+  # 3.2 runs). Documented; not a hot-path optimization.
   local _roll
-  if [ -n "${PP_RANDOM_SEED:-}" ]; then
+  if [ -n "${PP_RANDOM_SEED_MODULO:-}" ]; then
+    # Cross-machine deterministic path. Integer modulo, no awk.
+    _roll=$(LC_ALL=C awk -v n="$PP_RANDOM_SEED_MODULO" 'BEGIN{printf "%.4f", (n%100)/100.0}')
+  elif [ -n "${PP_RANDOM_SEED:-}" ]; then
     _roll=$(LC_ALL=C awk -v seed="$PP_RANDOM_SEED" 'BEGIN{srand(seed); printf "%.4f", rand()}')
   else
     _roll=$(LC_ALL=C awk 'BEGIN{srand(); printf "%.4f", rand()}')
@@ -268,4 +290,127 @@ EOF
   fi
   # No injection: emit picked as-is, strip blank lines.
   printf '%s\n' "$_picked" | LC_ALL=C grep -v '^$'
+}
+
+# ============================================================================
+# v0.4 Phase 2.5 Track 2 — Router telemetry
+# ============================================================================
+#
+# pp_router_metrics_emit <signals_json> <picked_newline_or_space>
+#                        <surprise_fired_bool> <failopen_bool> <llm_call_ms>
+#
+# Appends one JSONL line to PP_ROUTER_METRICS_FILE for the cycle.
+# Schema: {ts, phase, picked_count, surprise_fired, failopen, llm_call_ms}
+#
+# Critical contract: this function NEVER blocks the cycle path. On any
+# error (lock contention, unwritable file, missing jq, ...) it silently
+# no-ops. Telemetry quality is sacrificed for cycle reliability.
+#
+# GPT plan-review fixes applied:
+#  - C2: lock retry capped at 10 attempts × 1s = 10s max → then drop sample
+#  - C3: picked_count uses `tr ' ' '\n' | grep -c` (was wrong tr pattern)
+#  - I1: stale lockdir auto-cleanup if mtime > 30 seconds
+#  - I2: rotation truncates .old (single rotation, no unbounded growth)
+#  - I7: comment matches implementation (direct append under lock; no tmpfile)
+
+: "${PP_ROUTER_METRICS_FILE:=${HOME}/.claude/cache/router-metrics.jsonl}"
+: "${PP_ROUTER_METRICS_MAX_LINES:=5000}"
+
+pp_router_metrics_emit() {
+  # Defensive: never propagate a failure to the cycle path. Wrapping in
+  # a subshell with set +e ensures we always return 0 even under bats's
+  # set -e environment or if internal commands hiccup.
+  (
+    set +e
+    local _signals="$1"
+    [ -z "$_signals" ] && _signals='{}'
+    local _picked="${2:-}"
+    local _surprise="${3:-0}"
+    local _failopen="${4:-0}"
+    local _llm_ms="${5:-0}"
+
+    command -v jq >/dev/null 2>&1 || exit 0
+    local _dir
+    _dir=$(dirname "$PP_ROUTER_METRICS_FILE" 2>/dev/null)
+    [ -z "$_dir" ] && exit 0
+    mkdir -p "$_dir" 2>/dev/null || exit 0
+    [ -w "$_dir" ] || exit 0
+
+    # Phase from signals (jq -r; defaults to "unknown" on parse failure).
+    local _phase
+    _phase=$(printf '%s' "$_signals" | jq -r '.phase // "unknown"' 2>/dev/null) || _phase="unknown"
+    [ -z "$_phase" ] && _phase="unknown"
+
+    # Count picked entries. GPT-C3: `tr ' \n' '\n\n'` was wrong (single-
+    # quoted '\n' is literal two chars, not newline). Correct: normalize
+    # delimiters to newline, then count lines with any non-whitespace char.
+    local _picked_count=0
+    if [ -n "$_picked" ]; then
+      _picked_count=$(printf '%s' "$_picked" | tr ' ' '\n' | LC_ALL=C grep -c '^[^[:space:]]' 2>/dev/null) || _picked_count=0
+      [ -z "$_picked_count" ] && _picked_count=0
+    fi
+
+    # Build JSONL line (compact, single-line).
+    local _ts _line
+    _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || _ts="1970-01-01T00:00:00Z"
+    _line=$(jq -n -c \
+      --arg ts "$_ts" \
+      --arg phase "$_phase" \
+      --argjson picked_count "$_picked_count" \
+      --argjson surprise_fired "$_surprise" \
+      --argjson failopen "$_failopen" \
+      --argjson llm_call_ms "$_llm_ms" \
+      '{ts: $ts, phase: $phase, picked_count: $picked_count, surprise_fired: $surprise_fired, failopen: $failopen, llm_call_ms: $llm_call_ms}' \
+      2>/dev/null) || _line=""
+    [ -z "$_line" ] && exit 0
+
+    # Bash 3.2-portable lock: mkdir is atomic across NFS too.
+    # Stale-lock auto-cleanup: if .lock dir older than 60s the previous
+    # writer probably crashed; reclaim. (GPT-R2-M4: bump threshold above
+    # PP_ROUTER_TIMEOUT_S × retry_cap so a genuinely slow writer isn't
+    # mid-flight when reclaimed.)
+    local _lockdir="${PP_ROUTER_METRICS_FILE}.lock"
+    if [ -d "$_lockdir" ]; then
+      local _now _ltime
+      _now=$(date +%s 2>/dev/null) || _now=""
+      _ltime=$(stat -c %Y "$_lockdir" 2>/dev/null || stat -f %m "$_lockdir" 2>/dev/null) || _ltime=""
+      if [ -n "$_now" ] && [ -n "$_ltime" ] && [ "$((_now - _ltime))" -gt 60 ]; then
+        rmdir "$_lockdir" 2>/dev/null
+      fi
+    fi
+
+    # Lock retry matches the project's established pattern in
+    # lib/budget.sh:23-28 (250 × 0.02s = 5s worst case). 50 × 0.02s = 1s
+    # is the right cycle-reliable balance: enough attempts for concurrent
+    # writers to coordinate without blocking the cycle. (Code-reviewer
+    # round-2 C1 + Debugger round-2 I1: telemetry caller is now
+    # backgrounded in statusline.sh, so even this 1s worst case can't
+    # block the analyst fan-out.)
+    local _tries=0
+    while ! mkdir "$_lockdir" 2>/dev/null; do
+      _tries=$((_tries + 1))
+      [ "$_tries" -ge 50 ] && exit 0
+      sleep 0.02 2>/dev/null || sleep 1
+    done
+
+    # GPT-R2-C4: rotate BEFORE append (was append→mv which moved the
+    # just-written line into .old). GPT-R3: use line count to match the
+    # variable name PP_ROUTER_METRICS_MAX_LINES (was byte-estimate which
+    # caused semantic drift). Cost: O(n) wc -l per call, but n is capped
+    # at 5000 and we hold the lock anyway — negligible vs analyst calls.
+    if [ -f "$PP_ROUTER_METRICS_FILE" ]; then
+      local _count
+      _count=$(wc -l < "$PP_ROUTER_METRICS_FILE" 2>/dev/null | tr -d ' ') || _count=0
+      if [ -n "$_count" ] && [ "$_count" -ge "${PP_ROUTER_METRICS_MAX_LINES:-5000}" ]; then
+        mv -f "$PP_ROUTER_METRICS_FILE" "${PP_ROUTER_METRICS_FILE}.old" 2>/dev/null
+      fi
+    fi
+
+    # Append (direct, single-line, atomic on most POSIX FS for <PIPE_BUF bytes).
+    printf '%s\n' "$_line" >> "$PP_ROUTER_METRICS_FILE" 2>/dev/null
+
+    rmdir "$_lockdir" 2>/dev/null
+    exit 0
+  ) 2>/dev/null
+  return 0
 }

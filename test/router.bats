@@ -232,6 +232,38 @@ _REAL_IDS=(UX_DESIGN ENGINEERING SECURITY PERF_FINOPS PRODUCT_BIZ COGNITIVE_FLOW
   [ "$line_count" -le 3 ]
 }
 
+@test "router: P2.5 — _pp_router_llm_call does NOT hang when coreutils absent (GPT-C1)" {
+  # Simulate macOS-without-coreutils: PATH has bash/grep/sed/etc but
+  # no timeout/gtimeout. Mock 'llm' to sleep 30s. The fallback path
+  # MUST return within PP_ROUTER_TIMEOUT_S + slop, never hang.
+  _mockdir=$(mktemp -d)
+  cat > "$_mockdir/llm" <<'MOCKEOF'
+#!/bin/sh
+sleep 30
+echo "should-never-print"
+MOCKEOF
+  chmod +x "$_mockdir/llm"
+  # Build a PATH with basic utilities but excluding timeout/gtimeout.
+  # GPT-C4 from plan review: PATH=/dev/null breaks bats itself; use a
+  # real PATH minus the timeout binaries. Include BOTH /usr/bin and /bin
+  # so sleep (in /bin on macOS) and grep (in /usr/bin) are both findable.
+  _basebin="/usr/bin:/bin"
+  # Strip any /usr/local/bin or /opt/homebrew/bin paths where timeout/
+  # gtimeout could live.
+  _t0=$(date +%s)
+  PATH="$_mockdir:$_basebin" \
+    PP_ROUTER_TIMEOUT_S=2 \
+    run _pp_router_llm_call '{"phase":"unknown"}' "USER: probe"
+  _t1=$(date +%s)
+  _elapsed=$((_t1 - _t0))
+  rm -rf "$_mockdir"
+  # Must complete in ≤5s (2s timeout + 3s slop), NEVER in 30s+
+  if [ "$_elapsed" -gt 5 ]; then
+    echo "elapsed=$_elapsed (expected <=5; mock llm sleeps 30s — fallback didn't bound)" >&2
+    return 1
+  fi
+}
+
 @test "pick: C4 — PP_ROUTER_ENABLE=0 produces identical output to fan-out-all" {
   # When the router is disabled, the picked set must EQUAL the enabled
   # set (one per line, in registry order). This is the byte-identical

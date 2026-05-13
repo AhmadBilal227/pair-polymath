@@ -15,7 +15,23 @@ setup() {
 }
 
 teardown() {
-  [ -n "$TMP_RUNS" ] && [ -d "$TMP_RUNS" ] && rm -rf "$TMP_RUNS"
+  # P2.5 Track 4: race-tolerant cleanup. On Linux CI, the eval harness's
+  # async log writers occasionally write to the runs dir after teardown
+  # begins → `rm: Directory not empty`. Retry up to 3 times with sleep.
+  [ -z "$TMP_RUNS" ] && return 0
+  [ ! -d "$TMP_RUNS" ] && return 0
+  _retry=0
+  while [ "$_retry" -lt 3 ] && [ -d "$TMP_RUNS" ]; do
+    rm -rf "$TMP_RUNS" 2>/dev/null
+    [ ! -d "$TMP_RUNS" ] && break
+    sleep 1
+    _retry=$((_retry + 1))
+  done
+  # Last-resort fallback: find -delete + rmdir (handles partial trees).
+  if [ -d "$TMP_RUNS" ]; then
+    find "$TMP_RUNS" -mindepth 1 -delete 2>/dev/null || true
+    rmdir "$TMP_RUNS" 2>/dev/null || true
+  fi
 }
 
 @test "eval: run-eval.sh exists and is executable" {

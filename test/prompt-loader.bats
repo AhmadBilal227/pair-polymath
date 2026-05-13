@@ -154,6 +154,30 @@ EOF
   [ "$output" = "$expected" ]
 }
 
+@test "loader: default allowlist includes transcript_filtered and tool_summary (v0.4 Phase 1)" {
+  # Source the loader in a subshell with allowlist UNSET so we observe
+  # the file's compiled-in default value.
+  out=$(unset PP_PROMPT_VAR_ALLOWLIST; . "${PP_ROOT}/lib/prompt-loader.sh"; printf '%s' "$PP_PROMPT_VAR_ALLOWLIST")
+  case " $out " in
+    *" transcript_filtered "*) ;;
+    *) echo "transcript_filtered missing from default allowlist: $out" >&2; return 1 ;;
+  esac
+  case " $out " in
+    *" tool_summary "*) ;;
+    *) echo "tool_summary missing from default allowlist: $out" >&2; return 1 ;;
+  esac
+}
+
+@test "loader: \${transcript_filtered} substitutes correctly when on allowlist" {
+  mkdir -p "$HOME/.claude/pair-polymath/prompts"
+  echo 'TRANSCRIPT:'$'\n''${transcript_filtered}'$'\n''END' > "$HOME/.claude/pair-polymath/prompts/tfilter.md"
+  PP_PROMPT_VAR_ALLOWLIST="transcript_filtered" \
+    transcript_filtered="USER: hi" \
+    run pp_render_prompt tfilter
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'USER: hi'
+}
+
 @test "loader: F3 — analyst-primary off-mode is byte-identical to pre-2.3 fixture" {
   baseline="$PP_ROOT/test/fixtures/prompts/pre-2.3-analyst-baseline.txt"
   [ -f "$baseline" ]

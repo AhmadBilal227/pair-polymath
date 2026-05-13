@@ -1327,15 +1327,27 @@ mon_topic=""
 mon_body=""
 _pp_slot_total=$((PP_LENS_COUNT + 1))
 lens_slot=$(( ($(date +%s) / 30) % _pp_slot_total ))
+# v0.4 Phase 2 fix: the router fires only 1-3 lenses per cycle, so most
+# rotation slots have no fresh cache. Probe the picked slot first; if its
+# cache is empty or missing, fall through to the next slot that DOES have
+# content. Caps at PP_LENS_COUNT iterations so the tip-slot (= PP_LENS_COUNT)
+# can still take over when no lens has any content.
 if [ "$lens_slot" -lt "$PP_LENS_COUNT" ]; then
-  PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$lens_slot]}.txt"
-  if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
-    mon=$(head -1 "$PP_CACHE_DISPLAY")
-    if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
-      mon_topic="${mon%%|||*}"
-      mon_body="${mon#*|||}"
+  _pp_probe_i=0
+  while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
+    _pp_probe_idx=$(( (lens_slot + _pp_probe_i) % PP_LENS_COUNT ))
+    PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$_pp_probe_idx]}.txt"
+    if [ -f "$PP_CACHE_DISPLAY" ] && [ -s "$PP_CACHE_DISPLAY" ]; then
+      mon=$(head -1 "$PP_CACHE_DISPLAY")
+      if [ -n "$mon" ] && echo "$mon" | grep -q '|||'; then
+        mon_topic="${mon%%|||*}"
+        mon_body="${mon#*|||}"
+        lens_slot="$_pp_probe_idx"
+        break
+      fi
     fi
-  fi
+    _pp_probe_i=$((_pp_probe_i + 1))
+  done
 fi
 
 # === 2-line output: status + alternating advisor topic ===

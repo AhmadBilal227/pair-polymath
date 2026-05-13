@@ -39,6 +39,13 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/metrics.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/citations.sh"
+# v0.4 Phase 1: filtered transcript + structured tool-call summary
+# (always-on; replaces the cost/leak surface of the raw 5KB activity tail
+# in analyst context. activity_tail kept one version for privacy-log compat).
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/transcript.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/tool-summary.sh"
 
 # Pair Polymath memory subsystem (Phase 2.3). Only sourced when enabled; the
 # default PP_MEMORY_ENABLE=0 keeps the cycle path byte-identical to pre-2.3
@@ -522,6 +529,12 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
 
       # === Pre-flight: gather grounded facts (shared by all 5 agents) ===
       activity_tail=$(tail -c 5000 "$transcript_path" 2>/dev/null)
+      # v0.4 Phase 1: filtered conversation + structured tool-call summary
+      # (always-on). Replaces the raw activity_tail in analyst context;
+      # activity_tail kept one version for privacy-log compat then dropped in v0.5.
+      transcript_filtered=$(pp_transcript_filter "$transcript_path" 2>/dev/null || printf '')
+      _pp_tool_calls_json=$(pp_transcript_tool_calls "$transcript_path" 2>/dev/null || printf '[]')
+      tool_summary=$(pp_tool_summary_render "$_pp_tool_calls_json" 2>/dev/null || printf '(no recent tool calls)')
 
       recent_tools=$(tail -n 200 "$transcript_path" 2>/dev/null | jq -r '
         select(.message.content | type == "array") |
@@ -737,7 +750,13 @@ ${test_state:-(no recent test/lint runs)}
 === PREVIOUS OBSERVATIONS (do not repeat these) ===
 ${prev_observations:-(none yet)}
 
-=== TRANSCRIPT TAIL (last 5KB) ===
+=== RECENT CONVERSATION (filtered, redacted — v0.4) ===
+${transcript_filtered:-(no conversation visible)}
+
+=== RECENT TOOL ACTIVITY (paired by tool_use.id — v0.4) ===
+${tool_summary:-(no recent tool calls)}
+
+=== TRANSCRIPT TAIL (last 5KB — DEPRECATED, removed in v0.5) ===
 $activity_tail
 GROUND
       )

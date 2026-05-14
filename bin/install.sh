@@ -743,10 +743,13 @@ step "Merging into $SETTINGS_FILE"
 SL_CMD="bash '${PP_ROOT}/bin/statusline.sh'"
 HOOK_USER_CMD="'${PP_ROOT}/hooks/inject-monitor-insight.sh'"
 HOOK_POST_CMD="'${PP_ROOT}/hooks/cache-test-result.sh'"
+# v0.5.1: SessionEnd hook is a no-op when PP_OAR_ENABLE=0 (default), so
+# registering it now is harmless and unblocks v0.5.2 OAR rollout.
+HOOK_SESSION_END_CMD="'${PP_ROOT}/hooks/session-end.sh'"
 
 if [ "$PP_DRY_RUN" = "1" ]; then
   printf '  [DRY-RUN] Would back up %s\n' "$SETTINGS_FILE"
-  printf '  [DRY-RUN] Would merge statusLine + 2 hooks via jq into %s\n' "$SETTINGS_FILE"
+  printf '  [DRY-RUN] Would merge statusLine + 3 hooks via jq into %s\n' "$SETTINGS_FILE"
   audit_log "settings-merge" "jq ... > $SETTINGS_FILE" 0 "dry-run"
 else
   if [ -f "$SETTINGS_FILE" ]; then
@@ -784,6 +787,7 @@ else
   jq --arg sl "$SL_CMD" \
      --arg hook_user "$HOOK_USER_CMD" \
      --arg hook_post "$HOOK_POST_CMD" \
+     --arg hook_session_end "$HOOK_SESSION_END_CMD" \
      --argjson set_sl "$install_statusline" '
     # statusLine (conditional on $set_sl)
     (if $set_sl == 1 then .statusLine = {type: "command", command: $sl, refreshInterval: 2} else . end)
@@ -802,6 +806,15 @@ else
         if any(.[]; .hooks[]?.command == $hook_post) then .
         else . + [{matcher: "Bash", hooks: [{type: "command", command: $hook_post, timeout: 3}]}]
         end))
+    |
+    # v0.5.1: SessionEnd hook — append if not already present (idempotent).
+    # Hook script is a no-op when PP_OAR_ENABLE=0 (default), so registration
+    # is safe regardless of OAR rollout state.
+    (.hooks.SessionEnd //= [])
+    | (.hooks.SessionEnd |= (
+        if any(.[]; .hooks[]?.command == $hook_session_end) then .
+        else . + [{matcher: "", hooks: [{type: "command", command: $hook_session_end, timeout: 3}]}]
+        end))
   ' "$SETTINGS_FILE" > "$tmp" 2>"$merge_stderr" || merge_rc=$?
   merge_tail=""
   [ -s "$merge_stderr" ] && merge_tail=$(tail -c 500 "$merge_stderr")
@@ -816,11 +829,11 @@ else
 
   mv "$tmp" "$SETTINGS_FILE"
   if [ "$install_statusline" = "1" ]; then
-    ok "settings.json updated (statusLine + 2 hooks)"
-    audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "statusLine + 2 hooks"
+    ok "settings.json updated (statusLine + 3 hooks)"
+    audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "statusLine + 3 hooks"
   else
-    ok "settings.json updated (2 hooks; existing statusLine preserved)"
-    audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "2 hooks only"
+    ok "settings.json updated (3 hooks; existing statusLine preserved)"
+    audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "3 hooks only"
   fi
 fi
 

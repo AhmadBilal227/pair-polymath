@@ -259,3 +259,33 @@ teardown() { rm -rf "$HOME"; }
   run pp_retry_hard_cap_preflight "any" gpt-5
   [ "$status" -eq 0 ]
 }
+
+# ========================================================
+# Task 12: Auto-rollback state machine (lib/auto-rollback.sh)
+# ========================================================
+
+@test "auto_rollback: no flag initially" {
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  run pp_rollback_is_active
+  [ "$status" -ne 0 ]
+}
+
+@test "auto_rollback: flag persists once set" {
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  pp_rollback_engage 24
+  run pp_rollback_is_active
+  [ "$status" -eq 0 ]
+  pp_rollback_clear
+  run pp_rollback_is_active
+  [ "$status" -ne 0 ]
+}
+
+@test "auto_rollback: backoff escalates on repeat" {
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  pp_rollback_engage 24
+  pp_rollback_clear
+  # 2nd engage within 30d → repeat backoff
+  local _hours
+  _hours=$(pp_rollback_next_backoff_hours)
+  [ "$_hours" = "72" ]
+}

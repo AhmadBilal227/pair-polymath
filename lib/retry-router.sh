@@ -55,3 +55,34 @@ pp_retry_select_model() {
     *)    printf '%s' "${PP_RETRY_MODEL_LOW:-gpt-5-mini}" ;;
   esac
 }
+
+# pp_retry_log_shadow JSON_BLOB
+# Appends one line to retry-router-shadow.jsonl. Silent fail (telemetry never blocks).
+# Gated on PP_RETRY_ROUTER_SHADOW. Rotates at PP_LOG_MAX_BYTES.
+pp_retry_log_shadow() {
+  [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ] || return 0
+  local _blob="${1:-}"
+  [ -z "$_blob" ] && return 0
+  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/retry-router-shadow.jsonl"
+  local _max="${PP_LOG_MAX_BYTES:-10485760}"
+  case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
+  mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
+  if [ -f "$_file" ]; then
+    local _size
+    _size=$(wc -c < "$_file" 2>/dev/null | tr -d ' ')
+    if [ "${_size:-0}" -ge "$_max" ]; then
+      mv "$_file" "${_file}.1" 2>/dev/null || true
+    fi
+  fi
+  printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
+}
+
+# pp_retry_canary_bucket SESSION_ID
+# Stdout: 0-99 deterministic bucket. Sticky via salted cksum.
+pp_retry_canary_bucket() {
+  local _sid="${1:?session_id required}"
+  local _salt="${PP_RETRY_CANARY_SALT:-pp-canary-v1}"
+  LC_ALL=C cksum <<EOF | awk '{print $1 % 100}'
+${_sid}|${_salt}
+EOF
+}

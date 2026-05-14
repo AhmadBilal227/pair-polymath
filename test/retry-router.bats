@@ -143,3 +143,86 @@ teardown() { rm -rf "$HOME"; }
   export PP_RETRY_MODEL_HIGH=gpt-5 PP_RETRY_MODEL_LOW=gpt-5-mini
   [ "$(pp_retry_select_model high)" = "user-pinned-model" ]
 }
+
+# ========================================================
+# Task 5: pp_retry_log_shadow append + rotation
+# ========================================================
+
+@test "log_shadow: writes JSONL line to retry-router-shadow.jsonl" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  export PP_RETRY_ROUTER_SHADOW=1
+  pp_retry_log_shadow '{"ts":"2026-05-14T00:00:00Z","lens":"ENG","drop_reason_class":"vague"}'
+  [ -f "$PP_CACHE_DIR/retry-router-shadow.jsonl" ]
+  [ "$(wc -l < "$PP_CACHE_DIR/retry-router-shadow.jsonl" | tr -d ' ')" = "1" ]
+}
+
+@test "log_shadow: silent when PP_RETRY_ROUTER_SHADOW=0 (default)" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  unset PP_RETRY_ROUTER_SHADOW
+  pp_retry_log_shadow '{"x":1}'
+  [ ! -f "$PP_CACHE_DIR/retry-router-shadow.jsonl" ]
+}
+
+@test "log_shadow: rotates when file exceeds PP_LOG_MAX_BYTES" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  export PP_RETRY_ROUTER_SHADOW=1
+  export PP_LOG_MAX_BYTES=200
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    pp_retry_log_shadow "{\"i\":$_i,\"padding\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}"
+  done
+  [ -f "$PP_CACHE_DIR/retry-router-shadow.jsonl.1" ] \
+    || [ "$(wc -c < "$PP_CACHE_DIR/retry-router-shadow.jsonl" | tr -d ' ')" -le 200 ]
+}
+
+@test "log_shadow: failure (bad dir) does not error — silent" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  export PP_RETRY_ROUTER_SHADOW=1
+  export PP_CACHE_DIR=/nonexistent/readonly/path
+  run pp_retry_log_shadow '{"x":1}'
+  [ "$status" -eq 0 ]
+}
+
+# ========================================================
+# Task 6: pp_retry_canary_bucket sticky hash cohort
+# ========================================================
+
+@test "canary_bucket: same session_id → same bucket" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  local _b1 _b2
+  _b1=$(pp_retry_canary_bucket "session-abc-123")
+  _b2=$(pp_retry_canary_bucket "session-abc-123")
+  [ "$_b1" = "$_b2" ]
+  [ "$_b1" -ge 0 ] && [ "$_b1" -le 99 ]
+}
+
+@test "canary_bucket: distribution over 1000 sessions ≈ uniform" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  local _lt10=0 _i _b
+  for _i in $(seq 1 1000); do
+    _b=$(pp_retry_canary_bucket "session-$_i")
+    [ "$_b" -lt 10 ] && _lt10=$((_lt10 + 1))
+  done
+  # Expect ~100 in <10 bucket; allow 60-140 (3σ-ish)
+  [ "$_lt10" -ge 60 ] && [ "$_lt10" -le 140 ]
+}
+
+# ========================================================
+# Task 7: pp_metrics_estimate_retry_usd preflight estimator
+# ========================================================
+
+@test "estimate_retry_usd: gpt-5 returns positive USD" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _est
+  _est=$(pp_metrics_estimate_retry_usd gpt-5)
+  [ -n "$_est" ]
+  awk "BEGIN{exit !($_est > 0)}"
+}
+
+@test "estimate_retry_usd: gpt-5-mini < gpt-5" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _mini _big
+  _mini=$(pp_metrics_estimate_retry_usd gpt-5-mini)
+  _big=$(pp_metrics_estimate_retry_usd gpt-5)
+  awk "BEGIN{exit !($_mini < $_big)}"
+}

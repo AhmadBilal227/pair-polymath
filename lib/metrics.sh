@@ -171,6 +171,27 @@ _metrics_usd_for_call() {
     'BEGIN { printf "%.6f", (ti / 1000000.0) * ip + (to / 1000000.0) * op }'
 }
 
+# pp_metrics_estimate_retry_usd MODEL
+# Stdout: USD estimate for one retry call at this model tier.
+# Uses existing PP_AVG_TOK_RETRY_IN/OUT + price knobs.
+pp_metrics_estimate_retry_usd() {
+  local _model="${1:?model required}"
+  local _in="${PP_AVG_TOK_RETRY_IN:-2500}"
+  local _out="${PP_AVG_TOK_RETRY_OUT:-180}"
+  local _price_in _price_out
+  case "$_model" in
+    *gpt-5-mini*)   _price_in="${PP_PRICE_GPT_5_MINI_IN_PER_M:-0.25}"
+                    _price_out="${PP_PRICE_GPT_5_MINI_OUT_PER_M:-2.00}" ;;
+    *gpt-5.5*|*gpt-5-5*) _price_in="${PP_PRICE_GPT_5_5_IN_PER_M:-2.50}"
+                         _price_out="${PP_PRICE_GPT_5_5_OUT_PER_M:-15.00}" ;;
+    *gpt-5*)        _price_in="${PP_PRICE_GPT_5_IN_PER_M:-1.25}"
+                    _price_out="${PP_PRICE_GPT_5_OUT_PER_M:-10.00}" ;;
+    *)              _price_in=0.5; _price_out=4.0 ;;
+  esac
+  LC_ALL=C awk -v i="$_in" -v o="$_out" -v pi="$_price_in" -v po="$_price_out" \
+    'BEGIN { printf "%.6f", (i*pi + o*po) / 1000000.0 }'
+}
+
 # metrics_flush_cycle SESSION_ID — roll up tmp into a single JSONL entry
 # Idempotent: missing/empty tmp file → no-op (returns 0).
 #

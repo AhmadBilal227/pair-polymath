@@ -289,3 +289,36 @@ teardown() { rm -rf "$HOME"; }
   _hours=$(pp_rollback_next_backoff_hours)
   [ "$_hours" = "72" ]
 }
+
+# ========================================================
+# Task 15: Retry router integration in bin/statusline.sh
+# ========================================================
+
+@test "integration: shadow log writes when SHADOW=1 (smoke)" {
+  # Minimal smoke — the integration site calls pp_retry_log_shadow with the
+  # same SHADOW gating as standalone. Synthesize a payload and assert the
+  # JSONL line lands.
+  . "$PP_ROOT/lib/retry-router.sh"
+  export PP_RETRY_ROUTER_SHADOW=1
+  local _blob
+  _blob=$(jq -nc \
+    --arg ts "2026-05-14T00:00:00Z" \
+    --arg sid "s-integration-1" \
+    --arg lens "ENG" \
+    --arg drc "vague" \
+    --arg conf "low" \
+    --arg shadow_model "gpt-5-mini" \
+    --argjson canary_active 0 \
+    '{ts:$ts,session:$sid,lens:$lens,drop_reason_class:$drc,confidence:$conf,shadow_model:$shadow_model,canary_active:$canary_active}')
+  pp_retry_log_shadow "$_blob"
+  [ -f "$PP_CACHE_DIR/retry-router-shadow.jsonl" ]
+  jq -e '.drop_reason_class == "vague" and .canary_active == 0' \
+    "$PP_CACHE_DIR/retry-router-shadow.jsonl" >/dev/null
+}
+
+@test "integration: statusline sources retry-router + auto-rollback libs" {
+  # The integration MUST source both libs near the budget.sh source. Quick
+  # static check — fail loudly if the import is accidentally dropped.
+  grep -q 'lib/retry-router.sh' "$PP_ROOT/bin/statusline.sh"
+  grep -q 'lib/auto-rollback.sh' "$PP_ROOT/bin/statusline.sh"
+}

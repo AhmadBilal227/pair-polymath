@@ -37,6 +37,15 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/config.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/budget.sh"
+# v0.5.1 — cost-aware retry router primitives + auto-rollback state machine.
+# All gating happens INSIDE the lib functions (PP_RETRY_ROUTER_ENABLE,
+# PP_RETRY_ROUTER_SHADOW, rollback flag). Sourcing unconditionally keeps
+# the cycle path byte-identical when flags are off (the lib body is
+# function definitions only — no top-level side effects).
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/retry-router.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/auto-rollback.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/lens-loader.sh"
 # shellcheck disable=SC1091
@@ -1217,6 +1226,19 @@ $critique_input"
 
           # Apply verdicts + 1-retry auto-correction loop + streak tracking for escalation
           if [ -n "$critique_output" ]; then
+            # v0.5.1 — compute cycle-wide signals ONCE outside the per-lens loop:
+            #   _pp_valid_paths_count / _pp_valid_symbols_count drive the
+            #   confidence gate (citation_fail needs a non-empty allowlist for
+            #   high confidence).
+            #   _pp_concurrent_drops counts how many lens lines this cycle's
+            #   critique flagged as DROP — a "storm" (>2) downgrades confidence.
+            _pp_valid_paths_count=0
+            _pp_valid_symbols_count=0
+            [ -n "$_pp_valid_paths" ] \
+              && _pp_valid_paths_count=$(printf '%s\n' "$_pp_valid_paths" | grep -c . 2>/dev/null || echo 0)
+            [ -n "$_pp_valid_symbols" ] \
+              && _pp_valid_symbols_count=$(printf '%s\n' "$_pp_valid_symbols" | grep -c . 2>/dev/null || echo 0)
+            _pp_concurrent_drops=$(printf '%s\n' "$critique_output" | grep -Ec '^lens[0-9]+:[[:space:]]*DROP\b' 2>/dev/null || echo 0)
             for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
               ci_id="${PP_LENS_IDS[$ci]}"
               verdict=$(echo "$critique_output" | grep -E "^lens${ci}:" | head -1)
@@ -1250,6 +1272,57 @@ $critique_input"
                     && mv "${_pp_lens_cache}.tmp" "$_pp_lens_cache" 2>/dev/null
 
                   drop_reason=$(echo "$verdict" | sed 's/^lens[0-9]*:[[:space:]]*//;s/^DROP[[:space:]]*-[[:space:]]*//')
+
+                  # v0.5.1 — cost-aware retry router (shadow + canary).
+                  # Fail-open at every step: ANY error here falls through to
+                  # v0.5.0 behavior (PP_RETRY_MODEL:-PP_MODEL). The byte-identity
+                  # invariant (test/v0.5.1-byte-identity.bats) requires that
+                  # with PP_RETRY_ROUTER_ENABLE=0 AND PP_RETRY_ROUTER_SHADOW=0
+                  # the model picked and the metrics call type are identical
+                  # to v0.5.0.
+                  _retry_reason_class=$(pp_retry_classify_reason "$drop_reason" 2>/dev/null || printf 'unknown')
+                  _retry_confidence=$(pp_retry_confidence "$_retry_reason_class" \
+                    "${_pp_valid_paths_count:-0}" "${_pp_valid_symbols_count:-0}" \
+                    "${#_pp_failed_output}" "${cur_streak:-0}" "${_pp_concurrent_drops:-1}" 2>/dev/null || printf 'low')
+                  _retry_canary_bucket=$(pp_retry_canary_bucket "$session_id" 2>/dev/null || printf '0')
+                  _canary_active=0
+                  if [ "${PP_RETRY_ROUTER_ENABLE:-0}" = "1" ] \
+                     && [ "$_retry_canary_bucket" -lt "${PP_RETRY_ROUTER_CANARY_PCT:-0}" ] 2>/dev/null \
+                     && ! pp_rollback_is_active 2>/dev/null; then
+                    _canary_active=1
+                  fi
+                  _shadow_model=$(pp_retry_select_model "$_retry_confidence" 2>/dev/null || printf '%s' "${PP_RETRY_MODEL:-$PP_MODEL}")
+
+                  # Shadow log — only when SHADOW=1 (the pp_retry_log_shadow
+                  # function gates internally too, but we skip the jq subshell
+                  # entirely when off to keep the no-op path cheap).
+                  if [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ]; then
+                    pp_retry_log_shadow "$(jq -nc \
+                      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                      --arg sid "$session_id" \
+                      --arg lens "$ci_id" \
+                      --arg drc "$_retry_reason_class" \
+                      --arg conf "$_retry_confidence" \
+                      --arg shadow_model "$_shadow_model" \
+                      --argjson canary_active "$_canary_active" \
+                      '{ts:$ts,session:$sid,lens:$lens,drop_reason_class:$drc,confidence:$conf,shadow_model:$shadow_model,canary_active:$canary_active}' 2>/dev/null)" 2>/dev/null || true
+                  fi
+
+                  # Behavior switch: canary active → shadow model (with hard-cap
+                  # preflight gate). Otherwise v0.5.0 default. Hard-cap returning
+                  # 1 → skip this retry entirely (verdict stays DROP).
+                  _retry_skip=0
+                  if [ "$_canary_active" = "1" ]; then
+                    if pp_retry_hard_cap_preflight "$session_id" "$_shadow_model" 2>/dev/null; then
+                      _retry_model="$_shadow_model"
+                    else
+                      _retry_skip=1
+                      _retry_model="${PP_RETRY_MODEL:-$PP_MODEL}"
+                    fi
+                  else
+                    _retry_model="${PP_RETRY_MODEL:-$PP_MODEL}"
+                  fi
+
                   # Re-derive this lens's prompt from the shared registry (lenses/*.json).
                   # Uses the SAME long-form focus as the primary path — no drift between
                   # primary and retry prompts.
@@ -1260,8 +1333,8 @@ $critique_input"
                   retry_sys=$(pp_render_prompt analyst-retry)
 
                   retry_result=""
-                  if [ -n "$retry_sys" ]; then
-                    metrics_increment_call retry "${PP_RETRY_MODEL:-$PP_MODEL}"
+                  if [ -n "$retry_sys" ] && [ "$_retry_skip" != "1" ]; then
+                    metrics_increment_call retry "$_retry_model"
                     # Inject the failed output + drop reason as concrete
                     # counter-example into the retry input. The
                     # analyst-retry.md prompt references ${drop_reason} but
@@ -1269,7 +1342,7 @@ $critique_input"
                     # to learn from. (R2 ai-engineer #1.)
                     retry_input=$(printf 'PREVIOUS FAILED OBSERVATION:\n%s\n\nWHY IT WAS DROPPED:\n%s\n\n%s' \
                       "$_pp_failed_output" "$drop_reason" "$grounded")
-                    retry_result=$(printf "%s" "$retry_input" | run_llm 45 -m "${PP_RETRY_MODEL:-$PP_MODEL}" -s "$retry_sys" 2>/dev/null)
+                    retry_result=$(printf "%s" "$retry_input" | run_llm 45 -m "$_retry_model" -s "$retry_sys" 2>/dev/null)
                   fi
                   # Note: counted under worst-case-23 reservation at cycle start.
 

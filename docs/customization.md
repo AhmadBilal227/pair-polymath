@@ -12,6 +12,11 @@ All knobs live in `config/default.env`. To override, copy any line to `~/.claude
 | `PP_BUDGET_WARN_PCT` | `80` | % USED at which the line-1 statusline starts showing an amber pip (`⚡N%` remaining) and `polymath doctor` flips yellow for the "budget pressure" check. Set lower (e.g. `60`) to be warned earlier. Must be `< PP_BUDGET_RED_PCT`; inversions reset to defaults with a yellow doctor diagnostic. |
 | `PP_BUDGET_RED_PCT` | `95` | % USED at which line-1 turns the pip red (`⚠N%`), the line-2 idle fallback says "paused — daily budget near cap; resets at local midnight", and `polymath doctor` flips red with a remediation hint. |
 | `PP_DISPLAY_STALE_S` | `max(900, 3*PP_PARALLEL_INTERVAL_S)` | Maximum age in seconds before a cached lens observation is considered stale and skipped during rotation (line 2 falls through to the global tip or idle message). Default scales with the cycle interval so a delayed cycle doesn't stampede all lens caches into "stale" at once. The default is computed at runtime — override only if you want to pin a fixed window. |
+| `PP_DISMISS_AUTO_THRESHOLD` | `10` | When the same observation hash appears in `cc-monitor-injected-hash-*` files across this many sessions within `PP_DISMISS_AUTO_WINDOW_DAYS`, `pp_dismiss_auto_suppress` automatically adds a 7-day TTL rule. Excluded if you ran `polymath dismiss ack <hash-prefix>` first. Lower for more aggressive auto-suppress; higher for fewer false-positives. |
+| `PP_DISMISS_AUTO_WINDOW_DAYS` | `30` | Window for the auto-suppress counter (uses file mtime via `find -mtime`). Counts only hash-files modified within this many days. |
+| `PP_DISMISS_TTL_EXTEND_DAYS` | `3` | Each match of an auto-suppress rule's hash extends the rule's `ttl_days` by this many days, up to `PP_DISMISS_TTL_CAP_DAYS`. |
+| `PP_DISMISS_TTL_CAP_DAYS` | `30` | Hard cap on auto-suppress TTL extension. At cap, the rule promotes to `source=auto_suppress_persisted` (permanent until `polymath dismiss disable <id>`). |
+| `PP_DISMISS_RENDERED_MAX_BYTES` | `2048` | Byte cap on the `${project_constraints}` block injected into analyst LLM system prompts. Truncates at last full bullet — never mid-bullet. |
 
 ## Models
 

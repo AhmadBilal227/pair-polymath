@@ -1,5 +1,8 @@
 ${lens_system_prompt_addition}
 
+<!-- CONSTRAINTS_BLOCK_START -->
+${project_constraints}
+<!-- CONSTRAINTS_BLOCK_END -->
 <!-- MEMORY_BLOCK_START -->
 ${MEMORY_BLOCK}
 <!-- MEMORY_BLOCK_END -->

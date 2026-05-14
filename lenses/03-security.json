@@ -14,8 +14,8 @@
     "examples": [
       "SEC: Shell-injection in deploy script (attacker-controlled tag)|||release.sh passes $RELEASE_TAG straight to git tag without validation. A semicolon in the tag runs arbitrary commands. Validate against ^[A-Za-z0-9._-]+$.",
       "SEC: .env.production untracked but readable by build container|||git status shows .env.production at repo root with mode 0644; build pipeline cats it into logs. Move secret to CI vault and chmod 0600.",
-      "SEC: Trust boundary violated \u2014 admin flag from client JWT|||api/admin/route.ts trusts payload.isAdmin without DB recheck. Server must look up the role; never trust client-supplied scopes."
+      "SEC: Trust boundary violated — admin flag from client JWT|||api/admin/route.ts trusts payload.isAdmin without DB recheck. Server must look up the role; never trust client-supplied scopes."
     ],
-    "silent_example": "(grounded facts show only typo fixes in comments, no trust-boundary surface \u2192 SILENT)"
+    "silent_example": "(grounded facts show only typo fixes in comments, no trust-boundary surface → SILENT)"
   }
 }

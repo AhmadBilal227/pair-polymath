@@ -181,8 +181,8 @@ EOF
 @test "loader: F3 — analyst-primary off-mode is byte-identical to pre-2.3 fixture" {
   baseline="$PP_ROOT/test/fixtures/prompts/pre-2.3-analyst-baseline.txt"
   [ -f "$baseline" ]
-  PP_PROMPT_VAR_ALLOWLIST="MEMORY_BLOCK lens_system_prompt_addition lens_examples lens_silent_example relevance_directive"
-  MEMORY_BLOCK="" lens_system_prompt_addition="" lens_examples="" lens_silent_example="" relevance_directive=""
+  PP_PROMPT_VAR_ALLOWLIST="MEMORY_BLOCK project_constraints lens_system_prompt_addition lens_examples lens_silent_example relevance_directive"
+  MEMORY_BLOCK="" project_constraints="" lens_system_prompt_addition="" lens_examples="" lens_silent_example="" relevance_directive=""
   out=$(pp_render_prompt analyst-primary)
   diff <(printf '%s' "$out") "$baseline"
 }

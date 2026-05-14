@@ -23,6 +23,13 @@ pp_load_lenses
 LENS_NAMES=("${PP_LENS_IDS[@]}")
 LENS_COUNT="${PP_LENS_COUNT:-${#LENS_NAMES[@]}}"
 
+# v0.5 Phase 3: source dismiss lib (idempotent). Skip silently if unavailable
+# — the hook predates dismiss and we don't want to hard-fail older installs.
+if [ -z "${_pp_dismiss_sourced:-}" ]; then
+  # shellcheck disable=SC1091
+  . "${PP_ROOT}/lib/dismiss.sh" 2>/dev/null && _pp_dismiss_sourced=1
+fi
+
 now=$(date +%s)
 any_injected=0
 collected_blocks=""
@@ -51,7 +58,26 @@ for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
   # when the user enables/disables/reorders lenses)
   hash_file="${HOME}/.claude/cache/cc-monitor-injected-hash-${session_id}-${lens_name}.txt"
   time_file="${HOME}/.claude/cache/cc-monitor-injected-time-${session_id}-${lens_name}.txt"
-  current_hash=$(echo "$mon" | shasum 2>/dev/null | cut -d' ' -f1)
+  # Round-2 fix I2: shasum is perl-based and ships on macOS + most Linuxes,
+  # but missing on Alpine and minimal containers. Fall back to sha1sum then
+  # sha256sum (truncated).
+  if command -v shasum >/dev/null 2>&1; then
+    current_hash=$(echo "$mon" | shasum 2>/dev/null | cut -d' ' -f1)
+  elif command -v sha1sum >/dev/null 2>&1; then
+    current_hash=$(echo "$mon" | sha1sum 2>/dev/null | cut -d' ' -f1)
+  elif command -v sha256sum >/dev/null 2>&1; then
+    current_hash=$(echo "$mon" | sha256sum 2>/dev/null | cut -c1-40)
+  else
+    current_hash=""
+  fi
+
+  # v0.5 Phase 3: skip observations whose hash matches an active dismiss rule.
+  # Filtered BEFORE the 30-min idempotency state is touched, so a dismissed
+  # observation doesn't pollute the hash_file / time_file.
+  if [ -n "${current_hash:-}" ] && type pp_dismiss_is_suppressed >/dev/null 2>&1; then
+    pp_dismiss_is_suppressed "$current_hash" && continue
+  fi
+
   last_hash=$(cat "$hash_file" 2>/dev/null || echo "")
   last_time=$(cat "$time_file" 2>/dev/null || echo 0)
 

@@ -291,6 +291,40 @@ _pp_memory_wrap_inject_block() {
   printf '[END BACKGROUND MEMORY]\n'
 }
 
+# pp_memory_maintenance CWD
+# Runs the full maintenance pass for a session: signal scoring, pattern
+# extraction, eviction, and (if PP_MEMORY_ENABLE=1) dismiss-mirror rebuild.
+# Called once per memory maintenance cycle; each step is individually guarded
+# so a failure in one does not prevent the others from running.
+pp_memory_maintenance() {
+  local cwd="${1:-$PWD}"
+  [ "${PP_MEMORY_ENABLE:-0}" = "1" ] || return 0
+  # Signal scoring + activation recompute.
+  if type pp_memory_score_signals >/dev/null 2>&1; then
+    pp_memory_score_signals "$cwd" 2>/dev/null || true
+  fi
+  # Pattern extraction.
+  if type pp_memory_extract_patterns >/dev/null 2>&1; then
+    pp_memory_extract_patterns "$cwd" 2>/dev/null || true
+  fi
+  # Eviction (LRU by activation score).
+  if type pp_memory_evict >/dev/null 2>&1; then
+    pp_memory_evict "$cwd" 2>/dev/null || true
+  fi
+  # v0.5 Phase 3: rebuild dismiss-rules mirror.
+  # Round-2 fix I4: lazy-source lib/dismiss.sh first. The memory maintenance
+  # entry point can be reached without dismiss.sh pre-sourced (e.g. memory
+  # cron / direct CLI invocation), in which case the type-check silently
+  # no-ops and the mirror stays stale.
+  if [ -z "${_pp_dismiss_sourced:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${PP_ROOT}/lib/dismiss.sh" 2>/dev/null && _pp_dismiss_sourced=1
+  fi
+  if type pp_dismiss_load_into_memory >/dev/null 2>&1; then
+    pp_dismiss_load_into_memory 2>/dev/null || true
+  fi
+}
+
 # _pp_memory_truncate_utf8 STR N_BYTES
 # R3.16 — UTF-8-safe byte truncation. `head -c N` can chop a multi-byte
 # codepoint mid-sequence, leaving an invalid leading byte in the output

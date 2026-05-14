@@ -1040,13 +1040,19 @@ GROUND
           # user enabling/disabling/reordering lenses without stale-data bugs.
           PP_CACHE_LENS="${PP_CACHE_DIR}/cc-monitor-${session_id}-${lens_group}.txt"
 
-          # === Escalation check: if this lens has 3+ consecutive drops, escalate to deep mode ===
+          # === Escalation check: if this lens has $PP_ESCALATION_STREAK_THRESHOLD+
+          # consecutive drops, escalate to deep mode ===
           # Deep mode = extra lens-specific evidence-gathering (mini-planner picks files + greps)
           # before main analyst runs. Resets after one PASS.
+          # v0.5.1: threshold is env-tunable. Default 3 preserves v0.5.0 byte-identity;
+          # v0.5.1.1 plans to raise default to 5 alongside lens persona changes (clean
+          # attribution of the two effects).
           lens_streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_group}-streak.txt"
           lens_streak=$(cat "$lens_streak_file" 2>/dev/null || echo 0)
           is_escalated=0
-          [ "$lens_streak" -ge 3 ] && [ "${PP_ENABLE_ESCALATION:-1}" = "1" ] && is_escalated=1
+          [ "$lens_streak" -ge "${PP_ESCALATION_STREAK_THRESHOLD:-3}" ] \
+            && [ "${PP_ENABLE_ESCALATION:-1}" = "1" ] \
+            && is_escalated=1
 
           # Rotate the "deep" slot (gpt-5.5) AND the "wildcard" slot (broad allowance)
           # Both rotate every cycle through PP_LENS_COUNT positions. Offset wildcard so
@@ -1109,7 +1115,7 @@ $inv_hits"
             if [ -n "$lens_evidence" ]; then
               lens_grounded="$grounded
 
-=== LENS-SPECIFIC ESCALATION EVIDENCE (this lens has 3+ consecutive drops; deeper investigation engaged) ===
+=== LENS-SPECIFIC ESCALATION EVIDENCE (this lens has ${PP_ESCALATION_STREAK_THRESHOLD:-3}+ consecutive drops; deeper investigation engaged) ===
 $lens_evidence"
             fi
 

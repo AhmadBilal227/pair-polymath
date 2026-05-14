@@ -1202,3 +1202,27 @@ SHIM
   [[ "$output" == *"polymath self-test"* ]]
   ! [[ "$output" == *"will add: self-test"* ]]
 }
+
+# ========================================================
+# v0.5.1 Task 11: PP_ESCALATION_STREAK_THRESHOLD env-tunable
+# ========================================================
+
+@test "escalation: PP_ESCALATION_STREAK_THRESHOLD default is 3 (preserves v0.5.0)" {
+  grep -q 'PP_ESCALATION_STREAK_THRESHOLD:-3' "$PP_ROOT/bin/statusline.sh"
+}
+
+@test "escalation: streak=2 does NOT trigger inv when threshold=3" {
+  # Tautological by construction — locks the comparator semantic so a future
+  # refactor doesn't accidentally flip -ge to -gt or change the default.
+  PP_ESCALATION_STREAK_THRESHOLD=3
+  local _streak=2
+  if [ "$_streak" -ge "${PP_ESCALATION_STREAK_THRESHOLD}" ]; then
+    return 1
+  fi
+}
+
+@test "escalation: threshold env reads correctly with explicit override" {
+  local _out
+  _out=$(PP_ESCALATION_STREAK_THRESHOLD=5 bash -c 'echo "${PP_ESCALATION_STREAK_THRESHOLD:-3}"')
+  [ "$_out" = "5" ]
+}

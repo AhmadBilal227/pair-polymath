@@ -3,6 +3,77 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.0] — 2026-05-14
+
+The **noise-floor release**. Closes the v0.4 user-frustration pattern ("this advisory will keep firing because the lens agents don't have the architectural context") via three coordinated surfaces: `polymath dismiss` CLI for manual suppression, deterministic `pp_dismiss_render` constraint block injected into every analyst LLM prompt, and a 10×30d auto-suppress heuristic with sliding TTL on fire. **458 bats tests** (+42 dismiss). **18 doctor checks** (+1).
+
+### Added — `polymath dismiss` CLI
+
+- **`polymath dismiss "<reason>"`** — adds a project-scoped suppression rule. Default scope; pass `global` as second arg for cross-project rules. Returns the new rule id (`d-YYYY-MM-DD-XXXX`).
+- **`polymath dismiss list`** — shows active rules (`ID  SCOPE  REASON`). Empty state prints onboarding hint.
+- **`polymath dismiss show <id>`** — full JSON for one rule.
+- **`polymath dismiss disable <id>`** — soft-delete (append-only; deleted=true row).
+- **`polymath dismiss enable <id>`** — un-disable (append-only; deleted=false row).
+- **`polymath dismiss ack <hash-prefix>`** — explicit "this observation is useful, keep firing" affirmation. Excluded from auto-suppress counting.
+
+### Added — analyst-prompt integration
+
+- **`lib/dismiss.sh::pp_dismiss_render`** — deterministic compaction of active rules (dedup by exact `reason_summary`; sort manual-first then newest-first; top 8 bullets; ≤200 chars/bullet; total cap `PP_DISMISS_RENDERED_MAX_BYTES=2048`). NO LLM call — render-on-write with content-hash cache invalidation. Result piped through `pp_memory_redact_body` so user-typed text can never leak secrets into analyst prompts.
+- **`prompts/analyst-primary.md`** — new `${project_constraints}` placeholder wrapped in `<!-- CONSTRAINTS_BLOCK_START/END -->` sentinels. Generalized `pp_render_prompt`'s sentinel handling to support arbitrary `<NAME>_BLOCK` pairs.
+- **`hooks/inject-monitor-insight.sh`** — observations whose hash matches an active rule are filtered BEFORE the 30-min idempotency check (no pollution of hash files).
+- **`bin/statusline.sh`** — renders `${project_constraints}` once per cycle, exports to analyst subshells. Cache uses content-hash invalidation (bytes+sha1 header), not mtime — fixes backup-restore class.
+
+### Added — auto-suppress heuristic
+
+- **`lib/dismiss.sh::pp_dismiss_auto_suppress`** — scans `cc-monitor-injected-hash-*` files within `PP_DISMISS_AUTO_WINDOW_DAYS=30`; hashes recurring ≥`PP_DISMISS_AUTO_THRESHOLD=10` times get a 7-day TTL rule with `source=auto_suppress`. Acked hashes (prefix-matched) excluded.
+- **`pp_dismiss_is_suppressed`** — sliding TTL on fire. Each match of an `auto_suppress` rule's hash extends `ttl_days` by `PP_DISMISS_TTL_EXTEND_DAYS=3`, capped at `PP_DISMISS_TTL_CAP_DAYS=30`. At cap, rule promotes to `source=auto_suppress_persisted` with `ttl_days=null` (permanent until disabled).
+
+### Added — storage + telemetry
+
+- **`~/.claude/pair-polymath/dismiss/<project_hash>.jsonl`** — append-only canonical store. Mode 0600 (v0.4.2 umask invariant). Project hash via `lib/memory/schema.sh::pp_memory_project_hash` (same per-machine salt as memory).
+- **SQLite mirror via `pp_memory_maintenance`** — `memory_dismiss_rules` table rebuilt from JSONL on every memory-maintenance pass. JSONL is the truth source; SQLite is a queryable cache. Schema bumped v2 → v3. Survives cache purges; corrupted SQLite recovers on next maintenance pass.
+- **Doctor check #18 "dismiss libs"** — red on source failure or missing function; yellow on malformed JSONL; green otherwise.
+
+### Pass-5 review-cycle fixes (5-way: code-reviewer + debugger + security-auditor + GPT-5 + UX-taste)
+
+All 4 Critical + 7 Important findings addressed before merge:
+
+- **C1 latest-wins folding** — `pp_dismiss_list` + `pp_dismiss_render` + `pp_dismiss_auto_suppress` dedup-check were filtering raw JSONL without `group_by(.id) | map(last)` — disable/enable was silently ignored. Caught by 4 reviewers independently.
+- **C2 unresolved `${project_constraints}`** — Task 9 had appended the stanza to all 7 `lenses/*.json` `extras.system_prompt_addition`. Single-pass renderer doesn't re-scan substituted values, so it reached the analyst LLM verbatim. Stanza now lives in `prompts/analyst-primary.md` only.
+- **C3 redaction bypass** — render output now flows through `pp_memory_redact_body`.
+- **C4 ack direction reversed** — `grep -qF "$_hash"` was searching for the full 40-char hash inside the 8-char stored prefix; never matched. Replaced with per-prefix `case "$_hash" in "$_ack_prefix"*)` loop.
+- **I1** `--arg` consistency across all jq filters.
+- **I2** `PP_DISMISS_AUTO_WINDOW_DAYS` enforced via `find -mtime`.
+- **I3** `pp_dismiss_render` no-op on fresh-install (no churning empty cache writes).
+- **I4** cache invalidation now uses content-hash header (`bytes=N hash=SHA`), not mtime — fixes backup-restore-with-old-mtime permanent-stale class.
+- **I5** empty-state guidance message in `pp_dismiss_list`.
+- **I6** empty `${project_constraints}` stripped via `CONSTRAINTS_BLOCK_START/END` sentinels.
+- **I7** test for disable-path now calls `pp_dismiss_disable` instead of in-place rewrite.
+
+### Migration
+
+Existing installs auto-adopt — no migration command needed. The `~/.claude/pair-polymath/dismiss/` directory is created on first `polymath dismiss` invocation. SQLite mirror is rebuilt on the next `pp_memory_maintenance` cycle (default 1×/hour at `PP_MEMORY_ENABLE=1`).
+
+To verify after upgrade:
+
+```bash
+polymath doctor       # check #18 should be green
+polymath dismiss      # prints CLI help
+polymath dismiss list # empty state with onboarding hint
+```
+
+### Deferred to v0.6
+
+- ID entropy hardening (`RANDOM*RANDOM%65535` → epoch-ns + urandom)
+- Explicit flock on JSONL appends (currently relies on POSIX atomic-write-per-line)
+- Hash newline standardization between producers (`echo` vs `printf '%s'`)
+- `pp_dismiss_show` pretty-printed JSON via `jq '.'` pipe
+- Auto-suppress O(N) file scan cap
+- Help-text format correction (`[scope=project|global]` → `[project|global]`)
+- Cross-machine project-hash migration story (orphaned rendered caches on `~/.claude/cache` move)
+
+---
+
 ## [0.4.3] — 2026-05-13
 
 The **post-release hardening release**. A cumulative review of v0.4.0–v0.4.2 (GPT-5 review-code on the cumulative diff + `code-refactoring:code-reviewer` agent + `debugging-toolkit:debugger` agent — the security-auditor seat was rate-limited and will run on a v0.4.4 follow-up) surfaced 3 Critical + 5 Important silent-failure modes. All addressed inline before merge. **416 bats tests** (+13). **17 doctor checks** unchanged.

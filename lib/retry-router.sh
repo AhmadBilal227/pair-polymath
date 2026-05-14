@@ -86,3 +86,50 @@ pp_retry_canary_bucket() {
 ${_sid}|${_salt}
 EOF
 }
+
+# pp_retry_hard_cap_preflight SESSION_ID MODEL
+# Returns 0 (proceed) if the next retry's estimated USD plus the cycle's
+# accumulated spend stays within PP_RETRY_USD_PER_CYCLE_HARD_CAP. Returns 1
+# (caller should SKIP the retry) if the cap would be exceeded.
+#
+# Concurrent-safe via mkdir-lock (same pattern as lib/budget.sh + lib/metrics.sh).
+# On allow, reserves the estimated spend into the per-cycle spend file so the
+# next preflight call sees the new accumulated total.
+#
+# On lock contention (>50 retries × 20ms ≈ 1s) we fall through to ALLOW rather
+# than block the cycle — the hard cap is a soft guardrail, not a correctness
+# invariant. Pair this with the daily budget reservation in lib/budget.sh for
+# the absolute ceiling.
+pp_retry_hard_cap_preflight() {
+  [ "${PP_RETRY_HARD_CAP_ENABLE:-0}" = "1" ] || return 0
+  local _sid="${1:?session_id required}"
+  local _model="${2:?model required}"
+  local _cap="${PP_RETRY_USD_PER_CYCLE_HARD_CAP:-0.05}"
+  local _spendfile="${PP_CACHE_DIR:-$HOME/.claude/cache}/retry-cycle-spend-${_sid}.txt"
+  local _lockfile="${_spendfile}.lock"
+  mkdir -p "$(dirname "$_spendfile")" 2>/dev/null || return 0
+  local _attempts=0
+  while ! mkdir "$_lockfile" 2>/dev/null; do
+    _attempts=$((_attempts + 1))
+    [ "$_attempts" -gt 50 ] && return 0
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  local _current
+  _current=$(cat "$_spendfile" 2>/dev/null || printf '0')
+  case "$_current" in ''|*[!0-9.]*) _current=0 ;; esac
+  local _est
+  _est=$(pp_metrics_estimate_retry_usd "$_model" 2>/dev/null)
+  case "$_est" in ''|*[!0-9.]*) _est=0 ;; esac
+  local _would_exceed
+  _would_exceed=$(LC_ALL=C awk -v c="$_current" -v e="$_est" -v cap="$_cap" \
+    'BEGIN { print ((c + e) > cap) ? 1 : 0 }')
+  if [ "$_would_exceed" = "1" ]; then
+    rmdir "$_lockfile" 2>/dev/null
+    return 1
+  fi
+  # Reserve the spend so subsequent preflights see this cycle's running total.
+  LC_ALL=C awk -v c="$_current" -v e="$_est" 'BEGIN { printf "%.6f", c + e }' \
+    > "$_spendfile" 2>/dev/null
+  rmdir "$_lockfile" 2>/dev/null
+  return 0
+}

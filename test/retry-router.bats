@@ -226,3 +226,36 @@ teardown() { rm -rf "$HOME"; }
   _big=$(pp_metrics_estimate_retry_usd gpt-5)
   awk "BEGIN{exit !($_mini < $_big)}"
 }
+
+# ========================================================
+# Task 10: pp_retry_hard_cap_preflight skip-on-budget
+# ========================================================
+
+@test "hard_cap: skip when accumulated + estimated > cap" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  . "$PP_ROOT/lib/metrics.sh"
+  local _sid=s-hardcap-1
+  export PP_RETRY_HARD_CAP_ENABLE=1 PP_RETRY_USD_PER_CYCLE_HARD_CAP=0.005
+  # Accumulate 0.004 in-flight; one gpt-5 retry (~$0.0049) would exceed 0.005.
+  printf '0.004' > "$PP_CACHE_DIR/retry-cycle-spend-${_sid}.txt"
+  run pp_retry_hard_cap_preflight "$_sid" gpt-5
+  [ "$status" -ne 0 ]
+}
+
+@test "hard_cap: allow when accumulated + estimated <= cap" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  . "$PP_ROOT/lib/metrics.sh"
+  local _sid=s-hardcap-2
+  export PP_RETRY_HARD_CAP_ENABLE=1 PP_RETRY_USD_PER_CYCLE_HARD_CAP=0.05
+  printf '0.000' > "$PP_CACHE_DIR/retry-cycle-spend-${_sid}.txt"
+  run pp_retry_hard_cap_preflight "$_sid" gpt-5
+  [ "$status" -eq 0 ]
+}
+
+@test "hard_cap: no-op when PP_RETRY_HARD_CAP_ENABLE=0" {
+  . "$PP_ROOT/lib/retry-router.sh"
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_RETRY_HARD_CAP_ENABLE=0
+  run pp_retry_hard_cap_preflight "any" gpt-5
+  [ "$status" -eq 0 ]
+}

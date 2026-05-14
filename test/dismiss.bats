@@ -411,3 +411,35 @@ teardown() { rm -rf "$HOME"; }
   _out2=$(pp_dismiss_render)
   printf '%s' "$_out2" | grep -qF "Second content"
 }
+
+@test "memory-mirror: pp_dismiss_load_into_memory upserts active rules into SQLite" {
+  PP_MEMORY_ENABLE=1
+  export PP_MEMORY_ENABLE
+  # shellcheck source=../lib/memory/store.sh
+  . "$PP_ROOT/lib/memory/store.sh"
+  pp_memory_init "$PP_STATE_DIR/memory"
+  pp_dismiss_add "Mirror-this-rule" project >/dev/null
+  run pp_dismiss_load_into_memory
+  [ "$status" -eq 0 ]
+  local _db
+  _db=$(pp_memory_db_path)
+  local _count
+  _count=$(sqlite3 "$_db" "SELECT COUNT(*) FROM memory_dismiss_rules WHERE reason_summary = 'Mirror-this-rule';")
+  [ "$_count" = "1" ]
+}
+
+@test "memory-mirror: rebuilt from JSONL — stale rows pruned" {
+  PP_MEMORY_ENABLE=1
+  export PP_MEMORY_ENABLE
+  . "$PP_ROOT/lib/memory/store.sh"
+  pp_memory_init "$PP_STATE_DIR/memory"
+  local _id
+  _id=$(pp_dismiss_add "Will be removed from JSONL" project)
+  pp_dismiss_load_into_memory
+  : > "$(pp_dismiss_file_path)"
+  pp_dismiss_load_into_memory
+  local _db _count
+  _db=$(pp_memory_db_path)
+  _count=$(sqlite3 "$_db" "SELECT COUNT(*) FROM memory_dismiss_rules WHERE reason_summary = 'Will be removed from JSONL';")
+  [ "$_count" = "0" ]
+}

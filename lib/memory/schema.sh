@@ -182,13 +182,37 @@ END;
 EOF
 }
 
+# _pp_memory_apply_dismiss_mirror DB_PATH
+# Creates the memory_dismiss_rules table + indexes for the dismiss SQLite
+# mirror. Idempotent (uses IF NOT EXISTS). Added in v3 (Task 10 / v0.5 Phase 3).
+_pp_memory_apply_dismiss_mirror() {
+  local db="$1"
+  pp_memory_sqlite "$db" <<'EOF'
+CREATE TABLE IF NOT EXISTS memory_dismiss_rules (
+  id            TEXT PRIMARY KEY,
+  ts            TEXT NOT NULL,
+  reason_summary TEXT NOT NULL,
+  scope         TEXT NOT NULL CHECK (scope IN ('project','global')),
+  lens_id       TEXT,
+  hash          TEXT,
+  deleted       INTEGER NOT NULL DEFAULT 0,
+  deleted_reason TEXT,
+  ttl_days      INTEGER,
+  source        TEXT NOT NULL CHECK (source IN ('manual','auto_suppress','ack','auto_suppress_persisted'))
+);
+CREATE INDEX IF NOT EXISTS idx_dismiss_hash ON memory_dismiss_rules(hash);
+CREATE INDEX IF NOT EXISTS idx_dismiss_active ON memory_dismiss_rules(deleted, ttl_days);
+EOF
+}
+
 # pp_memory_db_migrate DB_PATH
 # Applies pending migrations based on PRAGMA user_version.
 #
 # Version log:
 #   v0 → v1: first-time init (db_init already ran). Bump user_version.
 #   v1 → v2: add FTS5 virtual table + sync triggers (Task B.1).
-#   current: 2.
+#   v2 → v3: add memory_dismiss_rules table + indexes (Task 10 / v0.5 Phase 3).
+#   current: 3.
 #
 # Migrations are forward-only. Unknown future versions return 1 with an
 # explanatory stderr so a forward-rolled DB on an older codebase fails loudly.
@@ -197,7 +221,7 @@ pp_memory_db_migrate() {
   [ -f "$db" ] || return 1
   local cur
   cur=$(pp_memory_sqlite "$db" "PRAGMA user_version;" 2>/dev/null)
-  # Step through versions one at a time so a v0 → v2 cold-start runs each
+  # Step through versions one at a time so a v0 → v3 cold-start runs each
   # migration in order.
   while :; do
     case "$cur" in
@@ -211,6 +235,11 @@ pp_memory_db_migrate() {
         cur=2
         ;;
       2)
+        _pp_memory_apply_dismiss_mirror "$db" || return 1
+        pp_memory_sqlite "$db" "PRAGMA user_version = 3;"
+        cur=3
+        ;;
+      3)
         return 0
         ;;
       *)
@@ -219,4 +248,27 @@ pp_memory_db_migrate() {
         ;;
     esac
   done
+}
+
+# pp_memory_init DIR
+# Convenience wrapper: sets PP_MEMORY_DIR to DIR, then initialises the SQLite
+# DB for the current working directory. Idempotent — safe to call on every
+# test setup or maintenance pass.
+pp_memory_init() {
+  local dir="$1"
+  [ -n "$dir" ] || return 1
+  PP_MEMORY_DIR="$dir"
+  export PP_MEMORY_DIR
+  local proj_dir
+  proj_dir=$(pp_memory_project_dir "$PWD") || return 1
+  pp_memory_db_init "$proj_dir"
+}
+
+# pp_memory_db_path
+# Stdout: absolute path to the observations.sqlite for $PWD under $PP_MEMORY_DIR.
+# Returns 1 if the project dir cannot be computed.
+pp_memory_db_path() {
+  local proj_dir
+  proj_dir=$(pp_memory_project_dir "$PWD") || return 1
+  printf '%s/observations.sqlite' "$proj_dir"
 }

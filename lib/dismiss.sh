@@ -287,6 +287,47 @@ pp_dismiss_ack() {
   printf '%s' "$_id"
 }
 
+# pp_dismiss_load_into_memory
+# Rebuilds the memory_dismiss_rules table from the canonical JSONL.
+# Idempotent (DELETE + bulk INSERT under one transaction).
+# No-op if PP_MEMORY_ENABLE=0.
+pp_dismiss_load_into_memory() {
+  [ "${PP_MEMORY_ENABLE:-0}" = "1" ] || return 0
+  local _file _db
+  _file=$(pp_dismiss_file_path) || return 1
+  if ! type pp_memory_db_path >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "${PP_ROOT:-.}/lib/memory/store.sh" 2>/dev/null || return 1
+  fi
+  _db=$(pp_memory_db_path) || return 1
+  [ ! -f "$_db" ] && return 0
+  # Build CSV from latest-line-per-id of the JSONL (or empty if no file).
+  local _csv=""
+  if [ -f "$_file" ]; then
+    _csv=$(jq -s -r '
+      group_by(.id) | map(last)
+      | .[] | [
+          .id, .ts, .reason_summary, .scope, (.lens_id // ""), (.hash // ""),
+          (.deleted | if . then 1 else 0 end),
+          (.deleted_reason // ""), (.ttl_days // ""),
+          .source
+        ] | @csv
+    ' "$_file" 2>/dev/null)
+  fi
+  # Atomic DELETE + INSERT in one transaction.
+  {
+    printf 'BEGIN;\nDELETE FROM memory_dismiss_rules;\n'
+    if [ -n "$_csv" ]; then
+      printf '%s\n' "$_csv" | while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        # Build a SQL INSERT — fields are already CSV-escaped by jq.
+        printf 'INSERT INTO memory_dismiss_rules (id, ts, reason_summary, scope, lens_id, hash, deleted, deleted_reason, ttl_days, source) VALUES (%s);\n' "$_line"
+      done
+    fi
+    printf 'COMMIT;\n'
+  } | sqlite3 "$_db"
+}
+
 # pp_dismiss_auto_suppress
 # Scans $PP_CACHE_DIR/cc-monitor-injected-hash-* across sessions, counts
 # how many times each hash appears. Threshold + window from env. Acked

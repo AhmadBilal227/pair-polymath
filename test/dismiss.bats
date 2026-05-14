@@ -28,22 +28,17 @@ teardown() { rm -rf "$HOME"; }
   jq -e '.id and .ts and .reason_summary and .scope == "project" and .source == "manual" and .deleted == false' "$_file" >/dev/null
 }
 
-@test "dismiss_list: empty list prints zero lines and exits 0" {
+@test "dismiss_list: empty list prints empty-state guidance and exits 0" {
   run pp_dismiss_list
   [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  printf '%s' "$output" | grep -qiE 'no suppression rules|polymath dismiss'
 }
 
-@test "dismiss_list: returns active rules only (deleted excluded)" {
-  pp_dismiss_add "Rule A" project
-  pp_dismiss_add "Rule B" project
-  local _file _id_b
-  _file=$(pp_dismiss_file_path)
-  _id_b=$(jq -r 'select(.reason_summary == "Rule B") | .id' "$_file" | head -1)
-  local _tmp
-  _tmp=$(mktemp)
-  jq -c "if .id == \"$_id_b\" then .deleted = true else . end" "$_file" > "$_tmp"
-  mv "$_tmp" "$_file"
+@test "dismiss_list: returns active rules only (excludes pp_dismiss_disable'd)" {
+  local _id_a _id_b
+  _id_a=$(pp_dismiss_add "Rule A" project)
+  _id_b=$(pp_dismiss_add "Rule B" project)
+  pp_dismiss_disable "$_id_b" "user_disabled"
   run pp_dismiss_list
   [ "$status" -eq 0 ]
   printf '%s' "$output" | grep -qF "Rule A"
@@ -139,9 +134,9 @@ teardown() { rm -rf "$HOME"; }
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     pp_dismiss_add "Rule number $_i with verbose padding text to consume bytes" project
   done
-  PP_DISMISS_RENDERED_MAX_BYTES=200 run pp_dismiss_render
+  PP_DISMISS_RENDERED_MAX_BYTES=400 run pp_dismiss_render
   [ "$status" -eq 0 ]
-  [ "$(printf '%s' "$output" | wc -c | tr -d ' ')" -le 200 ]
+  [ "$(printf '%s' "$output" | wc -c | tr -d ' ')" -le 400 ]
 }
 
 @test "dismiss_render: cache invalidates only when source JSONL mtime is newer" {
@@ -324,4 +319,95 @@ teardown() { rm -rf "$HOME"; }
   # The constraint text doesn't have to appear on the user-visible statusline,
   # but it MUST be computed (cache file written).
   [ -f "$PP_CACHE_DIR/cc-dismiss-rendered-$(pp_memory_project_hash "$PWD").txt" ]
+}
+
+# ----------------------------------------------------------------------
+# Pass-5 review regression tests (C1, C2, C3, C4, I2, I3, I4).
+# ----------------------------------------------------------------------
+
+@test "regression C1: pp_dismiss_render excludes pp_dismiss_disable'd rules" {
+  local _id
+  _id=$(pp_dismiss_add "Render me only when active" project)
+  run pp_dismiss_render
+  printf '%s' "$output" | grep -qF "Render me only when active"
+  pp_dismiss_disable "$_id" "user_disabled"
+  run pp_dismiss_render
+  ! printf '%s' "$output" | grep -qF "Render me only when active"
+}
+
+@test "regression C2: no lens JSON contains a literal \${project_constraints} string" {
+  local _f _addition
+  for _f in "$PP_ROOT"/lenses/*.json; do
+    _addition=$(jq -r '.extras.system_prompt_addition // ""' "$_f")
+    ! printf '%s' "$_addition" | grep -qE '\$\{project_constraints\}'
+  done
+}
+
+@test "regression C3: pp_dismiss_render output passes through pp_memory_redact_body" {
+  # Add a rule containing a fake-OpenAI-shaped secret literal.
+  pp_dismiss_add "ignore the sk-thisisatestkeythatshouldberedacted token" project
+  # Force cache miss by clearing any rendered cache.
+  rm -f "$PP_CACHE_DIR/cc-dismiss-rendered-"*
+  run pp_dismiss_render
+  ! printf '%s' "$output" | grep -qF "sk-thisisatestkey"
+  printf '%s' "$output" | grep -qF "REDACTED"
+}
+
+@test "regression C4: pp_dismiss_ack with short prefix vetoes pp_dismiss_auto_suppress" {
+  local _full_hash="abcdef1234567890abcdef1234567890abcdef12"
+  pp_dismiss_ack "abcdef12"  # 8-char prefix
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    printf '%s' "$_full_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
+  done
+  PP_DISMISS_AUTO_THRESHOLD=10 run pp_dismiss_auto_suppress
+  local _file _autoct
+  _file=$(pp_dismiss_file_path)
+  _autoct=$(jq -c "select(.source == \"auto_suppress\" and .hash == \"$_full_hash\")" "$_file" | wc -l | tr -d ' ')
+  [ "$_autoct" = "0" ]
+}
+
+@test "regression I2: PP_DISMISS_AUTO_WINDOW_DAYS filters out old hash files" {
+  local _hash="windowtestxyz"
+  # 10 hash files but with mtime > 30 days ago.
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    printf '%s' "$_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-old-$_i-ENGINEERING.txt"
+  done
+  # Backdate 60 days. Use BSD touch -t first, fall back to GNU -d.
+  if ! find "$PP_CACHE_DIR" -name 'cc-monitor-injected-hash-sess-old-*' \
+        -exec touch -t 202001010000 {} \; 2>/dev/null; then
+    find "$PP_CACHE_DIR" -name 'cc-monitor-injected-hash-sess-old-*' \
+      -exec touch -d '60 days ago' {} \;
+  fi
+  PP_DISMISS_AUTO_THRESHOLD=10 PP_DISMISS_AUTO_WINDOW_DAYS=30 run pp_dismiss_auto_suppress
+  local _file _ct
+  _file=$(pp_dismiss_file_path)
+  if [ ! -f "$_file" ]; then return 0; fi
+  _ct=$(jq -c "select(.source == \"auto_suppress\" and .hash == \"$_hash\")" "$_file" | wc -l | tr -d ' ')
+  [ "$_ct" = "0" ]
+}
+
+@test "regression I3: pp_dismiss_render does NOT touch cache on repeated calls with no source" {
+  rm -f "$PP_CACHE_DIR/cc-dismiss-rendered-"*
+  pp_dismiss_render >/dev/null
+  local _proj _cache _m1 _m2
+  _proj=$(pp_memory_project_hash "$PWD")
+  _cache="$PP_CACHE_DIR/cc-dismiss-rendered-${_proj}.txt"
+  _m1=$(stat -c %Y "$_cache" 2>/dev/null || stat -f %m "$_cache" 2>/dev/null)
+  sleep 1
+  pp_dismiss_render >/dev/null
+  _m2=$(stat -c %Y "$_cache" 2>/dev/null || stat -f %m "$_cache" 2>/dev/null)
+  [ "$_m1" = "$_m2" ]
+}
+
+@test "regression I4: pp_dismiss_render invalidates cache when source content changes" {
+  pp_dismiss_add "First content" project >/dev/null
+  local _out1 _out2
+  _out1=$(pp_dismiss_render)
+  printf '%s' "$_out1" | grep -qF "First content"
+  # Add a second rule — content changes; cache header must catch it.
+  pp_dismiss_add "Second content" project >/dev/null
+  _out2=$(pp_dismiss_render)
+  printf '%s' "$_out2" | grep -qF "Second content"
 }

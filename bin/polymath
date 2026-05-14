@@ -382,6 +382,49 @@ USAGE
     esac
     ;;
 
+  retry-router)
+    # v0.5.1 — operator surface for the cost-aware retry router.
+    # Subcommands: status (default) | clear-flag | shadow-summary
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/retry-router.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/auto-rollback.sh"
+    case "${1:-status}" in
+      status)
+        printf '\nRetry router\n'
+        printf '  Enabled:        %s\n' "${PP_RETRY_ROUTER_ENABLE:-0}"
+        printf '  Shadow:         %s\n' "${PP_RETRY_ROUTER_SHADOW:-0}"
+        printf '  Canary %%:       %s\n' "${PP_RETRY_ROUTER_CANARY_PCT:-0}"
+        if pp_rollback_is_active; then
+          printf '  Rollback:       ACTIVE\n'
+        else
+          printf '  Rollback:       not active\n'
+        fi
+        printf '\n'
+        ;;
+      clear-flag)
+        pp_rollback_clear
+        printf 'Rollback flag cleared.\n'
+        ;;
+      shadow-summary)
+        _shadow="${PP_CACHE_DIR:-$HOME/.claude/cache}/retry-router-shadow.jsonl"
+        if [ ! -f "$_shadow" ]; then
+          printf 'No shadow data yet. Enable with PP_RETRY_ROUTER_SHADOW=1.\n'
+          exit 0
+        fi
+        jq -s '
+          group_by(.drop_reason_class)
+          | map({class: .[0].drop_reason_class, count: length})
+        ' "$_shadow"
+        ;;
+      *)
+        printf 'polymath retry-router: unknown subcommand %s\n' "$1" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   kpi)
     # v0.5.1 — rolling cost / retry / phase summary from kpi-cycle.jsonl.
     # Default window 7 days. --window Nd to override. --json for machine output.

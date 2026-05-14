@@ -322,3 +322,43 @@ teardown() { rm -rf "$HOME"; }
   grep -q 'lib/retry-router.sh' "$PP_ROOT/bin/statusline.sh"
   grep -q 'lib/auto-rollback.sh' "$PP_ROOT/bin/statusline.sh"
 }
+
+# ========================================================
+# Task 17: polymath retry-router CLI subcommand
+# ========================================================
+
+@test "cli: polymath retry-router status prints current state" {
+  run bash "$PP_ROOT/bin/polymath" retry-router status
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE 'Retry router'
+  printf '%s' "$output" | grep -qE 'Enabled:'
+}
+
+@test "cli: polymath retry-router clear-flag removes the flag file" {
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  pp_rollback_engage 24
+  pp_rollback_is_active
+  run bash "$PP_ROOT/bin/polymath" retry-router clear-flag
+  [ "$status" -eq 0 ]
+  # Re-source to pick up cleared state; pp_rollback_is_active returns non-zero now.
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  run pp_rollback_is_active
+  [ "$status" -ne 0 ]
+}
+
+@test "cli: polymath retry-router shadow-summary empty-state hints SHADOW=1" {
+  run bash "$PP_ROOT/bin/polymath" retry-router shadow-summary
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -q 'PP_RETRY_ROUTER_SHADOW=1'
+}
+
+# ========================================================
+# Task 18: Doctor check #19 — retry router health
+# ========================================================
+
+@test "doctor: check #19 retry-router-health appears in pp_doctor_run output" {
+  # Doctor may exit non-zero if other checks (openai key, llm install) fail in
+  # the hermetic test env; we only care that #19 surfaces.
+  run bash "$PP_ROOT/bin/polymath" doctor
+  printf '%s' "$output" | grep -qE 'retry router'
+}

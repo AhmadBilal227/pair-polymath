@@ -402,3 +402,43 @@ pp_write_privacy_log() {
   chmod 600 "$out" 2>/dev/null || true
   return 0
 }
+
+# === v0.5.1 KPI cycle emitter =================================================
+# pp_kpi_emit_cycle JSON_BLOB
+#
+# Appends one JSON line to kpi-cycle.jsonl. Caller is responsible for shape;
+# this function is a pure transport (no schema validation — keeps the emitter
+# cheap and lets callers evolve the schema without coordinated changes here).
+#
+# Activation rules (in order):
+#   1. PP_KPI_FORCE_DISABLE=1   → always skip (kill switch).
+#   2. PP_KPI_ENABLE=1          → emit.
+#   3. PP_RETRY_ROUTER_ENABLE=1 → emit (router needs the data to measure SLOs).
+#   4. PP_RETRY_ROUTER_SHADOW=1 → emit (shadow mode is the SLO probe phase).
+#   5. otherwise                → skip.
+#
+# Rotation: at PP_LOG_MAX_BYTES, rename file → file.1 (single retention slot,
+# matching pp_retry_log_shadow's policy). Failures are silent — telemetry must
+# never block the cycle.
+pp_kpi_emit_cycle() {
+  [ "${PP_KPI_FORCE_DISABLE:-0}" = "1" ] && return 0
+  local _enabled=0
+  [ "${PP_KPI_ENABLE:-0}" = "1" ] && _enabled=1
+  [ "${PP_RETRY_ROUTER_ENABLE:-0}" = "1" ] && _enabled=1
+  [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ] && _enabled=1
+  [ "$_enabled" = "0" ] && return 0
+  local _blob="${1:-}"
+  [ -z "$_blob" ] && return 0
+  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+  local _max="${PP_LOG_MAX_BYTES:-10485760}"
+  case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
+  mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
+  if [ -f "$_file" ]; then
+    local _size
+    _size=$(wc -c < "$_file" 2>/dev/null | tr -d ' ')
+    if [ "${_size:-0}" -ge "$_max" ]; then
+      mv "$_file" "${_file}.1" 2>/dev/null || true
+    fi
+  fi
+  printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
+}

@@ -88,20 +88,21 @@ teardown() { rm -rf "$SANDBOX"; }
   [ "$jm" = "wal" ]
 }
 
-@test "schema: pp_memory_db_init sets PRAGMA user_version = 2" {
+@test "schema: pp_memory_db_init sets PRAGMA user_version = 3" {
+  # v0.5 Phase 3 Task 10 bumped schema from v2 to v3 (added memory_dismiss_rules).
   mkdir -p "$SANDBOX/proj"
   pp_memory_db_init "$SANDBOX/proj"
   uv=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "PRAGMA user_version;")
-  [ "$uv" = "2" ]
+  [ "$uv" = "3" ]
 }
 
-@test "schema: pp_memory_db_migrate is a no-op on a v2 database" {
+@test "schema: pp_memory_db_migrate is a no-op on a latest-version database" {
   mkdir -p "$SANDBOX/proj"
   pp_memory_db_init "$SANDBOX/proj"
   run pp_memory_db_migrate "$SANDBOX/proj/observations.sqlite"
   [ "$status" -eq 0 ]
   uv=$(sqlite3 "$SANDBOX/proj/observations.sqlite" "PRAGMA user_version;")
-  [ "$uv" = "2" ]
+  [ "$uv" = "3" ]
 }
 
 @test "schema: pp_memory_db_init creates obs_fts virtual table" {
@@ -207,7 +208,7 @@ SQL
   [ "$hit" = "1" ]
 }
 
-@test "schema: v1 → v2 migration adds FTS5 to a pre-existing v1 db" {
+@test "schema: v1 → latest migration adds FTS5 + dismiss-mirror to a pre-existing v1 db" {
   # Simulate a hypothetical pre-FTS5 v1 database: create only the observations
   # table + cycle_state, mark it user_version=1, then run pp_memory_db_migrate.
   mkdir -p "$SANDBOX/proj"
@@ -233,7 +234,10 @@ SQL
   run pp_memory_db_migrate "$db"
   [ "$status" -eq 0 ]
   uv=$(sqlite3 "$db" "PRAGMA user_version;")
-  [ "$uv" = "2" ]
+  [ "$uv" = "3" ]
   post=$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE name='obs_fts';")
   [ "$post" = "1" ]
+  # v3 migration also creates memory_dismiss_rules.
+  dismiss_tbl=$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE name='memory_dismiss_rules';")
+  [ "$dismiss_tbl" = "1" ]
 }

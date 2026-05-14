@@ -5,7 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [0.5.0] — 2026-05-14
 
-The **noise-floor release**. Closes the v0.4 user-frustration pattern ("this advisory will keep firing because the lens agents don't have the architectural context") via three coordinated surfaces: `polymath dismiss` CLI for manual suppression, deterministic `pp_dismiss_render` constraint block injected into every analyst LLM prompt, and a 10×30d auto-suppress heuristic with sliding TTL on fire. **458 bats tests** (+42 dismiss). **18 doctor checks** (+1).
+The **safety-valve release**. v0.5.0 ships dismiss infrastructure as a **manual override** for when the intelligence layer fails — NOT as the primary noise-reduction mechanism. The real noise-floor work (lens persona calibration, cross-cycle memory feedback, confidence weighting, task-domain gating) is on the roadmap for v0.5.1+ as "Lens Intelligence Amplification." This framing follows the insight: *suppression is a fallback, not a feature; system intelligence should be amplified, not suppressed.*
+
+**Auto-suppress defaults to OFF** in v0.5.0 (`PP_DISMISS_AUTO_ENABLE=0`). Manual `polymath dismiss "<reason>"` remains fully active. Users in high-volume sessions can opt into auto-suppress via `PP_DISMISS_AUTO_ENABLE=1`. Existing auto-suppress rules created by prior versions still take effect; the flag only controls AUTOMATIC RULE CREATION.
+
+**Three coordinated surfaces ship:** `polymath dismiss` CLI for manual suppression, deterministic `pp_dismiss_render` constraint block injected into every analyst LLM prompt, and (opt-in) a 10×30d auto-suppress heuristic with sliding TTL on fire. **466 bats tests** (+50 dismiss + corrections to memory/schema for the v2→v3 user_version bump). **18 doctor checks** (+1).
 
 ### Added — `polymath dismiss` CLI
 
@@ -62,15 +66,22 @@ polymath dismiss      # prints CLI help
 polymath dismiss list # empty state with onboarding hint
 ```
 
-### Deferred to v0.6
+### Roadmap (v0.5.1 — Lens Intelligence Amplification)
 
+The real noise-floor work shifts to making lenses smarter, not adding more suppression machinery:
+
+- **Lens persona task-anchoring** — reword each `extras.system_prompt_addition` so the persona EARNS the right to fire ("most cycles, stay silent"); maturity-gate clauses for Product_Biz / Strategic_Founder / Cognitive_Flow on small open-source contexts
+- **Outcome telemetry (OAR — Observation→Action Rate)** — post-injection 24h transcript+git scan classifies each advisory as `acted | referenced | pushed-back | ignored`; rolling 30d precision per lens fed back into next-cycle prompts
+- **Task-domain signal** — router additionally gates lens enablement by codebase domain (extension/package signals); bash plugin → ENG+SEC+PERF dominant; React app → UX+ENG; backend → SEC+PERF
+- **Cross-cycle memory feedback** — `${prev_observations}` placeholder populated with last N PASSed observations from THIS lens, framed as "do not repeat unless materially changed"
+
+### Deferred to v0.6+
+
+- Confidence-weighted critique + claim-graph dedup (top-1 by combined confidence × novelty surfaces; others go to history)
+- `polymath history` audit CLI (Task #36)
 - ID entropy hardening (`RANDOM*RANDOM%65535` → epoch-ns + urandom)
-- Explicit flock on JSONL appends (currently relies on POSIX atomic-write-per-line)
-- Hash newline standardization between producers (`echo` vs `printf '%s'`)
+- Explicit flock on JSONL appends
 - `pp_dismiss_show` pretty-printed JSON via `jq '.'` pipe
-- Auto-suppress O(N) file scan cap
-- Help-text format correction (`[scope=project|global]` → `[project|global]`)
-- Cross-machine project-hash migration story (orphaned rendered caches on `~/.claude/cache` move)
 
 ---
 

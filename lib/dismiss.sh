@@ -471,6 +471,15 @@ pp_dismiss_load_into_memory() {
 # how many times each hash appears. Threshold + window from env. Acked
 # hashes are skipped. Creates source=auto_suppress rules with ttl_days=7.
 pp_dismiss_auto_suppress() {
+  # v0.5.0 release framing: dismiss is a SAFETY VALVE, not the headline.
+  # Auto-suppress (which automatically creates suppression rules without
+  # user consent) is opt-in. Existing rules — including ones manually
+  # promoted via this function in a prior session — are STILL honored by
+  # pp_dismiss_is_suppressed regardless of this flag. The flag only gates
+  # AUTOMATIC RULE CREATION.
+  if [ "${PP_DISMISS_AUTO_ENABLE:-0}" != "1" ]; then
+    return 0
+  fi
   local _threshold="${PP_DISMISS_AUTO_THRESHOLD:-10}"
   case "$_threshold" in ''|*[!0-9]*) _threshold=10 ;; esac
   local _window="${PP_DISMISS_AUTO_WINDOW_DAYS:-30}"

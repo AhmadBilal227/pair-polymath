@@ -270,6 +270,7 @@ teardown() { rm -rf "$HOME"; }
   done
   PP_DISMISS_AUTO_THRESHOLD=10 \
     PP_DISMISS_AUTO_WINDOW_DAYS=30 \
+    PP_DISMISS_AUTO_ENABLE=1 \
     run pp_dismiss_auto_suppress
   [ "$status" -eq 0 ]
   local _file
@@ -283,7 +284,23 @@ teardown() { rm -rf "$HOME"; }
   for _i in 1 2 3; do
     printf '%s' "$_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
   done
+  PP_DISMISS_AUTO_THRESHOLD=10 PP_DISMISS_AUTO_ENABLE=1 run pp_dismiss_auto_suppress
+  local _file
+  _file=$(pp_dismiss_file_path)
+  [ ! -f "$_file" ] || ! jq -e "select(.hash == \"$_hash\")" "$_file" >/dev/null
+}
+
+@test "auto_suppress: default OFF — gate skips creation unless PP_DISMISS_AUTO_ENABLE=1" {
+  # v0.5.0 framing: dismiss is a safety valve. Auto-creation is opt-in.
+  local _hash="defaultoffgatehashxyz"
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    printf '%s' "$_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
+  done
+  # Run WITHOUT PP_DISMISS_AUTO_ENABLE — gate should refuse.
+  unset PP_DISMISS_AUTO_ENABLE
   PP_DISMISS_AUTO_THRESHOLD=10 run pp_dismiss_auto_suppress
+  [ "$status" -eq 0 ]
   local _file
   _file=$(pp_dismiss_file_path)
   [ ! -f "$_file" ] || ! jq -e "select(.hash == \"$_hash\")" "$_file" >/dev/null
@@ -296,7 +313,7 @@ teardown() { rm -rf "$HOME"; }
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     printf '%s' "$_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
   done
-  PP_DISMISS_AUTO_THRESHOLD=10 run pp_dismiss_auto_suppress
+  PP_DISMISS_AUTO_THRESHOLD=10 PP_DISMISS_AUTO_ENABLE=1 run pp_dismiss_auto_suppress
   local _file _autoct
   _file=$(pp_dismiss_file_path)
   _autoct=$(jq -c "select(.source == \"auto_suppress\" and .hash == \"$_hash\")" "$_file" | wc -l | tr -d ' ')
@@ -360,7 +377,7 @@ teardown() { rm -rf "$HOME"; }
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     printf '%s' "$_full_hash" > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-$_i-ENGINEERING.txt"
   done
-  PP_DISMISS_AUTO_THRESHOLD=10 run pp_dismiss_auto_suppress
+  PP_DISMISS_AUTO_THRESHOLD=10 PP_DISMISS_AUTO_ENABLE=1 run pp_dismiss_auto_suppress
   local _file _autoct
   _file=$(pp_dismiss_file_path)
   _autoct=$(jq -c "select(.source == \"auto_suppress\" and .hash == \"$_full_hash\")" "$_file" | wc -l | tr -d ' ')

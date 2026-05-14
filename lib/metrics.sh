@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# I4 (v0.5.1): new JSONL telemetry logs (kpi-cycle.jsonl) must be owner-only.
+# umask 077 here matches the established v0.4.2 invariant pattern other libs
+# use — every file this lib creates inherits 0600. Set before any file op.
+umask 077
+
 # Pair Polymath — USD telemetry. Sourced by bin/statusline.sh.
 # Lean v1 approach: end-of-cycle rollup. Calls are TYPE-counted during the
 # cycle (planner / analyst / critique / inv / retry); at flush time we
@@ -403,6 +408,42 @@ pp_write_privacy_log() {
   return 0
 }
 
+# === v0.5.1 shared JSONL rotation helper ======================================
+# _pp_rotate_jsonl FILE MAX_BYTES
+#
+# I3 (v0.5.1): pp_retry_log_shadow and pp_kpi_emit_cycle each used to do an
+# unlocked check-size → mv → append. Under parallel lens fan-out two writers
+# could both pass the size check and one mv could land mid-append of the
+# other, producing torn JSONL. This single shared helper wraps the rotation
+# decision (size check + mv) in the budget.sh-style mkdir-lock so exactly one
+# writer rotates. Callers still append after calling this — the append itself
+# is a single `printf >>` which is atomic for short lines on POSIX.
+#
+# Fails open: lock timeout or any error → return 0 (caller proceeds to append
+# without rotating). Telemetry must never block the cycle.
+_pp_rotate_jsonl() {
+  local _file="${1:-}"
+  local _max="${2:-10485760}"
+  [ -n "$_file" ] || return 0
+  case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
+  [ -f "$_file" ] || return 0
+  local _lock="${_file}.rotate.lock"
+  local _attempts=0
+  while ! mkdir "$_lock" 2>/dev/null; do
+    _attempts=$((_attempts + 1))
+    [ "$_attempts" -gt 100 ] && return 0
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  # Re-check size INSIDE the lock — another writer may have just rotated.
+  local _size
+  _size=$(wc -c < "$_file" 2>/dev/null | tr -d ' ')
+  if [ "${_size:-0}" -ge "$_max" ]; then
+    mv "$_file" "${_file}.1" 2>/dev/null || true
+  fi
+  rmdir "$_lock" 2>/dev/null || true
+  return 0
+}
+
 # === v0.5.1 KPI cycle emitter =================================================
 # pp_kpi_emit_cycle JSON_BLOB
 #
@@ -418,8 +459,8 @@ pp_write_privacy_log() {
 #   5. otherwise                → skip.
 #
 # Rotation: at PP_LOG_MAX_BYTES, rename file → file.1 (single retention slot,
-# matching pp_retry_log_shadow's policy). Failures are silent — telemetry must
-# never block the cycle.
+# matching pp_retry_log_shadow's policy) via the shared _pp_rotate_jsonl
+# mkdir-lock helper (I3). Failures are silent — telemetry must never block.
 pp_kpi_emit_cycle() {
   [ "${PP_KPI_FORCE_DISABLE:-0}" = "1" ] && return 0
   local _enabled=0
@@ -433,12 +474,49 @@ pp_kpi_emit_cycle() {
   local _max="${PP_LOG_MAX_BYTES:-10485760}"
   case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
   mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
-  if [ -f "$_file" ]; then
-    local _size
-    _size=$(wc -c < "$_file" 2>/dev/null | tr -d ' ')
-    if [ "${_size:-0}" -ge "$_max" ]; then
-      mv "$_file" "${_file}.1" 2>/dev/null || true
-    fi
-  fi
+  _pp_rotate_jsonl "$_file" "$_max"
   printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
+}
+
+# === v0.5.1 p95 computation ===================================================
+# pp_kpi_compute_p95 FIELD WINDOW_HOURS
+# Stdout: p95 of the named numeric field across kpi-cycle.jsonl rows whose
+#   ts falls within the last WINDOW_HOURS. Also reads the rotated .1 file so
+#   the window isn't lost right after a rotation.
+#
+# Pure jq + awk, bash-3.2-portable. Used by:
+#   - auto-rollback's pp_rollback_check_and_engage (SLO p95 of retry_usd)
+#   - `polymath kpi` (p95 of retry_usd, replacing the plain average)
+#
+# Method: nearest-rank p95 — sort ascending, pick index ceil(0.95*n). Empty
+# dataset → prints 0. Fails open: any error → prints 0.
+pp_kpi_compute_p95() {
+  local _field="${1:-}"
+  local _window_h="${2:-24}"
+  [ -n "$_field" ] || { printf '0'; return 0; }
+  case "$_window_h" in ''|*[!0-9]*) _window_h=24 ;; esac
+  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+  local _now _cutoff
+  _now=$(date +%s 2>/dev/null) || _now=0
+  _cutoff=$(( _now - _window_h * 3600 ))
+  # Concatenate current + rotated file (rotated first = older). Missing files
+  # are simply absent from the cat. jq -s slurps the union.
+  local _vals
+  _vals=$(cat "${_file}.1" "$_file" 2>/dev/null \
+    | jq -s --arg f "$_field" --argjson cutoff "$_cutoff" '
+        map(select((.ts | fromdateiso8601? // 0) >= $cutoff))
+        | map(.[$f] // 0 | tonumber?)
+        | map(select(. != null))
+        | .[]
+      ' 2>/dev/null)
+  [ -z "$_vals" ] && { printf '0'; return 0; }
+  printf '%s\n' "$_vals" | LC_ALL=C sort -g | _pp_awk '
+    { v[NR] = $1 }
+    END {
+      if (NR == 0) { printf "0"; exit }
+      idx = int(0.95 * NR + 0.9999999)
+      if (idx < 1) idx = 1
+      if (idx > NR) idx = NR
+      printf "%.6f", v[idx]
+    }'
 }

@@ -443,7 +443,9 @@ USAGE
       esac
     done
     _kpi_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
-    if [ ! -f "$_kpi_file" ]; then
+    # B4 (v0.5.1): also read the rotated .1 file — otherwise the rolling
+    # window is silently lost the moment kpi-cycle.jsonl rotates.
+    if [ ! -f "$_kpi_file" ] && [ ! -f "${_kpi_file}.1" ]; then
       printf 'No KPI data yet. Enable with: PP_KPI_ENABLE=1 in user.env\n'
       exit 0
     fi
@@ -451,17 +453,25 @@ USAGE
     _cutoff_epoch=$(date -u -v "-${_kpi_window}d" +%s 2>/dev/null \
       || date -u -d "${_kpi_window} days ago" +%s 2>/dev/null \
       || printf '0')
-    _summary=$(jq -s --argjson cutoff "$_cutoff_epoch" '
+    # B4 (v0.5.1): retry_usd reported as rolling-window p95 (not plain avg).
+    # pp_kpi_compute_p95 reads current + rotated file and honors the window.
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/metrics.sh"
+    _kpi_window_hours=$(( _kpi_window * 24 ))
+    _retry_usd_p95=$(pp_kpi_compute_p95 retry_usd "$_kpi_window_hours" 2>/dev/null)
+    case "$_retry_usd_p95" in ''|*[!0-9.]*) _retry_usd_p95=0 ;; esac
+    _summary=$(cat "${_kpi_file}.1" "$_kpi_file" 2>/dev/null | jq -s \
+      --argjson cutoff "$_cutoff_epoch" --argjson retry_usd_p95 "$_retry_usd_p95" '
       map(select((.ts | fromdateiso8601? // 0) >= $cutoff))
       | {
           cycles: length,
           total_usd: (map(.cost_usd // 0) | add // 0),
           avg_per_cycle: ((map(.cost_usd // 0) | add // 0) / (length | if . == 0 then 1 else . end)),
           retry_avg: ((map(.retry_count // 0) | add // 0) / (length | if . == 0 then 1 else . end)),
-          retry_usd_avg: ((map(.retry_usd // 0) | add // 0) / (length | if . == 0 then 1 else . end)),
+          retry_usd_p95: $retry_usd_p95,
           phase_classified_pct: ((map(select(.phase_source == "pattern" or .phase_source == "fallback")) | length) * 100 / (length | if . == 0 then 1 else . end))
         }
-    ' "$_kpi_file" 2>/dev/null) || _summary='{"cycles":0,"total_usd":0,"avg_per_cycle":0,"retry_avg":0,"retry_usd_avg":0,"phase_classified_pct":0}'
+    ' 2>/dev/null) || _summary='{"cycles":0,"total_usd":0,"avg_per_cycle":0,"retry_avg":0,"retry_usd_p95":0,"phase_classified_pct":0}'
     if [ "$_kpi_json" = "1" ]; then
       printf '%s\n' "$_summary"
     else
@@ -471,7 +481,7 @@ USAGE
         "  Total spend:            $\(.total_usd | tonumber * 100 | floor / 100)",
         "  Avg per cycle:          $\(.avg_per_cycle | tonumber * 10000 | floor / 10000)",
         "  Retries avg/cycle:      \(.retry_avg | tonumber * 10 | floor / 10)",
-        "  Retry $ avg/cycle:      $\(.retry_usd_avg | tonumber * 10000 | floor / 10000)",
+        "  Retry $ p95/cycle:      $\(.retry_usd_p95 | tonumber * 10000 | floor / 10000)",
         "  Phase classified:       \(.phase_classified_pct | floor)%"
       '
       printf '\n'

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Pair Polymath — cost-aware retry router. v0.5.1 Tier 0.
 # Spec: docs/v0.5.1-tier0-spec.md
+#
+# I4 (v0.5.1): the shadow log (retry-router-shadow.jsonl) may capture
+# user-visible paths/symbols from critique drop text. umask 077 here matches
+# the v0.4.2 invariant pattern so every file this lib creates is owner-only.
+umask 077
 
 # pp_retry_classify_reason DROP_REASON_RAW
 # Stdout: citation_fail | stale | vague | redundant | format | unknown
@@ -58,7 +63,8 @@ pp_retry_select_model() {
 
 # pp_retry_log_shadow JSON_BLOB
 # Appends one line to retry-router-shadow.jsonl. Silent fail (telemetry never blocks).
-# Gated on PP_RETRY_ROUTER_SHADOW. Rotates at PP_LOG_MAX_BYTES.
+# Gated on PP_RETRY_ROUTER_SHADOW. Rotates at PP_LOG_MAX_BYTES via the shared
+# _pp_rotate_jsonl mkdir-lock helper in lib/metrics.sh (I3 — DRY + race-safe).
 pp_retry_log_shadow() {
   [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ] || return 0
   local _blob="${1:-}"
@@ -67,12 +73,14 @@ pp_retry_log_shadow() {
   local _max="${PP_LOG_MAX_BYTES:-10485760}"
   case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
   mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
-  if [ -f "$_file" ]; then
+  # _pp_rotate_jsonl is defined in lib/metrics.sh, sourced by statusline.sh
+  # before this lib. Guard for standalone sourcing (CLI / unit tests).
+  if command -v _pp_rotate_jsonl >/dev/null 2>&1; then
+    _pp_rotate_jsonl "$_file" "$_max"
+  elif [ -f "$_file" ]; then
     local _size
     _size=$(wc -c < "$_file" 2>/dev/null | tr -d ' ')
-    if [ "${_size:-0}" -ge "$_max" ]; then
-      mv "$_file" "${_file}.1" 2>/dev/null || true
-    fi
+    [ "${_size:-0}" -ge "$_max" ] && mv "$_file" "${_file}.1" 2>/dev/null || true
   fi
   printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
 }

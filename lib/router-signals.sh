@@ -48,6 +48,7 @@ pp_router_extract_signals() {
   # gets to disambiguate via the full signals blob.
   local _phase="unknown"
   local _phase_source="unknown"
+  local _git_probe_timeout=0
   local _edit_count _read_count _bash_count _test_with_fail _test_with_pass
 
   _edit_count=$(printf '%s' "$_tools_json" | jq '[.[] | select(.tool == "Edit" or .tool == "Write" or .tool == "MultiEdit")] | length' 2>/dev/null)
@@ -153,6 +154,12 @@ pp_router_extract_signals() {
   # ---------- recent_edit_density ----------
   local _density="${_edit_count:-0}"
 
+  # I1 (v0.5.1): git_probe_timeout counter — 1 when the F1-F7 fallback had to
+  # run a bare (no-timeout) `git status` because neither timeout nor gtimeout
+  # was installed. Stays 0 when the fallback block didn't run or a wrapper
+  # was available. Lets the dogfood data measure bare-probe frequency.
+  # (Declared at function top so it's defined even when the fallback didn't run.)
+
   # ---------- v0.5.1 F1-F7 phase classifier fallback ----------
   # Only fires when the pattern-match block returned "unknown". The 7-rule
   # decision tree uses already-computed counts plus a cached git-dirty
@@ -161,15 +168,31 @@ pp_router_extract_signals() {
   if [ "$_phase" = "unknown" ]; then
     local _git_dirty=0
     local _git_out=""
+    _git_probe_timeout=0
     if [ -n "${PP_GIT_STATUS_FIXTURE+x}" ]; then
       # Test override: any non-empty fixture means "dirty"; empty means clean.
       _git_out="$PP_GIT_STATUS_FIXTURE"
       [ -n "$_git_out" ] && _git_dirty=1
     else
-      _git_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null \
-        && { timeout 1 git status --porcelain 2>/dev/null \
-             || gtimeout 1 git status --porcelain 2>/dev/null \
-             || true; })
+      # I1 (v0.5.1): on a clean macOS install BOTH `timeout` and `gtimeout`
+      # are absent, so the old `timeout || gtimeout || true` chain silently
+      # collapsed to _git_out="" → _git_dirty=0 always → F5 over-fired.
+      # git itself is a hard dep; only the timeout wrapper is optional. So:
+      # try timeout/gtimeout, else fall back to a BARE `git status` (fast on
+      # normal repos — the 1s ceiling was belt-and-suspenders). Stamp a
+      # git_probe_timeout=1 counter into the signals when we ran bare-mode
+      # so the dogfood data can measure how often this path is taken.
+      if command -v timeout >/dev/null 2>&1; then
+        _git_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null \
+          && timeout 1 git status --porcelain 2>/dev/null || true)
+      elif command -v gtimeout >/dev/null 2>&1; then
+        _git_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null \
+          && gtimeout 1 git status --porcelain 2>/dev/null || true)
+      else
+        _git_probe_timeout=1
+        _git_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null \
+          && git status --porcelain 2>/dev/null || true)
+      fi
       [ -n "$_git_out" ] && _git_dirty=1
     fi
     local _git_staged=0
@@ -217,6 +240,7 @@ pp_router_extract_signals() {
     --argjson budget "$_budget" \
     --argjson density "${_density:-0}" \
     --argjson last_test_failed "$_last_test_failed" \
+    --argjson git_probe_timeout "${_git_probe_timeout:-0}" \
     '{
       phase: $phase,
       phase_source: $phase_source,
@@ -226,6 +250,7 @@ pp_router_extract_signals() {
       session_age_min: $session_age,
       budget_remaining_pct: $budget,
       last_test_failed: $last_test_failed,
-      recent_edit_density: $density
+      recent_edit_density: $density,
+      git_probe_timeout: $git_probe_timeout
     }'
 }

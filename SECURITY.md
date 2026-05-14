@@ -53,9 +53,14 @@ What never leaves:
 - Installer: prompts before replacing an existing statusLine (won't silently clobber ccusage / other tools); merges `settings.json` atomically with timestamped backup; smoke-tests `statusline.sh` before activating.
 - Uninstaller: matches by basename so an install from a moved checkout still cleans up; preserves third-party hooks.
 
-## v0.5.1 retry router shadow log
+## v0.5.1 retry router shadow log + KPI log
 
-When `PP_RETRY_ROUTER_SHADOW=1`, pair-polymath writes per-drop classification telemetry to `~/.claude/cache/retry-router-shadow.jsonl` (mode 0600). Contents include drop-reason text, lens names, and confidence classifications. Drop-reason text is filtered through `pp_memory_redact_body` before write to prevent secret leakage. Log rotates at `PP_LOG_MAX_BYTES=10MB`. To inspect: `polymath retry-router shadow-summary`. To clear: `rm ~/.claude/cache/retry-router-shadow.jsonl`.
+When `PP_RETRY_ROUTER_SHADOW=1` (or `PP_RETRY_ROUTER_ENABLE=1`), pair-polymath writes per-cycle telemetry to two append-only JSONL files in `~/.claude/cache/` (mode 0600, in the 0700 cache dir):
+
+- `retry-router-shadow.jsonl` — one record per critique DROP. Fields: timestamp, session id, lens id, **drop-reason class** (one of `citation_fail | stale | vague | redundant | format | unknown`), confidence class (`high|low`), the model the router *would* pick, and the canary-active flag. It records the drop-reason **class only** — the raw drop-reason text is never written, so there is no raw critique text and no secret-bearing content to redact.
+- `kpi-cycle.jsonl` — one rollup record per cycle. Fields: timestamp, session id, cost/retry USD estimates, call counts, picked-lens count, phase + phase source, retry acceptance rate, drop count, cycle outcome, SLO-breach flag. All values are derived counts and USD estimates — no transcript content, no file content, no drop text.
+
+Because neither log writes raw drop text or transcript content, no body redactor is invoked. Both logs rotate at `PP_LOG_MAX_BYTES` (10 MB default) to a single `.1` retention slot, under an `mkdir`-lock so parallel lens fan-out can't tear a line. To inspect: `polymath retry-router shadow-summary` / `polymath kpi`. To clear: `rm ~/.claude/cache/retry-router-shadow.jsonl ~/.claude/cache/kpi-cycle.jsonl`.
 
 ## Known limitations
 

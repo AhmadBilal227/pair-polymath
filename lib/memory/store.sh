@@ -312,6 +312,14 @@ pp_memory_maintenance() {
     pp_memory_evict "$cwd" 2>/dev/null || true
   fi
   # v0.5 Phase 3: rebuild dismiss-rules mirror.
+  # Round-2 fix I4: lazy-source lib/dismiss.sh first. The memory maintenance
+  # entry point can be reached without dismiss.sh pre-sourced (e.g. memory
+  # cron / direct CLI invocation), in which case the type-check silently
+  # no-ops and the mirror stays stale.
+  if [ -z "${_pp_dismiss_sourced:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${PP_ROOT}/lib/dismiss.sh" 2>/dev/null && _pp_dismiss_sourced=1
+  fi
   if type pp_dismiss_load_into_memory >/dev/null 2>&1; then
     pp_dismiss_load_into_memory 2>/dev/null || true
   fi

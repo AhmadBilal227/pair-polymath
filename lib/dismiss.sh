@@ -5,6 +5,20 @@
 
 umask 077
 
+# Round-2 fix I2: shasum is perl-based and ships on macOS + most Linuxes,
+# but missing on Alpine and minimal containers. Fall back to sha1sum then
+# sha256sum (truncated). Same fallback shape as lib/grounding.sh::pp_project_key.
+# Reads stdin; writes hex digest (first 40 chars) + newline to stdout.
+_pp_dismiss_sha1() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum 2>/dev/null | cut -d' ' -f1
+  elif command -v sha1sum >/dev/null 2>&1; then
+    sha1sum 2>/dev/null | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | cut -c1-40
+  fi
+}
+
 pp_dismiss_file_path() {
   if ! type pp_memory_project_hash >/dev/null 2>&1; then
     # shellcheck disable=SC1091
@@ -21,6 +35,46 @@ pp_dismiss_add() {
   local _reason="${1:?pp_dismiss_add requires a reason summary}"
   local _scope="${2:-project}"
   local _lens="${3:-}"
+  # Round-2 fix C2: sanitize user-typed reason before storage. Blocks role-
+  # override / instruction-injection patterns from reaching the analyst LLM
+  # prompts via ${project_constraints}. We can't reuse
+  # pp_memory_sanitize_title directly — it has a 10-char minimum for
+  # LLM-generated titles, but legitimate user-typed reasons like "Rule A"
+  # are shorter. So we apply ONLY the security-relevant subset here
+  # (control-char strip + role-override patterns + redact-body) and skip
+  # the length floor. Length ceiling stays (truncate at 200).
+  _reason=$(LC_ALL=C printf '%s' "$_reason" | LC_ALL=C tr -d '[:cntrl:]')
+  [ -z "$_reason" ] && {
+    printf 'pp_dismiss_add: reason is empty after control-char strip\n' >&2
+    return 1
+  }
+  if [ "${#_reason}" -gt 200 ]; then
+    _reason=$(LC_ALL=C printf '%s' "$_reason" | LC_ALL=C cut -c1-200)
+  fi
+  local _pp_dismiss_reason_lower
+  _pp_dismiss_reason_lower=$(LC_ALL=C printf '%s' "$_reason" | LC_ALL=C tr 'A-Z' 'a-z')
+  case "$_pp_dismiss_reason_lower" in
+    *system:*|*assistant:*) _pp_dismiss_role_block=1 ;;
+    *"ignore prior"*|*"ignore previous"*|*"ignore all instructions"*) _pp_dismiss_role_block=1 ;;
+    *"you are now"*) _pp_dismiss_role_block=1 ;;
+    *"<|im_start|>"*|*"<|im_end|>"*) _pp_dismiss_role_block=1 ;;
+    *"</s><s>"*) _pp_dismiss_role_block=1 ;;
+    "user:"*|*' user:'*|*':user:'*) _pp_dismiss_role_block=1 ;;
+    *) _pp_dismiss_role_block=0 ;;
+  esac
+  if [ "$_pp_dismiss_role_block" = "1" ]; then
+    printf 'pp_dismiss_add: reason rejected (role-override / instruction-injection pattern)\n' >&2
+    return 1
+  fi
+  # Pass through secret-pattern redaction so an inadvertent "ignore the
+  # sk-abc..." in the reason gets defanged before storage.
+  if [ -z "${_pp_redact_sourced:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${PP_ROOT:-.}/lib/memory/redact.sh" 2>/dev/null && _pp_redact_sourced=1
+  fi
+  if type pp_memory_redact_body >/dev/null 2>&1; then
+    _reason=$(pp_memory_redact_body "$_reason")
+  fi
   local _file _id _ts
   _file=$(pp_dismiss_file_path) || return 1
   _id="d-$(date +%Y-%m-%d)-$(printf '%04x' $(( RANDOM * RANDOM % 65535 )))"
@@ -117,6 +171,10 @@ pp_dismiss_render() {
   fi
   _proj=$(pp_memory_project_hash "$PWD") || return 1
   _cache="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/cc-dismiss-rendered-${_proj}.txt"
+  # Round-2 fix I1: ensure cache parent exists before any : > "$_cache".
+  # PP_CACHE_DIR is normally pre-created by the statusline cycle, but a
+  # direct render call from CLI / test path can hit it cold.
+  mkdir -p "$(dirname "$_cache")" 2>/dev/null
   # I3 — no source rules: emit empty, only touch cache if needed to avoid
   # cache-mtime churn on every 2s statusline refresh on a fresh install.
   if [ ! -f "$_file" ]; then
@@ -128,7 +186,8 @@ pp_dismiss_render() {
   # I4 — content-hash cache validation. Compute header for current source.
   local _src_bytes _src_hash _expected_hdr
   _src_bytes=$(LC_ALL=C wc -c < "$_file" 2>/dev/null | tr -d ' ')
-  _src_hash=$(shasum < "$_file" 2>/dev/null | cut -d' ' -f1)
+  # Round-2 fix I2: shasum → sha1sum → sha256sum fallback for Alpine + minimal containers.
+  _src_hash=$(_pp_dismiss_sha1 < "$_file")
   _expected_hdr="# bytes=$_src_bytes hash=$_src_hash"
   if [ -f "$_cache" ]; then
     local _cache_hdr
@@ -141,8 +200,9 @@ pp_dismiss_render() {
   # C1 — re-render with latest-wins fold per id. Without this, a disable
   # appends a deleted=true line but the original deleted=false line is still
   # in the JSONL and slips past select(.deleted == false).
-  local _now_s _bullets
+  local _now_s _bullets _jq_err
   _now_s=$(date +%s)
+  _jq_err=$(mktemp -t pp_dismiss_render.XXXXXX) || _jq_err="/tmp/.pp_dismiss_render_err.$$"
   _bullets=$(jq -s -r --arg now "$_now_s" '
     group_by(.id) | map(last)
     | .[]
@@ -151,16 +211,41 @@ pp_dismiss_render() {
         (.ts | fromdateiso8601) + (.ttl_days * 86400) > ($now | tonumber)
       ))
     | "\(if .source == "manual" then "0" else "1" end)\t\(.ts)\t\(.reason_summary)"
-  ' "$_file" \
+  ' "$_file" 2>"$_jq_err" \
     | sort -t "$(printf '\t')" -k1,1 -k2,2r \
     | awk -F'\t' '!seen[$3]++ {print "- " $3}' \
     | head -8)
+  # Round-2 fix I8: malformed JSONL line(s) crash the slurped pipeline and
+  # leave _bullets empty — the user sees no constraints. Degrade gracefully:
+  # warn on stderr, then re-render with jq -R 'fromjson?' which skips bad
+  # lines silently. The fallback loses the group_by-by-id fold semantics
+  # (latest-line-wins for the same id), but malformed JSONL is rare and
+  # SOME output is better than zero.
+  if [ -s "$_jq_err" ]; then
+    printf 'pp_dismiss_render: malformed JSONL line(s) skipped at %s\n' "$_file" >&2
+    _bullets=$(jq -R -r --arg now "$_now_s" '
+      fromjson? // empty
+      | select(.deleted == false)
+      | select(.ttl_days == null or (
+          (.ts | fromdateiso8601) + (.ttl_days * 86400) > ($now | tonumber)
+        ))
+      | "\(if .source == "manual" then "0" else "1" end)\t\(.ts)\t\(.reason_summary)"
+    ' "$_file" 2>/dev/null \
+      | sort -t "$(printf '\t')" -k1,1 -k2,2r \
+      | awk -F'\t' '!seen[$3]++ {print "- " $3}' \
+      | head -8)
+  fi
+  rm -f "$_jq_err"
   # Per-bullet truncate at 200 chars (word boundary).
+  # Round-2 fix I7: append ellipsis when truncation happens so the reader
+  # can tell the bullet was clipped (esp. for no-space input like long URLs).
   _bullets=$(printf '%s\n' "$_bullets" | awk '{
     if (length($0) > 200) {
-      s = substr($0, 1, 200)
+      s = substr($0, 1, 197)
+      orig = s
       sub(/ [^ ]*$/, "", s)
-      print s
+      if (length(s) == 0) s = orig  # safety: no space in first 197 chars
+      print s "..."
     } else { print }
   }')
   # Strip leading/trailing empty lines that the awk above can introduce
@@ -262,16 +347,33 @@ pp_dismiss_is_suppressed() {
   _src=$(printf '%s' "$_match" | jq -r '.source')
   _cur_ttl=$(printf '%s' "$_match" | jq -r '.ttl_days // 0')
   if [ "$_src" = "auto_suppress" ]; then
+    # Round-2 fix C1: rate-limit TTL extension to once per 24h per rule.
+    # Without this, every 2s statusline cycle (with a matching auto_suppress
+    # rule) appends a new JSONL line, which invalidates the content-hash
+    # render cache, which forces a full re-render. The end-state (extended
+    # TTL up to the cap) is unchanged with one bump/day instead of thousands.
+    # Naturally resolves I11 race too (concurrent calls in same window both
+    # early-return).
+    local _latest_ts _latest_epoch
+    _latest_ts=$(printf '%s' "$_match" | jq -r '.ts')
+    _latest_epoch=$(jq -nr --arg ts "$_latest_ts" '$ts | fromdateiso8601' 2>/dev/null || echo 0)
+    if [ "$(( _now_s - _latest_epoch ))" -lt 86400 ]; then
+      return 0
+    fi
+    # Round-2 fix I5: bump ts on extension so the 24h rate-limit window and
+    # the TTL-from-last-fire interpretation start from the latest activity.
+    local _new_ts
+    _new_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     local _new_ttl
     _new_ttl=$(( _cur_ttl + _ext ))
     if [ "$_new_ttl" -ge "$_cap" ]; then
       # Promote to persisted.
       printf '%s\n' "$_match" \
-        | jq -c '. + {source: "auto_suppress_persisted", ttl_days: null}' \
+        | jq -c --arg ts "$_new_ts" '. + {source: "auto_suppress_persisted", ttl_days: null, ts: $ts}' \
         >> "$_file"
     else
       printf '%s\n' "$_match" \
-        | jq -c --argjson t "$_new_ttl" '. + {ttl_days: $t}' \
+        | jq -c --argjson t "$_new_ttl" --arg ts "$_new_ts" '. + {ttl_days: $t, ts: $ts}' \
         >> "$_file"
     fi
   fi
@@ -297,6 +399,13 @@ pp_dismiss_enable() {
 # should NOT be auto-suppressed regardless of recurrence.
 pp_dismiss_ack() {
   local _hash_prefix="${1:?pp_dismiss_ack requires a hash prefix}"
+  # Round-2 fix I10: minimum 6 chars (24-bit prefix) to keep the false-exempt
+  # rate below ~1/16M. `polymath dismiss ack a` would exempt ~1/16 of all
+  # future observation hashes — almost certainly not what the user wanted.
+  if [ "${#_hash_prefix}" -lt 6 ]; then
+    printf 'pp_dismiss_ack: hash prefix must be at least 6 characters (got %d)\n' "${#_hash_prefix}" >&2
+    return 2
+  fi
   local _file _id _ts
   _file=$(pp_dismiss_file_path) || return 1
   _id="a-$(date +%Y-%m-%d)-$(printf '%04x' $(( RANDOM * RANDOM % 65535 )))"
@@ -405,10 +514,14 @@ EOF
     [ "$_skip" = "1" ] && continue
     # C1 — Skip if already an active auto_suppress rule for this hash.
     # Must use latest-wins fold so an enable-after-disable cycle is honored.
+    # Round-2 fix I3: widen the check to also match auto_suppress_persisted
+    # (rules that hit the TTL cap and got promoted). Without this, a persisted
+    # rule would be silently shadowed by a fresh ttl_days=7 auto_suppress rule
+    # on every maintenance pass.
     if [ -f "$_file" ]; then
       if jq -s -e --arg h "$_hash" '
         group_by(.id) | map(last)
-        | map(select(.source == "auto_suppress" and .hash == $h and .deleted == false))
+        | map(select((.source == "auto_suppress" or .source == "auto_suppress_persisted") and .hash == $h and .deleted == false))
         | length > 0
       ' "$_file" >/dev/null 2>&1; then
         continue
@@ -418,12 +531,15 @@ EOF
     local _id _ts
     _id="d-$(date +%Y-%m-%d)-$(printf '%04x' $(( RANDOM * RANDOM % 65535 )))"
     _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # Round-2 fix I6: embed an 8-char hash prefix in the reason summary so
+    # two different hashes that happen to share the same recurrence count
+    # don't collide in pp_dismiss_render's dedup-by-reason awk.
     jq -nc \
       --arg id "$_id" --arg ts "$_ts" --arg hash "$_hash" \
       --argjson ct "$_ct" \
       '{
          id: $id, ts: $ts,
-         reason_summary: "Auto-suppressed after \($ct) recurrences",
+         reason_summary: "Auto-suppressed (\($hash[0:8])) after \($ct) recurrences",
          scope: "project", lens_id: null,
          hash: $hash,
          deleted: false, deleted_reason: null,

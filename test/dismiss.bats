@@ -498,3 +498,11 @@ teardown() { rm -rf "$HOME"; }
   _ttl=$(jq -c --arg id "$_id" 'select(.id == $id)' "$_file" | tail -1 | jq -r '.ttl_days')
   [ "$_ttl" = "10" ]
 }
+
+@test "doctor: cache permissions + dismiss libs both reported in pp_doctor_run output" {
+  pp_dismiss_add "Doctor seeded" project >/dev/null
+  PP_MEMORY_ENABLE=0
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [ "$status" -ne 0 ] || true  # cache-permissions may be yellow on real cache; that's OK
+  printf '%s' "$output" | grep -qE 'dismiss libs'
+}

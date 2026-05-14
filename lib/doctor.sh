@@ -422,6 +422,32 @@ doctor_check_cache_permissions() {
   return 0
 }
 
+doctor_check_dismiss_libs() {
+  # v0.5 Phase 3 check #18 — verify lib/dismiss.sh sources cleanly + all
+  # required functions are defined + JSONL is well-formed if present.
+  if ! (
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/dismiss.sh" 2>/dev/null
+    type pp_dismiss_add pp_dismiss_list pp_dismiss_render pp_dismiss_is_suppressed pp_dismiss_auto_suppress >/dev/null 2>&1
+  ); then
+    _pp_doctor_red "dismiss libs" "lib/dismiss.sh failed to source or missing functions; re-install"
+    return 2
+  fi
+  # If a JSONL exists, validate each line parses.
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/dismiss.sh" 2>/dev/null
+  local _file
+  _file=$(pp_dismiss_file_path 2>/dev/null) || true
+  if [ -n "$_file" ] && [ -f "$_file" ]; then
+    if ! jq -c . "$_file" >/dev/null 2>&1; then
+      _pp_doctor_yellow "dismiss libs" "malformed JSONL at $_file; some rules will be ignored"
+      return 1
+    fi
+  fi
+  _pp_doctor_green "dismiss libs" "lib/dismiss.sh OK; JSONL well-formed"
+  return 0
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -485,7 +511,7 @@ pp_doctor_run() {
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
                 doctor_check_prompts doctor_check_transcript_libs doctor_check_router_libs \
                 doctor_check_coreutils doctor_check_budget_pressure \
-                doctor_check_cache_permissions doctor_check_statusline_smoke"
+                doctor_check_cache_permissions doctor_check_dismiss_libs doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

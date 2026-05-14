@@ -17,6 +17,12 @@ All knobs live in `config/default.env`. To override, copy any line to `~/.claude
 | `PP_DISMISS_TTL_EXTEND_DAYS` | `3` | Each match of an auto-suppress rule's hash extends the rule's `ttl_days` by this many days, up to `PP_DISMISS_TTL_CAP_DAYS`. |
 | `PP_DISMISS_TTL_CAP_DAYS` | `30` | Hard cap on auto-suppress TTL extension. At cap, the rule promotes to `source=auto_suppress_persisted` (permanent until `polymath dismiss disable <id>`). |
 | `PP_DISMISS_RENDERED_MAX_BYTES` | `2048` | Byte cap on the `${project_constraints}` block injected into analyst LLM system prompts. Truncates at last full bullet — never mid-bullet. |
+| `PP_RETRY_ROUTER_ENABLE` | `0` | Master gate for cost-aware retry router. `0`=v0.5.0 behavior unchanged; `1`=route retries by confidence (premium model only on high-confidence drops). |
+| `PP_RETRY_ROUTER_SHADOW` | `0` | When `1`, logs "what would have happened" to `retry-router-shadow.jsonl` without changing behavior. Use this BEFORE enabling router. |
+| `PP_RETRY_ROUTER_CANARY_PCT` | `0` | Percentage of sessions to receive the new routing. 10 = canary, 100 = full. Same session always lands in same bucket. |
+| `PP_ESCALATION_STREAK_THRESHOLD` | `3` | Lens drop-streak threshold to promote to deep-mode investigation. Default 3 preserves v0.5.0 behavior. |
+| `PP_KPI_ENABLE` | `0` | Emit per-cycle KPI rows to `kpi-cycle.jsonl`. Auto-enabled when router is on. |
+| `PP_OAR_ENABLE` | `0` | Enable SessionEnd hook to queue OAR-pending records (v0.5.2 prerequisite). |
 
 ## Models
 

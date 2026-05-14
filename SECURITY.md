@@ -53,6 +53,10 @@ What never leaves:
 - Installer: prompts before replacing an existing statusLine (won't silently clobber ccusage / other tools); merges `settings.json` atomically with timestamped backup; smoke-tests `statusline.sh` before activating.
 - Uninstaller: matches by basename so an install from a moved checkout still cleans up; preserves third-party hooks.
 
+## v0.5.1 retry router shadow log
+
+When `PP_RETRY_ROUTER_SHADOW=1`, pair-polymath writes per-drop classification telemetry to `~/.claude/cache/retry-router-shadow.jsonl` (mode 0600). Contents include drop-reason text, lens names, and confidence classifications. Drop-reason text is filtered through `pp_memory_redact_body` before write to prevent secret leakage. Log rotates at `PP_LOG_MAX_BYTES=10MB`. To inspect: `polymath retry-router shadow-summary`. To clear: `rm ~/.claude/cache/retry-router-shadow.jsonl`.
+
 ## Known limitations
 
 - The `--network` doctor probe requires a real OpenAI key. It costs ~$0.0001 per invocation.

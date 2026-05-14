@@ -229,24 +229,53 @@ EOF
 # pp_dismiss_is_suppressed HASH
 # Returns 0 if any active rule has hash == HASH; else 1.
 # Active = deleted=false (LATEST line for the id) AND not-ttl-expired.
+# v0.5 Phase 3 Task 11: for source=auto_suppress rules, each match extends
+# ttl_days by PP_DISMISS_TTL_EXTEND_DAYS (default 3), capped at
+# PP_DISMISS_TTL_CAP_DAYS (default 30). At cap, promotes to
+# source=auto_suppress_persisted with ttl_days=null. Append-only; latest-
+# line-wins semantics handle the fold.
 pp_dismiss_is_suppressed() {
   local _hash="${1:?pp_dismiss_is_suppressed requires a hash}"
   local _file
   _file=$(pp_dismiss_file_path) || return 1
   [ ! -f "$_file" ] && return 1
-  local _now_ms
-  _now_ms=$(date +%s)
+  local _now_s
+  _now_s=$(date +%s)
+  # Find the matching active rule (if any).
   local _match
-  _match=$(jq -s --arg h "$_hash" --arg now "$_now_ms" '
+  _match=$(jq -s -c --arg h "$_hash" --arg now "$_now_s" '
     group_by(.id) | map(last)
     | map(select(.deleted == false))
     | map(select(.ttl_days == null or (
         (.ts | fromdateiso8601) + (.ttl_days * 86400) > ($now | tonumber)
       )))
     | map(select(.hash == $h))
-    | length
+    | first // empty
   ' "$_file")
-  [ "${_match:-0}" -gt 0 ]
+  [ -z "$_match" ] && return 1
+  # v0.5 Phase 3 Task 11: sliding TTL on fire for auto_suppress rules.
+  local _ext="${PP_DISMISS_TTL_EXTEND_DAYS:-3}"
+  local _cap="${PP_DISMISS_TTL_CAP_DAYS:-30}"
+  case "$_ext" in ''|*[!0-9]*) _ext=3 ;; esac
+  case "$_cap" in ''|*[!0-9]*) _cap=30 ;; esac
+  local _src _cur_ttl
+  _src=$(printf '%s' "$_match" | jq -r '.source')
+  _cur_ttl=$(printf '%s' "$_match" | jq -r '.ttl_days // 0')
+  if [ "$_src" = "auto_suppress" ]; then
+    local _new_ttl
+    _new_ttl=$(( _cur_ttl + _ext ))
+    if [ "$_new_ttl" -ge "$_cap" ]; then
+      # Promote to persisted.
+      printf '%s\n' "$_match" \
+        | jq -c '. + {source: "auto_suppress_persisted", ttl_days: null}' \
+        >> "$_file"
+    else
+      printf '%s\n' "$_match" \
+        | jq -c --argjson t "$_new_ttl" '. + {ttl_days: $t}' \
+        >> "$_file"
+    fi
+  fi
+  return 0
 }
 
 # pp_dismiss_enable ID

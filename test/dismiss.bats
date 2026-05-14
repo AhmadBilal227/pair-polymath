@@ -443,3 +443,58 @@ teardown() { rm -rf "$HOME"; }
   _count=$(sqlite3 "$_db" "SELECT COUNT(*) FROM memory_dismiss_rules WHERE reason_summary = 'Will be removed from JSONL';")
   [ "$_count" = "0" ]
 }
+
+@test "ttl-slide: pp_dismiss_is_suppressed extends TTL on match for auto_suppress rules" {
+  local _hash="ttlslidexyz" _file _id _backdate
+  _file=$(pp_dismiss_file_path)
+  # Create auto-suppress rule with ttl=7, backdated 5 days ago.
+  _id="d-test-$(printf '%04x' $$)"
+  _backdate=$(date -u -v -5d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d '5 days ago' +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc \
+    --arg id "$_id" --arg ts "$_backdate" --arg hash "$_hash" \
+    '{id:$id,ts:$ts,reason_summary:"auto",scope:"project",lens_id:null,hash:$hash,deleted:false,deleted_reason:null,ttl_days:7,source:"auto_suppress"}' \
+    > "$_file"
+  # Fire — should extend ttl_days from 7 to 10 (7 + 3).
+  PP_DISMISS_TTL_EXTEND_DAYS=3 pp_dismiss_is_suppressed "$_hash"
+  # New line should exist for the same id with ttl_days=10.
+  local _new_ttl
+  _new_ttl=$(jq -c --arg id "$_id" 'select(.id == $id)' "$_file" | tail -1 | jq -r '.ttl_days')
+  [ "$_new_ttl" = "10" ]
+}
+
+@test "ttl-slide: cap at PP_DISMISS_TTL_CAP_DAYS=30 — promotes to auto_suppress_persisted" {
+  local _hash="capxyz" _file _id _backdate
+  _file=$(pp_dismiss_file_path)
+  _id="d-test-$(printf '%04x' $$)"
+  _backdate=$(date -u -v -1d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc \
+    --arg id "$_id" --arg ts "$_backdate" --arg hash "$_hash" \
+    '{id:$id,ts:$ts,reason_summary:"auto",scope:"project",lens_id:null,hash:$hash,deleted:false,deleted_reason:null,ttl_days:29,source:"auto_suppress"}' \
+    > "$_file"
+  PP_DISMISS_TTL_EXTEND_DAYS=3 PP_DISMISS_TTL_CAP_DAYS=30 pp_dismiss_is_suppressed "$_hash"
+  local _new_src _new_ttl
+  _new_src=$(jq -c --arg id "$_id" 'select(.id == $id)' "$_file" | tail -1 | jq -r '.source')
+  _new_ttl=$(jq -c --arg id "$_id" 'select(.id == $id)' "$_file" | tail -1 | jq -r '.ttl_days')
+  [ "$_new_src" = "auto_suppress_persisted" ]
+  [ "$_new_ttl" = "null" ]
+}
+
+@test "ttl-slide: manual rules are NOT TTL-extended on fire" {
+  local _hash="manualnoslidehash" _file _id
+  _file=$(pp_dismiss_file_path)
+  _id=$(pp_dismiss_add "Manual rule that fires" project)
+  # Tag it with the hash + ttl_days=10 (manual rules normally have null but
+  # this test simulates a manual rule with explicit ttl).
+  local _tmp
+  _tmp=$(mktemp)
+  jq -c --arg id "$_id" --arg h "$_hash" \
+    'if .id == $id then .hash = $h | .ttl_days = 10 else . end' "$_file" > "$_tmp"
+  mv "$_tmp" "$_file"
+  PP_DISMISS_TTL_EXTEND_DAYS=3 pp_dismiss_is_suppressed "$_hash"
+  # Should still be ttl_days=10 (no extension).
+  local _ttl
+  _ttl=$(jq -c --arg id "$_id" 'select(.id == $id)' "$_file" | tail -1 | jq -r '.ttl_days')
+  [ "$_ttl" = "10" ]
+}

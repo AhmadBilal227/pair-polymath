@@ -382,6 +382,59 @@ USAGE
     esac
     ;;
 
+  kpi)
+    # v0.5.1 — rolling cost / retry / phase summary from kpi-cycle.jsonl.
+    # Default window 7 days. --window Nd to override. --json for machine output.
+    shift
+    _kpi_window=7
+    _kpi_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --window)
+          [ -n "${2:-}" ] || { printf 'polymath kpi: --window requires a value (e.g. 7d)\n' >&2; exit 2; }
+          _kpi_window="${2%d}"
+          shift 2
+          ;;
+        --json) _kpi_json=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    _kpi_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+    if [ ! -f "$_kpi_file" ]; then
+      printf 'No KPI data yet. Enable with: PP_KPI_ENABLE=1 in user.env\n'
+      exit 0
+    fi
+    # Portable BSD/GNU date for the cutoff epoch.
+    _cutoff_epoch=$(date -u -v "-${_kpi_window}d" +%s 2>/dev/null \
+      || date -u -d "${_kpi_window} days ago" +%s 2>/dev/null \
+      || printf '0')
+    _summary=$(jq -s --argjson cutoff "$_cutoff_epoch" '
+      map(select((.ts | fromdateiso8601? // 0) >= $cutoff))
+      | {
+          cycles: length,
+          total_usd: (map(.cost_usd // 0) | add // 0),
+          avg_per_cycle: ((map(.cost_usd // 0) | add // 0) / (length | if . == 0 then 1 else . end)),
+          retry_avg: ((map(.retry_count // 0) | add // 0) / (length | if . == 0 then 1 else . end)),
+          retry_usd_avg: ((map(.retry_usd // 0) | add // 0) / (length | if . == 0 then 1 else . end)),
+          phase_classified_pct: ((map(select(.phase_source == "pattern" or .phase_source == "fallback")) | length) * 100 / (length | if . == 0 then 1 else . end))
+        }
+    ' "$_kpi_file" 2>/dev/null) || _summary='{"cycles":0,"total_usd":0,"avg_per_cycle":0,"retry_avg":0,"retry_usd_avg":0,"phase_classified_pct":0}'
+    if [ "$_kpi_json" = "1" ]; then
+      printf '%s\n' "$_summary"
+    else
+      printf '\nLast %s days\n' "$_kpi_window"
+      printf '%s' "$_summary" | jq -r '
+        "  Cycles:                 \(.cycles)",
+        "  Total spend:            $\(.total_usd | tonumber * 100 | floor / 100)",
+        "  Avg per cycle:          $\(.avg_per_cycle | tonumber * 10000 | floor / 10000)",
+        "  Retries avg/cycle:      \(.retry_avg | tonumber * 10 | floor / 10)",
+        "  Retry $ avg/cycle:      $\(.retry_usd_avg | tonumber * 10000 | floor / 10000)",
+        "  Phase classified:       \(.phase_classified_pct | floor)%"
+      '
+      printf '\n'
+    fi
+    ;;
+
   disable)
     _pp_set_user_env_var PP_EXTERNAL_LLM 0 || exit 1
     printf 'LLM cycle disabled. Status-only mode active; new cycles take effect within 5 min.\n'

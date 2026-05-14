@@ -43,3 +43,40 @@ teardown() { rm -rf "$HOME"; }
   pp_kpi_emit_cycle '{"x":1}'
   [ ! -f "$PP_CACHE_DIR/kpi-cycle.jsonl" ]
 }
+
+# ========================================================
+# Task 16: polymath kpi CLI subcommand
+# ========================================================
+
+@test "cli: polymath kpi prints rolling-7d summary" {
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_KPI_ENABLE=1
+  # Seed a few entries with today's timestamp so the window includes them.
+  local _ts
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local _i
+  for _i in 1 2 3; do
+    pp_kpi_emit_cycle "{\"ts\":\"$_ts\",\"session\":\"s$_i\",\"cost_usd\":0.01,\"retry_count\":2,\"retry_usd\":0.005,\"phase\":\"drafting\",\"phase_source\":\"pattern\"}"
+  done
+  run bash "$PP_ROOT/bin/polymath" kpi
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE 'Cycles:|Total spend:'
+}
+
+@test "cli: polymath kpi --json produces parseable JSON" {
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_KPI_ENABLE=1
+  local _ts
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  pp_kpi_emit_cycle "{\"ts\":\"$_ts\",\"session\":\"s1\",\"cost_usd\":0.01,\"retry_count\":1,\"retry_usd\":0.004,\"phase\":\"drafting\",\"phase_source\":\"pattern\"}"
+  run bash "$PP_ROOT/bin/polymath" kpi --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.cycles' >/dev/null
+}
+
+@test "cli: polymath kpi empty-state hints PP_KPI_ENABLE" {
+  # No kpi-cycle.jsonl present yet.
+  run bash "$PP_ROOT/bin/polymath" kpi
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -q 'PP_KPI_ENABLE=1'
+}

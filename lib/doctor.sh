@@ -468,6 +468,51 @@ doctor_check_retry_router_health() {
   return 0
 }
 
+doctor_check_install_drift() {
+  # v0.5.1.1 check #20 — install drift detection.
+  #
+  # Two failure modes survive an operator who installed once-and-never-cleaned:
+  # (a) A legacy global hook file at ~/.claude/hooks/inject-monitor-insight.sh
+  #     persists after the v0.4+ install path moved to ${PP_ROOT}/hooks/. It's
+  #     not necessarily wired (settings.json points at the new path), but the
+  #     stale file is dead code that may confuse operator triage.
+  # (b) Legacy cc-monitor-*-lens[0-9]-* cache files from the pre-v0.4 indexed
+  #     scheme. The v0.4+ codebase keys caches by lens ID (cc-monitor-${sid}-
+  #     ${LENS_ID}.txt), not numeric index. Old indexed files are orphaned but
+  #     never reaped — they bloat ~/.claude/cache.
+  #
+  # Yellow on either (cosmetic, not functional). Green on neither.
+  local _legacy_hook="${HOME}/.claude/hooks/inject-monitor-insight.sh"
+  local _cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+  local _findings=""
+
+  if [ -f "$_legacy_hook" ]; then
+    _findings="legacy global hook at ~/.claude/hooks/inject-monitor-insight.sh"
+  fi
+
+  # Indexed-lens cache files (pre-v0.4 format). [ -d ] guard prevents find
+  # error noise on fresh installs where cache dir hasn't been created yet.
+  if [ -d "$_cache_dir" ]; then
+    local _indexed
+    _indexed=$(find "$_cache_dir" -maxdepth 1 -type f -name 'cc-monitor-*-lens[0-9]*' 2>/dev/null | head -1)
+    if [ -n "$_indexed" ]; then
+      if [ -n "$_findings" ]; then
+        _findings="$_findings; pre-v0.4 indexed-lens cache files"
+      else
+        _findings="pre-v0.4 indexed-lens cache files"
+      fi
+    fi
+  fi
+
+  if [ -z "$_findings" ]; then
+    _pp_doctor_green "install drift" "no stale hooks or pre-v0.4 cache files"
+    return 0
+  fi
+
+  _pp_doctor_yellow "install drift" "$_findings; rm when convenient"
+  return 1
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -532,7 +577,8 @@ pp_doctor_run() {
                 doctor_check_prompts doctor_check_transcript_libs doctor_check_router_libs \
                 doctor_check_coreutils doctor_check_budget_pressure \
                 doctor_check_cache_permissions doctor_check_dismiss_libs \
-                doctor_check_retry_router_health doctor_check_statusline_smoke"
+                doctor_check_retry_router_health doctor_check_install_drift \
+                doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

@@ -37,6 +37,15 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/config.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/budget.sh"
+# v0.5.1 — cost-aware retry router primitives + auto-rollback state machine.
+# All gating happens INSIDE the lib functions (PP_RETRY_ROUTER_ENABLE,
+# PP_RETRY_ROUTER_SHADOW, rollback flag). Sourcing unconditionally keeps
+# the cycle path byte-identical when flags are off (the lib body is
+# function definitions only — no top-level side effects).
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/retry-router.sh"
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/auto-rollback.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/lens-loader.sh"
 # shellcheck disable=SC1091
@@ -728,6 +737,15 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       # call by type + model; rolled up at end of cycle into metrics.jsonl.
       metrics_init "$session_id"
 
+      # B3 (v0.5.1): reset the per-cycle retry hard-cap spend tally at cycle
+      # start. The spend file (retry-cycle-spend-${sid}.txt) is the running
+      # total pp_retry_hard_cap_preflight checks against PP_RETRY_USD_PER_
+      # CYCLE_HARD_CAP. Without this reset it accumulated across the WHOLE
+      # session — so once the cap was hit once, every subsequent retry in
+      # every later cycle was skipped forever. The cap is a per-CYCLE
+      # guardrail; each cycle must start the tally from 0.
+      rm -f "${PP_CACHE_DIR}/retry-cycle-spend-${session_id}.txt" 2>/dev/null || true
+
       if [ "$can_run" -eq 1 ]; then
       # === Stage 1: PLANNER (gpt-5-mini) — picks a file to read ===
       planner_input=$(cat <<PLAN
@@ -1025,6 +1043,11 @@ GROUND
           _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         fi
 
+        # R1: mark that this cycle did real analyst work. Only cycles with
+        # _pp_analyst_ran=1 are SLO-eligible — skipped cycles (budget
+        # exhausted / idle / no grounding / no llm) emit eligible:0 KPI rows
+        # that must not dilute the rolling p95 or the min-samples gate.
+        _pp_analyst_ran=1
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"
@@ -1040,13 +1063,19 @@ GROUND
           # user enabling/disabling/reordering lenses without stale-data bugs.
           PP_CACHE_LENS="${PP_CACHE_DIR}/cc-monitor-${session_id}-${lens_group}.txt"
 
-          # === Escalation check: if this lens has 3+ consecutive drops, escalate to deep mode ===
+          # === Escalation check: if this lens has $PP_ESCALATION_STREAK_THRESHOLD+
+          # consecutive drops, escalate to deep mode ===
           # Deep mode = extra lens-specific evidence-gathering (mini-planner picks files + greps)
           # before main analyst runs. Resets after one PASS.
+          # v0.5.1: threshold is env-tunable. Default 3 preserves v0.5.0 byte-identity;
+          # v0.5.1.1 plans to raise default to 5 alongside lens persona changes (clean
+          # attribution of the two effects).
           lens_streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_group}-streak.txt"
           lens_streak=$(cat "$lens_streak_file" 2>/dev/null || echo 0)
           is_escalated=0
-          [ "$lens_streak" -ge 3 ] && [ "${PP_ENABLE_ESCALATION:-1}" = "1" ] && is_escalated=1
+          [ "$lens_streak" -ge "${PP_ESCALATION_STREAK_THRESHOLD:-3}" ] \
+            && [ "${PP_ENABLE_ESCALATION:-1}" = "1" ] \
+            && is_escalated=1
 
           # Rotate the "deep" slot (gpt-5.5) AND the "wildcard" slot (broad allowance)
           # Both rotate every cycle through PP_LENS_COUNT positions. Offset wildcard so
@@ -1109,7 +1138,7 @@ $inv_hits"
             if [ -n "$lens_evidence" ]; then
               lens_grounded="$grounded
 
-=== LENS-SPECIFIC ESCALATION EVIDENCE (this lens has 3+ consecutive drops; deeper investigation engaged) ===
+=== LENS-SPECIFIC ESCALATION EVIDENCE (this lens has ${PP_ESCALATION_STREAK_THRESHOLD:-3}+ consecutive drops; deeper investigation engaged) ===
 $lens_evidence"
             fi
 
@@ -1211,6 +1240,35 @@ $critique_input"
 
           # Apply verdicts + 1-retry auto-correction loop + streak tracking for escalation
           if [ -n "$critique_output" ]; then
+            # v0.5.1 — compute cycle-wide signals ONCE outside the per-lens loop:
+            #   _pp_valid_paths_count / _pp_valid_symbols_count drive the
+            #   confidence gate (citation_fail needs a non-empty allowlist for
+            #   high confidence).
+            #   _pp_concurrent_drops counts how many lens lines this cycle's
+            #   critique flagged as DROP — a "storm" (>2) downgrades confidence.
+            _pp_valid_paths_count=0
+            _pp_valid_symbols_count=0
+            [ -n "$_pp_valid_paths" ] \
+              && _pp_valid_paths_count=$(printf '%s\n' "$_pp_valid_paths" | grep -c . 2>/dev/null || echo 0)
+            [ -n "$_pp_valid_symbols" ] \
+              && _pp_valid_symbols_count=$(printf '%s\n' "$_pp_valid_symbols" | grep -c . 2>/dev/null || echo 0)
+            # I2 (v0.5.1): `grep -Ec` ALREADY prints `0` and exits 1 on
+            # no-match — the old `|| echo 0` therefore produced "0\n0",
+            # which the downstream sanitizer collapsed to 0, silently
+            # killing the concurrent-drop-storm signal. Drop the `|| echo`;
+            # `|| true` just swallows the exit-1 so `set -e` (if ever
+            # enabled) doesn't abort. grep -Ec always emits exactly one count.
+            _pp_concurrent_drops=$(printf '%s\n' "$critique_output" | grep -Ec '^lens[0-9]+:[[:space:]]*DROP\b' 2>/dev/null || true)
+            case "$_pp_concurrent_drops" in ''|*[!0-9]*) _pp_concurrent_drops=0 ;; esac
+
+            # I7 (v0.5.1): normalize the canary percentage ONCE here, where
+            # the retry-router env is first consumed. A value like "10%"
+            # (or any non-integer) used to slip through the `-lt` comparison
+            # below and silently never match → canary effectively off. Strip
+            # non-digits, clamp 0-100, default 0.
+            _pp_canary_pct=$(printf '%s' "${PP_RETRY_ROUTER_CANARY_PCT:-0}" | tr -cd '0-9')
+            case "$_pp_canary_pct" in '') _pp_canary_pct=0 ;; esac
+            [ "$_pp_canary_pct" -gt 100 ] 2>/dev/null && _pp_canary_pct=100
             for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
               ci_id="${PP_LENS_IDS[$ci]}"
               verdict=$(echo "$critique_output" | grep -E "^lens${ci}:" | head -1)
@@ -1244,6 +1302,67 @@ $critique_input"
                     && mv "${_pp_lens_cache}.tmp" "$_pp_lens_cache" 2>/dev/null
 
                   drop_reason=$(echo "$verdict" | sed 's/^lens[0-9]*:[[:space:]]*//;s/^DROP[[:space:]]*-[[:space:]]*//')
+
+                  # v0.5.1 — cost-aware retry router (shadow + canary).
+                  # Fail-open at every step: ANY error here falls through to
+                  # v0.5.0 behavior (PP_RETRY_MODEL:-PP_MODEL). The byte-identity
+                  # invariant (test/v0.5.1-byte-identity.bats) requires that
+                  # with PP_RETRY_ROUTER_ENABLE=0 AND PP_RETRY_ROUTER_SHADOW=0
+                  # the model picked and the metrics call type are identical
+                  # to v0.5.0.
+                  _retry_reason_class=$(pp_retry_classify_reason "$drop_reason" 2>/dev/null || printf 'unknown')
+                  _retry_confidence=$(pp_retry_confidence "$_retry_reason_class" \
+                    "${_pp_valid_paths_count:-0}" "${_pp_valid_symbols_count:-0}" \
+                    "${#_pp_failed_output}" "${cur_streak:-0}" "${_pp_concurrent_drops:-1}" 2>/dev/null || printf 'low')
+                  _retry_canary_bucket=$(pp_retry_canary_bucket "$session_id" 2>/dev/null || printf '0')
+                  _canary_active=0
+                  if [ "${PP_RETRY_ROUTER_ENABLE:-0}" = "1" ] \
+                     && [ "$_retry_canary_bucket" -lt "${_pp_canary_pct:-0}" ] 2>/dev/null \
+                     && ! pp_rollback_is_active 2>/dev/null; then
+                    _canary_active=1
+                  fi
+                  _shadow_model=$(pp_retry_select_model "$_retry_confidence" 2>/dev/null || printf '%s' "${PP_RETRY_MODEL:-$PP_MODEL}")
+
+                  # Shadow log — only when SHADOW=1 (the pp_retry_log_shadow
+                  # function gates internally too, but we skip the jq subshell
+                  # entirely when off to keep the no-op path cheap).
+                  # R14 (Round-2): include baseline_model + per-row cost
+                  # estimates so shadow-summary can project actual $ savings,
+                  # not just drop-reason counts. Without these the operator
+                  # has no go/no-go signal to advance shadow → canary.
+                  if [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ]; then
+                    _baseline_model="${PP_RETRY_MODEL:-$PP_MODEL}"
+                    _est_baseline=$(pp_metrics_estimate_retry_usd "$_baseline_model" 2>/dev/null || printf '0')
+                    _est_shadow=$(pp_metrics_estimate_retry_usd "$_shadow_model" 2>/dev/null || printf '0')
+                    pp_retry_log_shadow "$(jq -nc \
+                      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                      --arg sid "$session_id" \
+                      --arg lens "$ci_id" \
+                      --arg drc "$_retry_reason_class" \
+                      --arg conf "$_retry_confidence" \
+                      --arg shadow_model "$_shadow_model" \
+                      --arg baseline_model "$_baseline_model" \
+                      --argjson est_cost_baseline "$_est_baseline" \
+                      --argjson est_cost_shadow "$_est_shadow" \
+                      --argjson canary_active "$_canary_active" \
+                      '{ts:$ts,session:$sid,lens:$lens,drop_reason_class:$drc,confidence:$conf,shadow_model:$shadow_model,baseline_model:$baseline_model,est_cost_baseline:$est_cost_baseline,est_cost_shadow:$est_cost_shadow,canary_active:$canary_active}' 2>/dev/null)" 2>/dev/null || true
+                  fi
+
+                  # Behavior switch: canary active → shadow model (with hard-cap
+                  # preflight gate). Otherwise v0.5.0 default. Hard-cap returning
+                  # 1 → skip this retry entirely (verdict stays DROP).
+                  _retry_skip=0
+                  if [ "$_canary_active" = "1" ]; then
+                    if pp_retry_hard_cap_preflight "$session_id" "$_shadow_model" 2>/dev/null; then
+                      _retry_model="$_shadow_model"
+                    else
+                      _retry_skip=1
+                      _retry_model="${PP_RETRY_MODEL:-$PP_MODEL}"
+                    fi
+                  else
+                    _retry_model="${PP_RETRY_MODEL:-$PP_MODEL}"
+                  fi
+
                   # Re-derive this lens's prompt from the shared registry (lenses/*.json).
                   # Uses the SAME long-form focus as the primary path — no drift between
                   # primary and retry prompts.
@@ -1254,8 +1373,8 @@ $critique_input"
                   retry_sys=$(pp_render_prompt analyst-retry)
 
                   retry_result=""
-                  if [ -n "$retry_sys" ]; then
-                    metrics_increment_call retry "${PP_RETRY_MODEL:-$PP_MODEL}"
+                  if [ -n "$retry_sys" ] && [ "$_retry_skip" != "1" ]; then
+                    metrics_increment_call retry "$_retry_model"
                     # Inject the failed output + drop reason as concrete
                     # counter-example into the retry input. The
                     # analyst-retry.md prompt references ${drop_reason} but
@@ -1263,7 +1382,7 @@ $critique_input"
                     # to learn from. (R2 ai-engineer #1.)
                     retry_input=$(printf 'PREVIOUS FAILED OBSERVATION:\n%s\n\nWHY IT WAS DROPPED:\n%s\n\n%s' \
                       "$_pp_failed_output" "$drop_reason" "$grounded")
-                    retry_result=$(printf "%s" "$retry_input" | run_llm 45 -m "${PP_RETRY_MODEL:-$PP_MODEL}" -s "$retry_sys" 2>/dev/null)
+                    retry_result=$(printf "%s" "$retry_input" | run_llm 45 -m "$_retry_model" -s "$retry_sys" 2>/dev/null)
                   fi
                   # Note: counted under worst-case-23 reservation at cycle start.
 
@@ -1369,6 +1488,115 @@ $critique_input"
         fi
       fi  # grounded && llm available
       fi  # can_run — gates BOTH planner and analyst fan-out
+
+      # === B1 (v0.5.1): KPI cycle emitter ===================================
+      # Wire pp_kpi_emit_cycle at cycle-end. pp_kpi_emit_cycle gates itself
+      # (no-op unless PP_KPI_ENABLE=1 OR router enable/shadow on) so this
+      # block is byte-identity-safe: with all flags off it assembles a blob
+      # and pp_kpi_emit_cycle drops it. Runs BEFORE the EXIT trap's
+      # metrics_flush_cycle, so the per-cycle metrics tmp file is still
+      # present and we can source retry counts / cost from it directly.
+      #
+      # Fail-open: every step is guarded; any error → no KPI line, cycle
+      # proceeds unaffected.
+      _pp_kpi_cost_usd=0
+      _pp_kpi_retry_count=0
+      _pp_kpi_retry_usd=0
+      _pp_kpi_inv_count=0
+      if [ -n "${PP_METRICS_TMP:-}" ] && [ -s "${PP_METRICS_TMP:-}" ]; then
+        # PP_METRICS_TMP rows are "call_type<TAB>model". Count retry/inv rows
+        # and sum retry USD via the same estimator the router uses.
+        _pp_kpi_retry_count=$(grep -Ec '^retry	' "$PP_METRICS_TMP" 2>/dev/null || true)
+        case "$_pp_kpi_retry_count" in ''|*[!0-9]*) _pp_kpi_retry_count=0 ;; esac
+        _pp_kpi_inv_count=$(grep -Ec '^inv	' "$PP_METRICS_TMP" 2>/dev/null || true)
+        case "$_pp_kpi_inv_count" in ''|*[!0-9]*) _pp_kpi_inv_count=0 ;; esac
+        # Total cost + retry cost: reuse _metrics_usd_for_call per row.
+        _pp_kpi_cost_usd=$(while IFS=$'\t' read -r _ct _mdl; do
+            [ -z "$_ct" ] && continue
+            _metrics_usd_for_call "$_ct" "$_mdl"; printf '\n'
+          done < "$PP_METRICS_TMP" 2>/dev/null \
+          | LC_ALL=C awk '{ s += $1 } END { printf "%.6f", (s + 0) }' 2>/dev/null)
+        case "$_pp_kpi_cost_usd" in ''|*[!0-9.]*) _pp_kpi_cost_usd=0 ;; esac
+        _pp_kpi_retry_usd=$(while IFS=$'\t' read -r _ct _mdl; do
+            [ "$_ct" = "retry" ] || continue
+            _metrics_usd_for_call retry "$_mdl"; printf '\n'
+          done < "$PP_METRICS_TMP" 2>/dev/null \
+          | LC_ALL=C awk '{ s += $1 } END { printf "%.6f", (s + 0) }' 2>/dev/null)
+        case "$_pp_kpi_retry_usd" in ''|*[!0-9.]*) _pp_kpi_retry_usd=0 ;; esac
+      fi
+      # picked_count + phase + phase_source from the router signals/pick this
+      # cycle (set inside the grounded block; default safely when unset).
+      _pp_kpi_picked_count=0
+      if [ -n "${_pp_router_picked:-}" ]; then
+        _pp_kpi_picked_count=$(printf '%s\n' "$_pp_router_picked" | grep -c . 2>/dev/null || true)
+        case "$_pp_kpi_picked_count" in ''|*[!0-9]*) _pp_kpi_picked_count=0 ;; esac
+      fi
+      # Guard with `jq -s '.[0]'` so a multi-doc / pretty-printed signals
+      # blob still yields exactly one scalar (the head -1 belt for jq -r
+      # printing one line per input doc).
+      _pp_kpi_phase=$(printf '%s' "${_pp_router_signals:-{}}" | jq -rs '.[0].phase // "unknown"' 2>/dev/null | head -1)
+      [ -z "$_pp_kpi_phase" ] && _pp_kpi_phase="unknown"
+      _pp_kpi_phase_source=$(printf '%s' "${_pp_router_signals:-{}}" | jq -rs '.[0].phase_source // "unknown"' 2>/dev/null | head -1)
+      [ -z "$_pp_kpi_phase_source" ] && _pp_kpi_phase_source="unknown"
+      # verdict_total_drops: the cycle-wide concurrent-drop count (I2-fixed).
+      _pp_kpi_drops="${_pp_concurrent_drops:-0}"
+      case "$_pp_kpi_drops" in ''|*[!0-9]*) _pp_kpi_drops=0 ;; esac
+      # retry_acceptance_rate: count "(retry accepted)" verdict files for this
+      # session vs total retries this cycle. Best-effort; 0 when no retries.
+      _pp_kpi_retry_accepted=$(grep -l 'retry accepted' \
+        "${HOME}/.claude/cache/cc-monitor-${session_id}-"*-verdict.txt 2>/dev/null \
+        | wc -l | tr -d ' ' 2>/dev/null || printf '0')
+      case "$_pp_kpi_retry_accepted" in ''|*[!0-9]*) _pp_kpi_retry_accepted=0 ;; esac
+      _pp_kpi_accept_rate=$(LC_ALL=C awk -v a="$_pp_kpi_retry_accepted" -v t="$_pp_kpi_retry_count" \
+        'BEGIN { if (t > 0) printf "%.4f", a / t; else printf "0" }' 2>/dev/null)
+      case "$_pp_kpi_accept_rate" in ''|*[!0-9.]*) _pp_kpi_accept_rate=0 ;; esac
+      # phase determines phase_source default already; cycle_outcome is
+      # "success" unless can_run never fired (no analyst ran) → "failure".
+      _pp_kpi_outcome="success"
+      [ "${can_run:-0}" -eq 1 ] || _pp_kpi_outcome="failure"
+      # R1: eligible — 1 ONLY when this cycle did a real analyst fan-out
+      # (_pp_analyst_ran is set just before the fan-out loop, inside the
+      # `grounded && llm available` block). Skipped cycles (budget exhausted,
+      # idle, no grounding, no llm) emit eligible:0 so their retry_usd:0 rows
+      # are excluded from the SLO p95 + min-samples math (still emitted for
+      # cost accounting). pp_kpi_compute_p95 + pp_rollback_check_and_engage
+      # both filter select(.eligible != 0).
+      _pp_kpi_eligible=0
+      [ "${_pp_analyst_ran:-0}" = "1" ] && _pp_kpi_eligible=1
+      # slo_breach: is the rollback flag currently active? (cheap check.)
+      _pp_kpi_slo_breach=0
+      pp_rollback_is_active 2>/dev/null && _pp_kpi_slo_breach=1
+      _pp_kpi_blob=$(jq -nc \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg session "$session_id" \
+        --argjson cost_usd "${_pp_kpi_cost_usd:-0}" \
+        --argjson retry_count "${_pp_kpi_retry_count:-0}" \
+        --argjson retry_usd "${_pp_kpi_retry_usd:-0}" \
+        --argjson inv_count "${_pp_kpi_inv_count:-0}" \
+        --argjson picked_count "${_pp_kpi_picked_count:-0}" \
+        --arg phase "${_pp_kpi_phase:-unknown}" \
+        --arg phase_source "${_pp_kpi_phase_source:-unknown}" \
+        --argjson retry_acceptance_rate "${_pp_kpi_accept_rate:-0}" \
+        --argjson verdict_total_drops "${_pp_kpi_drops:-0}" \
+        --arg cycle_outcome "${_pp_kpi_outcome:-success}" \
+        --argjson eligible "${_pp_kpi_eligible:-0}" \
+        --argjson slo_breach "${_pp_kpi_slo_breach:-0}" \
+        '{ts:$ts, session:$session, cost_usd:$cost_usd, retry_count:$retry_count,
+          retry_usd:$retry_usd, inv_count:$inv_count, picked_count:$picked_count,
+          phase:$phase, phase_source:$phase_source,
+          retry_acceptance_rate:$retry_acceptance_rate,
+          verdict_total_drops:$verdict_total_drops, cycle_outcome:$cycle_outcome,
+          eligible:$eligible, slo_breach:$slo_breach}' 2>/dev/null || printf '')
+      [ -n "$_pp_kpi_blob" ] && pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
+
+      # === B2 (v0.5.1): auto-rollback SLO check =============================
+      # After the KPI line for THIS cycle is written, evaluate the rolling
+      # p95 SLO and engage the rollback flag if breached. Only runs when the
+      # router is actually enabled (shadow-only mode has no behavior to roll
+      # back). pp_rollback_check_and_engage is self-guarding + fails open.
+      if [ "${PP_RETRY_ROUTER_ENABLE:-0}" = "1" ]; then
+        pp_rollback_check_and_engage 2>/dev/null || true
+      fi
 
       # Cycle cleanup (metrics flush + lock release) handled by the EXIT
       # trap above so SIGTERM mid-cycle can't lose data (review fix R2-M1).

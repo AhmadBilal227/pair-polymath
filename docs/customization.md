@@ -17,6 +17,28 @@ All knobs live in `config/default.env`. To override, copy any line to `~/.claude
 | `PP_DISMISS_TTL_EXTEND_DAYS` | `3` | Each match of an auto-suppress rule's hash extends the rule's `ttl_days` by this many days, up to `PP_DISMISS_TTL_CAP_DAYS`. |
 | `PP_DISMISS_TTL_CAP_DAYS` | `30` | Hard cap on auto-suppress TTL extension. At cap, the rule promotes to `source=auto_suppress_persisted` (permanent until `polymath dismiss disable <id>`). |
 | `PP_DISMISS_RENDERED_MAX_BYTES` | `2048` | Byte cap on the `${project_constraints}` block injected into analyst LLM system prompts. Truncates at last full bullet — never mid-bullet. |
+| `PP_RETRY_ROUTER_ENABLE` | `0` | Master gate for cost-aware retry router. `0`=v0.5.0 behavior unchanged; `1`=route retries by confidence (premium model only on high-confidence drops). |
+| `PP_RETRY_ROUTER_SHADOW` | `0` | When `1`, logs "what would have happened" to `retry-router-shadow.jsonl` without changing behavior. Use this BEFORE enabling router. |
+| `PP_RETRY_ROUTER_CANARY_PCT` | `0` | Percentage of sessions to receive the new routing. 10 = canary, 100 = full. Same session always lands in same bucket. |
+| `PP_ESCALATION_STREAK_THRESHOLD` | `3` | Lens drop-streak threshold to promote to deep-mode investigation. Default 3 preserves v0.5.0 behavior. |
+| `PP_KPI_ENABLE` | `0` | Emit per-cycle KPI rows to `kpi-cycle.jsonl`. Auto-enabled when router is on. |
+| `PP_KPI_FORCE_DISABLE` | `0` | Kill switch — `1` suppresses KPI emit even when the router auto-enables it. Useful for byte-identity benchmarking. |
+| `PP_OAR_ENABLE` | `0` | Enable SessionEnd hook to queue OAR-pending records (v0.5.2 prerequisite). |
+| `PP_RETRY_HARD_CAP_ENABLE` | `0` | Enforce `PP_RETRY_USD_PER_CYCLE_HARD_CAP` via preflight reservation. With router on, prevents any single cycle from blowing past the cap. |
+| `PP_RETRY_USD_PER_CYCLE_HARD_CAP` | `0.05` | USD ceiling for retry spend within one cycle. Once a cycle's reserved retries would exceed this, further retries are skipped (verdict stays DROP). |
+| `PP_RETRY_MODEL_HIGH` | `gpt-5` | Model used when `pp_retry_confidence` says HIGH. Premium tier. |
+| `PP_RETRY_MODEL_LOW` | `gpt-5-mini` | Model used when `pp_retry_confidence` says LOW. Cheap tier — the savings lever. |
+| `PP_RETRY_MODEL` | (unset) | Operator override — pins ALL router retries to this model and excludes the cycle from SLO evaluation. Use for sticky experiments. |
+| `PP_RETRY_SLO_WINDOW_HOURS` | `24` | Rolling window over which auto-rollback computes p95 of `retry_usd`. |
+| `PP_RETRY_SLO_P95_CAP_USD` | `0.030` | p95 retry-USD that, if exceeded, engages auto-rollback. |
+| `PP_RETRY_SLO_MIN_SAMPLES` | `40` | Minimum eligible cycles in the window before auto-rollback can engage. Anti-flap floor (bumped from 20 in R13). |
+| `PP_RETRY_BACKOFF_INITIAL_HOURS` | `24` | First-tier rollback duration. |
+| `PP_RETRY_BACKOFF_REPEAT_HOURS` | `72` | Second-tier rollback duration. Triggered when `disable_count`=1. |
+| `PP_RETRY_BACKOFF_MAX_HOURS` | `168` | Third-and-beyond tier rollback duration. `polymath retry-router clear-flag` resets the tier to first. |
+| `PP_RETRY_CANARY_SALT` | `pp-canary-v1` | Salt for the canary bucket hash. Rotate to re-shuffle which sessions are in the canary cohort. |
+| `PP_RETRY_CANARY_GO_PCT` | `20` | Minimum projected-savings percentage that `polymath retry-router shadow-summary` will recommend advancing to canary. |
+| `PP_LOG_MAX_BYTES` | `10485760` | Per-file size cap before JSONL telemetry logs rotate (file → file.1, single retention slot). |
+| `PP_LOG_MAX_AGE_DAYS` | `30` | Soft hint for downstream pruners — telemetry older than this is considered stale (not enforced by `_pp_rotate_jsonl`). |
 
 ## Models
 

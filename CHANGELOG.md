@@ -3,6 +3,55 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.1.0] — 2026-05-21
+
+The **cost-cut infrastructure release**. Ships observability + shadow-mode foundations for cost-aware retry routing. ALL FLAGS DEFAULT OFF — STDOUT-byte-identical to v0.5.0 until user opts in.
+
+### Added
+
+- `lib/retry-router.sh` — classification (`pp_retry_classify_reason`), confidence gate (`pp_retry_confidence`), model selector (`pp_retry_select_model`), canary bucket (`pp_retry_canary_bucket`), shadow log (`pp_retry_log_shadow`), hard-cap preflight (`pp_retry_hard_cap_preflight`)
+- `lib/router-signals.sh` — 7-rule phase classifier fallback (F1-F7); `phase_source: pattern|fallback|unknown` field
+- `lib/metrics.sh` — `pp_kpi_emit_cycle`, `pp_metrics_estimate_retry_usd`
+- `lib/auto-rollback.sh` — SLO state machine with 24/72/168h backoff
+- `hooks/session-end.sh` — OAR prerequisite scaffold (no-op when `PP_OAR_ENABLE=0`)
+- `polymath kpi` — rolling 7d/30d cost+retry+phase summary; `--json` for machine output
+- `polymath retry-router {status|clear-flag|shadow-summary}` — operator surface
+- Doctor check #19 — retry router health
+- 16 new env knobs (all default OFF) in `config/default.env`
+- ~44 new bats tests across 4 suites
+- Byte-identity test: sha256 of statusline STDOUT with all flags off matches v0.5.0 baseline
+
+### Rollout sequence (v0.5.1.0 — infrastructure only)
+
+This release ships the infrastructure ONLY. To use:
+
+1. Set `PP_RETRY_ROUTER_SHADOW=1` in `~/.claude/pair-polymath/config/user.env`
+2. Wait 24-72h while shadow log accumulates "what would have happened" data
+3. Inspect: `polymath retry-router shadow-summary` — should show projected savings
+4. If projected savings ≥20%: set `PP_RETRY_ROUTER_ENABLE=1` + `PP_RETRY_ROUTER_CANARY_PCT=10`
+5. Compare actual cost delta vs shadow projection over 7 days
+6. If clean: raise `PP_RETRY_ROUTER_CANARY_PCT=100`
+7. Auto-rollback triggers if rolling-24h p95 retry-cost exceeds `PP_RETRY_SLO_P95_CAP_USD=0.030`
+
+### Targets (measured via `polymath kpi`)
+
+- 30-40% retry-cost reduction at canary 100%
+- Phase classifier "unknown" rate: 74% → <20%
+- No regression in retry-acceptance-rate (±5pp of baseline)
+- No statusline p95 wall-time regression (>30ms)
+
+### Pass-3 GPT-5 review-cycle fixes (3 rounds)
+
+All 30+ findings addressed inline: SUTVA-preserving design, online FDR control, Bernoulli CUSUM, runtime privacy interceptor, byte-identity restricted to STDOUT, mkdir-lock log rotation, portable timeout fallbacks, escape hatch via `PP_RETRY_MODEL`, baseline snapshot capture, heavy-task eligibility deferred to v0.5.2.
+
+### Deferred
+
+- v0.5.1.1: Lens persona work (scope-tightening + maturity-gating + task-anchoring + dismiss UX polish)
+- v0.5.2: OAR labeler + hallucination gate + ablation matrix + polymath history CLI
+- v0.5.3: Developer Insights Module (DIM)
+
+---
+
 ## [0.5.0] — 2026-05-14
 
 The **safety-valve release**. v0.5.0 ships dismiss infrastructure as a **manual override** for when the intelligence layer fails — NOT as the primary noise-reduction mechanism. The real noise-floor work (lens persona calibration, cross-cycle memory feedback, confidence weighting, task-domain gating) is on the roadmap for v0.5.1+ as "Lens Intelligence Amplification." This framing follows the insight: *suppression is a fallback, not a feature; system intelligence should be amplified, not suppressed.*

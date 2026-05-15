@@ -47,7 +47,9 @@ pp_router_extract_signals() {
   # heuristics; each axis can be wrong individually but the router LLM
   # gets to disambiguate via the full signals blob.
   local _phase="unknown"
-  local _edit_count _read_count _bash_count _test_with_fail
+  local _phase_source="unknown"
+  local _git_probe_timeout=0
+  local _edit_count _read_count _bash_count _test_with_fail _test_with_pass
 
   _edit_count=$(printf '%s' "$_tools_json" | jq '[.[] | select(.tool == "Edit" or .tool == "Write" or .tool == "MultiEdit")] | length' 2>/dev/null)
   _read_count=$(printf '%s' "$_tools_json" | jq '[.[] | select(.tool == "Read")] | length' 2>/dev/null)
@@ -63,6 +65,15 @@ pp_router_extract_signals() {
                    and (.summary // "" | test("(FAIL|ERROR|✗|exit 1|[1-9][0-9]* (failing|failed))"; "i"))
                   )
     ] | length' 2>/dev/null)
+  # _test_with_pass is also computed in the outcome block below — we hoist
+  # the same query here so the v0.5.1 F1-F7 fallback can use it before the
+  # JSON emit. Same predicate to keep behavior identical.
+  _test_with_pass=$(printf '%s' "$_tools_json" | jq '
+    [ .[] | select(.tool == "Bash"
+                   and (.target // "" | test("(test|spec|jest|mocha|vitest|pytest|playwright|cypress|go test|pnpm test|npm test|cargo test|bats|rspec|nx (test|e2e))"; "i"))
+                   and (.summary // "" | test("(PASS|passing|passed|✓|all .* pass)"; "i"))
+                  )
+    ] | length' 2>/dev/null)
 
   local _plan_hits
   # AI-eng I2: bare 'approach' fires on "my approach to caching".
@@ -71,10 +82,13 @@ pp_router_extract_signals() {
 
   if [ "${_test_with_fail:-0}" -ge 1 ]; then
     _phase="debugging"
+    _phase_source="pattern"
   elif [ "${_edit_count:-0}" -gt "${_read_count:-0}" ] && [ "${_edit_count:-0}" -ge 2 ]; then
     _phase="drafting"
+    _phase_source="pattern"
   elif [ "${_plan_hits:-0}" -ge 1 ]; then
     _phase="planning"
+    _phase_source="pattern"
   fi
 
   # ---------- confidence detection ----------
@@ -95,13 +109,8 @@ pp_router_extract_signals() {
   # markers. Anything else → unknown.
   local _outcome="unknown"
   local _last_test_failed=false
-  local _test_with_pass
-  _test_with_pass=$(printf '%s' "$_tools_json" | jq '
-    [ .[] | select(.tool == "Bash"
-                   and (.target // "" | test("(test|spec|jest|mocha|vitest|pytest|playwright|cypress|go test|pnpm test|npm test|cargo test|bats|rspec|nx (test|e2e))"; "i"))
-                   and (.summary // "" | test("(PASS|passing|passed|✓|all .* pass)"; "i"))
-                  )
-    ] | length' 2>/dev/null)
+  # _test_with_pass was hoisted to the phase-detection block above so the
+  # F1-F7 fallback can use it. Reuse the same value here.
 
   if [ "${_test_with_fail:-0}" -ge 1 ]; then
     _outcome="test_failed"
@@ -145,9 +154,85 @@ pp_router_extract_signals() {
   # ---------- recent_edit_density ----------
   local _density="${_edit_count:-0}"
 
+  # I1 (v0.5.1): git_probe_timeout counter — 1 when the F1-F7 fallback had to
+  # run a bare (no-timeout) `git status` because neither timeout nor gtimeout
+  # was installed. Stays 0 when the fallback block didn't run or a wrapper
+  # was available. Lets the dogfood data measure bare-probe frequency.
+  # (Declared at function top so it's defined even when the fallback didn't run.)
+
+  # ---------- v0.5.1 F1-F7 phase classifier fallback ----------
+  # Only fires when the pattern-match block returned "unknown". The 7-rule
+  # decision tree uses already-computed counts plus a cached git-dirty
+  # probe (per-cycle, 1s timeout via timeout/gtimeout for macOS portability).
+  # Target: drop the unknown rate from 74% (pattern-only) to <20%.
+  if [ "$_phase" = "unknown" ]; then
+    local _git_dirty=0
+    local _git_out=""
+    _git_probe_timeout=0
+    if [ -n "${PP_GIT_STATUS_FIXTURE+x}" ]; then
+      # Test override: any non-empty fixture means "dirty"; empty means clean.
+      _git_out="$PP_GIT_STATUS_FIXTURE"
+      [ -n "$_git_out" ] && _git_dirty=1
+    else
+      # I1 (v0.5.1): on a clean macOS install BOTH `timeout` and `gtimeout`
+      # are absent, so the old `timeout || gtimeout || true` chain silently
+      # collapsed to _git_out="" → _git_dirty=0 always → F5 over-fired.
+      # git itself is a hard dep; only the timeout wrapper is optional. So:
+      # try timeout/gtimeout, else fall back to a BARE `git status` (fast on
+      # normal repos — the 1s ceiling was belt-and-suspenders). Stamp a
+      # git_probe_timeout=1 counter into the signals when we ran bare-mode
+      # so the dogfood data can measure how often this path is taken.
+      if command -v timeout >/dev/null 2>&1; then
+        _git_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null \
+          && timeout 1 git status --porcelain 2>/dev/null || true)
+      elif command -v gtimeout >/dev/null 2>&1; then
+        _git_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null \
+          && gtimeout 1 git status --porcelain 2>/dev/null || true)
+      else
+        _git_probe_timeout=1
+        _git_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null \
+          && git status --porcelain 2>/dev/null || true)
+      fi
+      [ -n "$_git_out" ] && _git_dirty=1
+    fi
+    local _git_staged=0
+    if [ "$_git_dirty" = "1" ]; then
+      _git_staged=$(printf '%s' "$_git_out" | LC_ALL=C grep -c '^[AMD] ' 2>/dev/null || printf '0')
+      case "$_git_staged" in ''|*[!0-9]*) _git_staged=0 ;; esac
+    fi
+
+    local _total_tools
+    _total_tools=$(( ${_read_count:-0} + ${_edit_count:-0} + ${_bash_count:-0} ))
+    local _tx_len="${#_tx}"
+
+    # F1: empty inputs → honest unknown (do NOT mislabel)
+    if [ "$_tx_len" -lt 40 ] && [ "$_total_tools" -eq 0 ]; then
+      _phase_source="unknown"
+    # F2: test_passed + edit → drafting (green test → iterating)
+    elif [ "${_test_with_pass:-0}" -ge 1 ] && [ "${_edit_count:-0}" -ge 1 ]; then
+      _phase="drafting"; _phase_source="fallback"
+    # F3: edit + dirty tree → drafting (uncommitted change in flight)
+    elif [ "${_edit_count:-0}" -ge 1 ] && [ "$_git_dirty" = "1" ]; then
+      _phase="drafting"; _phase_source="fallback"
+    # F4: read-heavy + no edits + dirty → debugging (investigating a wip)
+    elif [ "${_read_count:-0}" -ge 3 ] && [ "${_edit_count:-0}" -eq 0 ] && [ "$_git_dirty" = "1" ]; then
+      _phase="debugging"; _phase_source="fallback"
+    # F5: read-heavy + no edits + clean → planning (surveying before change)
+    elif [ "${_read_count:-0}" -ge 2 ] && [ "${_edit_count:-0}" -eq 0 ] && [ "$_git_dirty" = "0" ]; then
+      _phase="planning"; _phase_source="fallback"
+    # F6: bash-heavy + no tests → planning (running commands, exploring)
+    elif [ "${_bash_count:-0}" -ge 3 ] && [ "${_test_with_pass:-0}" -eq 0 ] && [ "${_test_with_fail:-0}" -eq 0 ]; then
+      _phase="planning"; _phase_source="fallback"
+    # F7: staged changes → drafting (prepared a commit)
+    elif [ "$_git_staged" -ge 1 ]; then
+      _phase="drafting"; _phase_source="fallback"
+    fi
+  fi
+
   # ---------- compose JSON ----------
   jq -n \
     --arg phase "$_phase" \
+    --arg phase_source "$_phase_source" \
     --arg confidence "$_confidence" \
     --arg outcome "$_outcome" \
     --arg tone "$_tone" \
@@ -155,14 +240,17 @@ pp_router_extract_signals() {
     --argjson budget "$_budget" \
     --argjson density "${_density:-0}" \
     --argjson last_test_failed "$_last_test_failed" \
+    --argjson git_probe_timeout "${_git_probe_timeout:-0}" \
     '{
       phase: $phase,
+      phase_source: $phase_source,
       confidence: $confidence,
       outcome: $outcome,
       tone: $tone,
       session_age_min: $session_age,
       budget_remaining_pct: $budget,
       last_test_failed: $last_test_failed,
-      recent_edit_density: $density
+      recent_edit_density: $density,
+      git_probe_timeout: $git_probe_timeout
     }'
 }

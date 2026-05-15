@@ -481,3 +481,8 @@ PROBE
   grep -q "INSTALL_FAILURE_DIAGNOSTIC" "$capture"
   rm -rf "$probe_home"
 }
+
+@test "install: SessionEnd hook registered in settings.json template" {
+  grep -q 'SessionEnd' "$PP_ROOT/bin/install.sh"
+  grep -q 'session-end.sh' "$PP_ROOT/bin/install.sh"
+}

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# I4 (v0.5.1): new JSONL telemetry logs (kpi-cycle.jsonl) must be owner-only.
+# umask 077 here matches the established v0.4.2 invariant pattern other libs
+# use — every file this lib creates inherits 0600. Set before any file op.
+umask 077
+
 # Pair Polymath — USD telemetry. Sourced by bin/statusline.sh.
 # Lean v1 approach: end-of-cycle rollup. Calls are TYPE-counted during the
 # cycle (planner / analyst / critique / inv / retry); at flush time we
@@ -169,6 +174,27 @@ _metrics_usd_for_call() {
   esac
   _pp_awk -v ti="$tok_in" -v to="$tok_out" -v ip="$in_per_m" -v op="$out_per_m" \
     'BEGIN { printf "%.6f", (ti / 1000000.0) * ip + (to / 1000000.0) * op }'
+}
+
+# pp_metrics_estimate_retry_usd MODEL
+# Stdout: USD estimate for one retry call at this model tier.
+# Uses existing PP_AVG_TOK_RETRY_IN/OUT + price knobs.
+pp_metrics_estimate_retry_usd() {
+  local _model="${1:?model required}"
+  local _in="${PP_AVG_TOK_RETRY_IN:-2500}"
+  local _out="${PP_AVG_TOK_RETRY_OUT:-180}"
+  local _price_in _price_out
+  case "$_model" in
+    *gpt-5-mini*)   _price_in="${PP_PRICE_GPT_5_MINI_IN_PER_M:-0.25}"
+                    _price_out="${PP_PRICE_GPT_5_MINI_OUT_PER_M:-2.00}" ;;
+    *gpt-5.5*|*gpt-5-5*) _price_in="${PP_PRICE_GPT_5_5_IN_PER_M:-2.50}"
+                         _price_out="${PP_PRICE_GPT_5_5_OUT_PER_M:-15.00}" ;;
+    *gpt-5*)        _price_in="${PP_PRICE_GPT_5_IN_PER_M:-1.25}"
+                    _price_out="${PP_PRICE_GPT_5_OUT_PER_M:-10.00}" ;;
+    *)              _price_in=0.5; _price_out=4.0 ;;
+  esac
+  LC_ALL=C awk -v i="$_in" -v o="$_out" -v pi="$_price_in" -v po="$_price_out" \
+    'BEGIN { printf "%.6f", (i*pi + o*po) / 1000000.0 }'
 }
 
 # metrics_flush_cycle SESSION_ID — roll up tmp into a single JSONL entry
@@ -380,4 +406,152 @@ pp_write_privacy_log() {
   mv "$_pp_priv_tmp" "$out" 2>/dev/null || { rm -f "$_pp_priv_tmp" 2>/dev/null; return 1; }
   chmod 600 "$out" 2>/dev/null || true
   return 0
+}
+
+# === v0.5.1 shared JSONL rotation helper ======================================
+# _pp_rotate_jsonl FILE MAX_BYTES
+#
+# I3 (v0.5.1): pp_retry_log_shadow and pp_kpi_emit_cycle each used to do an
+# unlocked check-size → mv → append. Under parallel lens fan-out two writers
+# could both pass the size check and one mv could land mid-append of the
+# other, producing torn JSONL. This single shared helper wraps the rotation
+# decision (size check + mv) in the budget.sh-style mkdir-lock so exactly one
+# writer rotates. Callers still append after calling this — the append itself
+# is a single `printf >>` which is atomic for short lines on POSIX.
+#
+# Fails open: lock timeout or any error → return 0 (caller proceeds to append
+# without rotating). Telemetry must never block the cycle.
+_pp_rotate_jsonl() {
+  local _file="${1:-}"
+  local _max="${2:-10485760}"
+  [ -n "$_file" ] || return 0
+  case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
+  [ -f "$_file" ] || return 0
+  local _lock="${_file}.rotate.lock"
+  local _attempts=0
+  while ! mkdir "$_lock" 2>/dev/null; do
+    _attempts=$((_attempts + 1))
+    # R5: stale-lock recovery. A SIGKILL between mkdir and rmdir would
+    # otherwise orphan the lock dir permanently → every future cycle
+    # spins the retry loop, gives up, and the JSONL grows unbounded past
+    # the rotation cap. After 10 spins (~200ms), check the lock dir's
+    # age via the project's pre-probed stat flavor (bin/polymath:29); if
+    # older than ~60s no live writer holds it, so force-remove and retry.
+    if [ "$_attempts" -eq 10 ]; then
+      local _lock_age=0 _lock_mtime=0
+      case "${_PP_STAT_FLAVOR:-}" in
+        bsd) _lock_mtime=$(stat -f %m "$_lock" 2>/dev/null) ;;
+        gnu) _lock_mtime=$(stat -c %Y "$_lock" 2>/dev/null) ;;
+        *)
+          # Same probe-order rationale as hooks/session-end.sh: BSD
+          # `stat -f` on GNU Linux exits 0 with garbage (mount-point
+          # string), so try GNU first + validate numeric, fall back
+          # to BSD only if GNU produced nothing usable.
+          _lock_mtime=$(stat -c %Y "$_lock" 2>/dev/null)
+          case "$_lock_mtime" in ''|*[!0-9]*) _lock_mtime="" ;; esac
+          [ -z "$_lock_mtime" ] && _lock_mtime=$(stat -f %m "$_lock" 2>/dev/null)
+          ;;
+      esac
+      case "$_lock_mtime" in ''|*[!0-9]*) _lock_mtime=0 ;; esac
+      _lock_age=$(( $(date +%s 2>/dev/null || echo 0) - _lock_mtime ))
+      if [ "$_lock_age" -gt 60 ]; then
+        rm -rf "$_lock" 2>/dev/null || true
+        continue
+      fi
+    fi
+    [ "$_attempts" -gt 100 ] && return 0
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  # Re-check size INSIDE the lock — another writer may have just rotated.
+  local _size
+  _size=$(wc -c < "$_file" 2>/dev/null | tr -d ' ')
+  if [ "${_size:-0}" -ge "$_max" ]; then
+    mv "$_file" "${_file}.1" 2>/dev/null || true
+  fi
+  rmdir "$_lock" 2>/dev/null || true
+  return 0
+}
+
+# === v0.5.1 KPI cycle emitter =================================================
+# pp_kpi_emit_cycle JSON_BLOB
+#
+# Appends one JSON line to kpi-cycle.jsonl. Caller is responsible for shape;
+# this function is a pure transport (no schema validation — keeps the emitter
+# cheap and lets callers evolve the schema without coordinated changes here).
+#
+# Activation rules (in order):
+#   1. PP_KPI_FORCE_DISABLE=1   → always skip (kill switch).
+#   2. PP_KPI_ENABLE=1          → emit.
+#   3. PP_RETRY_ROUTER_ENABLE=1 → emit (router needs the data to measure SLOs).
+#   4. PP_RETRY_ROUTER_SHADOW=1 → emit (shadow mode is the SLO probe phase).
+#   5. otherwise                → skip.
+#
+# Rotation: at PP_LOG_MAX_BYTES, rename file → file.1 (single retention slot,
+# matching pp_retry_log_shadow's policy) via the shared _pp_rotate_jsonl
+# mkdir-lock helper (I3). Failures are silent — telemetry must never block.
+pp_kpi_emit_cycle() {
+  [ "${PP_KPI_FORCE_DISABLE:-0}" = "1" ] && return 0
+  local _enabled=0
+  [ "${PP_KPI_ENABLE:-0}" = "1" ] && _enabled=1
+  [ "${PP_RETRY_ROUTER_ENABLE:-0}" = "1" ] && _enabled=1
+  [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ] && _enabled=1
+  [ "$_enabled" = "0" ] && return 0
+  local _blob="${1:-}"
+  [ -z "$_blob" ] && return 0
+  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+  local _max="${PP_LOG_MAX_BYTES:-10485760}"
+  case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
+  mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
+  _pp_rotate_jsonl "$_file" "$_max"
+  printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
+}
+
+# === v0.5.1 p95 computation ===================================================
+# pp_kpi_compute_p95 FIELD WINDOW_HOURS
+# Stdout: p95 of the named numeric field across kpi-cycle.jsonl rows whose
+#   ts falls within the last WINDOW_HOURS. Also reads the rotated .1 file so
+#   the window isn't lost right after a rotation.
+#
+# Pure jq + awk, bash-3.2-portable. Used by:
+#   - auto-rollback's pp_rollback_check_and_engage (SLO p95 of retry_usd)
+#   - `polymath kpi` (p95 of retry_usd, replacing the plain average)
+#
+# Method: nearest-rank p95 — sort ascending, pick index ceil(0.95*n). Empty
+# dataset → prints 0. Fails open: any error → prints 0.
+pp_kpi_compute_p95() {
+  local _field="${1:-}"
+  local _window_h="${2:-24}"
+  [ -n "$_field" ] || { printf '0'; return 0; }
+  case "$_window_h" in ''|*[!0-9]*) _window_h=24 ;; esac
+  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+  local _now _cutoff
+  _now=$(date +%s 2>/dev/null) || _now=0
+  _cutoff=$(( _now - _window_h * 3600 ))
+  # Concatenate current + rotated file (rotated first = older). Read
+  # line-oriented via `jq -R fromjson?` so a single torn write (e.g. from a
+  # pre-R5 crash) skips one line instead of voiding the whole dataset
+  # (R6 — `jq -s` over a torn file errors out → empty _vals → silent p95=0).
+  # R1: exclude eligible:0 rows (skipped cycles) so a day of idle zero-rows
+  # can't dilute the SLO percentile. Rows lacking the field (legacy / pre-R1)
+  # count as eligible — only an explicit eligible:0 is excluded.
+  local _vals
+  _vals=$(cat "${_file}.1" "$_file" 2>/dev/null \
+    | jq -R 'fromjson?' \
+    | jq -s --arg f "$_field" --argjson cutoff "$_cutoff" '
+        map(select((.ts | fromdateiso8601? // 0) >= $cutoff))
+        | map(select((.eligible // 1) != 0))
+        | map(.[$f] // 0 | tonumber?)
+        | map(select(. != null))
+        | .[]
+      ' 2>/dev/null)
+  [ -z "$_vals" ] && { printf '0'; return 0; }
+  printf '%s\n' "$_vals" | LC_ALL=C sort -g | _pp_awk '
+    { v[NR] = $1 }
+    END {
+      if (NR == 0) { printf "0"; exit }
+      idx = int(0.95 * NR + 0.9999999)
+      if (idx < 1) idx = 1
+      if (idx > NR) idx = NR
+      printf "%.6f", v[idx]
+    }'
 }

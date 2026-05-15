@@ -448,6 +448,26 @@ doctor_check_dismiss_libs() {
   return 0
 }
 
+doctor_check_retry_router_health() {
+  # v0.5.1 check #19 — retry router health.
+  # Green when: disabled (default) OR active without rollback flag.
+  # Red when: auto-rollback flag currently active.
+  if [ "${PP_RETRY_ROUTER_ENABLE:-0}" != "1" ] && [ "${PP_RETRY_ROUTER_SHADOW:-0}" != "1" ]; then
+    _pp_doctor_green "retry router" "disabled (default)"
+    return 0
+  fi
+  if [ -z "${_pp_rollback_sourced:-}" ]; then
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/auto-rollback.sh" 2>/dev/null && _pp_rollback_sourced=1
+  fi
+  if pp_rollback_is_active 2>/dev/null; then
+    _pp_doctor_red "retry router" "auto-rollback ACTIVE; review: polymath retry-router status"
+    return 2
+  fi
+  _pp_doctor_green "retry router" "active, no SLO breach"
+  return 0
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -511,7 +531,8 @@ pp_doctor_run() {
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
                 doctor_check_prompts doctor_check_transcript_libs doctor_check_router_libs \
                 doctor_check_coreutils doctor_check_budget_pressure \
-                doctor_check_cache_permissions doctor_check_dismiss_libs doctor_check_statusline_smoke"
+                doctor_check_cache_permissions doctor_check_dismiss_libs \
+                doctor_check_retry_router_health doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

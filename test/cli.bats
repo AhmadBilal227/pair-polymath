@@ -352,6 +352,10 @@ EOF
     || git -C "$remote_dir" init --quiet
   # Older git ignores --initial-branch; force it via symbolic-ref to be safe
   git -C "$remote_dir" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+  # Task #60 flake fix — see _pp_r5_build_remote_and_clone for context.
+  # gc.auto + maintenance.auto race the test's `rm -rf` cleanup post-pull.
+  git -C "$remote_dir" config gc.auto 0
+  git -C "$remote_dir" config maintenance.auto false
   mkdir -p "$remote_dir/bin" "$remote_dir/lib" "$remote_dir/lenses" "$remote_dir/prompts"
   echo "0.0.0" > "$remote_dir/VERSION"
   cp "$PP_ROOT/bin/polymath" "$remote_dir/bin/polymath"
@@ -372,6 +376,9 @@ SH
   git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "init"
   # Clone into a "client" install
   git clone --quiet "$remote_dir" "$clone_dir"
+  # Task #60: also disable in the clone — `git pull` runs here in the test.
+  git -C "$clone_dir" config gc.auto 0
+  git -C "$clone_dir" config maintenance.auto false
   git -C "$clone_dir" config user.email "t@t" && git -C "$clone_dir" config user.name t
   # Add a new commit on the remote so update has something to pull
   echo "1" >> "$remote_dir/VERSION"
@@ -627,6 +634,14 @@ _pp_r5_build_remote_and_clone() {
   local clone_dir="$2"
   git -C "$remote_dir" init --quiet
   git -C "$remote_dir" symbolic-ref HEAD refs/heads/main
+  # Task #60 flake fix: disable git's background gc.auto + maintenance.auto.
+  # Since git 2.27 these can spawn detached child processes that keep writing
+  # to .git/ AFTER `git pull` exits — racing the test's `rm -rf` cleanup with
+  # "rm: cannot remove '/tmp/tmp.XXX/.git': Directory not empty". Belt-and-
+  # suspenders: per-repo config disables both background hooks; tests stay
+  # hermetic. Observed flake cluster on PRs #69/#70/#72/#73.
+  git -C "$remote_dir" config gc.auto 0
+  git -C "$remote_dir" config maintenance.auto false
   mkdir -p "$remote_dir/bin" "$remote_dir/lib" "$remote_dir/lenses" "$remote_dir/prompts"
   echo "0.0.0" > "$remote_dir/VERSION"
   cp "$PP_ROOT/bin/polymath" "$remote_dir/bin/polymath"
@@ -646,6 +661,10 @@ SH
   git -C "$remote_dir" add -A
   git -C "$remote_dir" commit -q -m "init"
   git clone --quiet "$remote_dir" "$clone_dir"
+  # Task #60 flake fix applies to clone too — clone is where `git pull` runs
+  # in the test, so it's the side that spawns the gc.auto background process.
+  git -C "$clone_dir" config gc.auto 0
+  git -C "$clone_dir" config maintenance.auto false
   git -C "$clone_dir" config user.email "t@t"
   git -C "$clone_dir" config user.name t
 }

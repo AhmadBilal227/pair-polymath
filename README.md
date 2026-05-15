@@ -10,7 +10,7 @@
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-CI%20verified-success)
 ![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-orange)
 
-**Status:** `v0.3.0-pre` — Phase 2.3 (memory subsystem) just merged. Core mechanics + cost transparency + privacy log + installer hardening + memory all working; off-by-default memory subsystem behind `PP_MEMORY_ENABLE=1`. 454 bats tests green on macOS + Ubuntu CI; APIs (config keys, lens schema, prompt placeholders, memory schema) may still shift before `v1.0`. Eval-gate against labeled goldens lands in `v0.4`. Issues + PRs welcome.
+**Status:** `v0.5.1.0` — cost-aware retry router shipped (shadow → canary → full rollout, byte-identical to `v0.5.0` with default-off flags). Opt-in via `PP_RETRY_ROUTER_SHADOW=1` then `polymath retry-router shadow-summary` for the projected-savings go/no-go signal. v0.5.2 (OAR measurement substrate + hallucination gate) spec locked at `docs/v0.5.2-oar-hallucination-spec.md`; v0.5.3 design input at `docs/v0.5.3-workforce-management-vision.md`. 554 bats tests green on macOS + Ubuntu CI; doctor surfaces 20 health checks (`polymath doctor`). APIs (config keys, lens schema, prompt placeholders, memory schema, OAR schema) may still shift before `v1.0`. Issues + PRs welcome.
 
 ---
 

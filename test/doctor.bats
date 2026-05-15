@@ -172,3 +172,58 @@ teardown() {
   [ "$status" -lt 128 ]
   [[ "$output" == *"Summary:"* ]]
 }
+
+# ========================================================
+# check #20 — install drift (v0.5.1.1)
+# ========================================================
+
+@test "doctor #20: install drift green on a fresh hermetic install" {
+  # Clean HOME — no legacy hook file, no legacy cache files. Should be green.
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"install drift"* ]]
+  [[ "$output" == *"no stale hooks or pre-v0.4 cache files"* ]]
+}
+
+@test "doctor #20: install drift yellow when legacy global hook file present" {
+  # Simulate operator who installed pre-v0.4 — the global hook file persists
+  # at ~/.claude/hooks/inject-monitor-insight.sh even after v0.4+ moves the
+  # install path. Drop the file in the hermetic HOME.
+  mkdir -p "$HOME/.claude/hooks"
+  echo '#!/bin/bash' > "$HOME/.claude/hooks/inject-monitor-insight.sh"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"install drift"* ]]
+  [[ "$output" == *"legacy global hook"* ]]
+  [[ "$output" == *"rm when convenient"* ]]
+}
+
+@test "doctor #20: install drift yellow when pre-v0.4 indexed-lens cache files present" {
+  # Simulate pre-v0.4 caches that used numeric lens indices instead of IDs.
+  mkdir -p "$PP_CACHE_DIR"
+  : > "$PP_CACHE_DIR/cc-monitor-abc-lens0-something.txt"
+  : > "$PP_CACHE_DIR/cc-monitor-abc-lens3-other.txt"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"install drift"* ]]
+  [[ "$output" == *"pre-v0.4 indexed-lens cache files"* ]]
+}
+
+@test "doctor #20: install drift surfaces BOTH findings together when both present" {
+  mkdir -p "$HOME/.claude/hooks"
+  echo '#!/bin/bash' > "$HOME/.claude/hooks/inject-monitor-insight.sh"
+  mkdir -p "$PP_CACHE_DIR"
+  : > "$PP_CACHE_DIR/cc-monitor-abc-lens0-something.txt"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"install drift"* ]]
+  [[ "$output" == *"legacy global hook"* ]]
+  [[ "$output" == *"pre-v0.4 indexed-lens"* ]]
+}
+
+@test "doctor #20: install drift current-lens-ID cache files do NOT trigger the check" {
+  # Files matching the post-v0.4 cc-monitor-${sid}-${LENS_ID}.txt format
+  # (e.g. ENGINEERING, SECURITY) should NOT match the legacy pattern.
+  mkdir -p "$PP_CACHE_DIR"
+  : > "$PP_CACHE_DIR/cc-monitor-abc-ENGINEERING.txt"
+  : > "$PP_CACHE_DIR/cc-monitor-abc-SECURITY.txt"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"install drift"* ]]
+  [[ "$output" == *"no stale hooks"* ]]
+}

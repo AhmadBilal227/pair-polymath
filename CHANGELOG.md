@@ -3,7 +3,7 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
-## [0.5.1.0] — 2026-05-21
+## [0.5.1.0] — 2026-05-15
 
 The **cost-cut infrastructure release**. Ships observability + shadow-mode foundations for cost-aware retry routing. ALL FLAGS DEFAULT OFF — STDOUT-byte-identical to v0.5.0 until user opts in.
 

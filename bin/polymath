@@ -414,7 +414,8 @@ USAGE
           exit 0
         fi
         jq -s '
-          group_by(.drop_reason_class)
+          sort_by(.drop_reason_class)
+          | group_by(.drop_reason_class)
           | map({class: .[0].drop_reason_class, count: length})
         ' "$_shadow"
         ;;

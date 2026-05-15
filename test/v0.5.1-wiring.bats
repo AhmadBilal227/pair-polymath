@@ -81,6 +81,64 @@ teardown() { rm -rf "$HOME"; }
 }
 
 # ========================================================
+# R1 — skipped-cycle KPI rows must be eligible:0 (no SLO dilution)
+# ========================================================
+
+@test "R1: KPI row carries an eligible field" {
+  printf 'PP_RETRY_ROUTER_SHADOW=1\n' > "$PP_USER_ENV"
+  export PP_EVAL_MODE=1
+  export PP_EXTERNAL_LLM=1
+  # No real `llm` binary that returns observations → analyst fan-out does not
+  # do real work in a way that matters; the row must still carry `eligible`.
+  bash "$PP_ROOT/bin/statusline.sh" < "$PP_STDIN" >/dev/null 2>&1 || true
+  [ -f "$PP_CACHE_DIR/kpi-cycle.jsonl" ]
+  run jq -e 'has("eligible")' "$PP_CACHE_DIR/kpi-cycle.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "R1: pp_kpi_compute_p95 ignores eligible:0 rows" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _ts _i
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # 20 eligible rows all retry_usd=2, plus 80 skipped rows retry_usd=0.
+  for _i in $(seq 1 20); do
+    printf '{"ts":"%s","session":"s","retry_usd":2,"eligible":1}\n' "$_ts" \
+      >> "$PP_CACHE_DIR/kpi-cycle.jsonl"
+  done
+  for _i in $(seq 1 80); do
+    printf '{"ts":"%s","session":"s","retry_usd":0,"eligible":0}\n' "$_ts" \
+      >> "$PP_CACHE_DIR/kpi-cycle.jsonl"
+  done
+  run pp_kpi_compute_p95 retry_usd 24
+  # If eligible:0 rows were counted, p95 over 100 rows (mostly 0) would be 0.
+  # Filtering to the 20 eligible rows → p95 = 2.
+  [ "$(printf '%s' "$output" | cut -d. -f1)" = "2" ]
+}
+
+@test "R1: rollback min-samples gate counts only eligible rows" {
+  . "$PP_ROOT/lib/metrics.sh"
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  export PP_RETRY_SLO_MIN_SAMPLES=20
+  export PP_RETRY_SLO_P95_CAP_USD=0.030
+  export PP_RETRY_SLO_WINDOW_HOURS=24
+  unset PP_RETRY_MODEL
+  local _ts _i
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # Only 5 eligible rows (over the cap) but 95 skipped rows. min-samples=20.
+  # If skipped rows counted, the gate would open and engage on the 5 hot rows.
+  for _i in $(seq 1 5); do
+    printf '{"ts":"%s","session":"s","retry_usd":0.500,"eligible":1}\n' "$_ts" \
+      >> "$PP_CACHE_DIR/kpi-cycle.jsonl"
+  done
+  for _i in $(seq 1 95); do
+    printf '{"ts":"%s","session":"s","retry_usd":0,"eligible":0}\n' "$_ts" \
+      >> "$PP_CACHE_DIR/kpi-cycle.jsonl"
+  done
+  pp_rollback_check_and_engage
+  if pp_rollback_is_active; then false; fi   # only 5 eligible < 20 → no engage
+}
+
+# ========================================================
 # B2 — auto-rollback actually engages on synthetic breach data
 # ========================================================
 

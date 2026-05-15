@@ -499,12 +499,19 @@ pp_kpi_compute_p95() {
   local _now _cutoff
   _now=$(date +%s 2>/dev/null) || _now=0
   _cutoff=$(( _now - _window_h * 3600 ))
-  # Concatenate current + rotated file (rotated first = older). Missing files
-  # are simply absent from the cat. jq -s slurps the union.
+  # Concatenate current + rotated file (rotated first = older). Read
+  # line-oriented via `jq -R fromjson?` so a single torn write (e.g. from a
+  # pre-R5 crash) skips one line instead of voiding the whole dataset
+  # (R6 — `jq -s` over a torn file errors out → empty _vals → silent p95=0).
+  # R1: exclude eligible:0 rows (skipped cycles) so a day of idle zero-rows
+  # can't dilute the SLO percentile. Rows lacking the field (legacy / pre-R1)
+  # count as eligible — only an explicit eligible:0 is excluded.
   local _vals
   _vals=$(cat "${_file}.1" "$_file" 2>/dev/null \
+    | jq -R 'fromjson?' \
     | jq -s --arg f "$_field" --argjson cutoff "$_cutoff" '
         map(select((.ts | fromdateiso8601? // 0) >= $cutoff))
+        | map(select((.eligible // 1) != 0))
         | map(.[$f] // 0 | tonumber?)
         | map(select(. != null))
         | .[]

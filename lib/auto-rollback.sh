@@ -109,10 +109,20 @@ pp_rollback_check_and_engage() {
   _cutoff=$(( _now - _window_h * 3600 ))
 
   # Count eligible cycles in the window (current + rotated file).
+  # R1: only rows from cycles that did real analyst work (eligible:1) count
+  # toward the min-samples gate — skipped cycles (budget exhausted / idle)
+  # emit eligible:0 rows that must not inflate the sample count past
+  # PP_RETRY_SLO_MIN_SAMPLES. Rows lacking the field count as eligible.
+  # R6: read line-oriented via `jq -R fromjson?` so one torn JSONL line
+  # skips one row instead of erroring the whole count out.
   local _count
   _count=$(cat "${_file}.1" "$_file" 2>/dev/null \
+    | jq -R 'fromjson?' \
     | jq -s --argjson cutoff "$_cutoff" '
-        [ .[] | select((.ts | fromdateiso8601? // 0) >= $cutoff) ] | length
+        [ .[]
+          | select((.ts | fromdateiso8601? // 0) >= $cutoff)
+          | select((.eligible // 1) != 0)
+        ] | length
       ' 2>/dev/null)
   case "$_count" in ''|*[!0-9]*) return 0 ;; esac
   [ "$_count" -ge "$_min_samples" ] || return 0

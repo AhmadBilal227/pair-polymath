@@ -1043,6 +1043,11 @@ GROUND
           _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         fi
 
+        # R1: mark that this cycle did real analyst work. Only cycles with
+        # _pp_analyst_ran=1 are SLO-eligible — skipped cycles (budget
+        # exhausted / idle / no grounding / no llm) emit eligible:0 KPI rows
+        # that must not dilute the rolling p95 or the min-samples gate.
+        _pp_analyst_ran=1
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"
@@ -1539,6 +1544,15 @@ $critique_input"
       # "success" unless can_run never fired (no analyst ran) → "failure".
       _pp_kpi_outcome="success"
       [ "${can_run:-0}" -eq 1 ] || _pp_kpi_outcome="failure"
+      # R1: eligible — 1 ONLY when this cycle did a real analyst fan-out
+      # (_pp_analyst_ran is set just before the fan-out loop, inside the
+      # `grounded && llm available` block). Skipped cycles (budget exhausted,
+      # idle, no grounding, no llm) emit eligible:0 so their retry_usd:0 rows
+      # are excluded from the SLO p95 + min-samples math (still emitted for
+      # cost accounting). pp_kpi_compute_p95 + pp_rollback_check_and_engage
+      # both filter select(.eligible != 0).
+      _pp_kpi_eligible=0
+      [ "${_pp_analyst_ran:-0}" = "1" ] && _pp_kpi_eligible=1
       # slo_breach: is the rollback flag currently active? (cheap check.)
       _pp_kpi_slo_breach=0
       pp_rollback_is_active 2>/dev/null && _pp_kpi_slo_breach=1
@@ -1555,13 +1569,14 @@ $critique_input"
         --argjson retry_acceptance_rate "${_pp_kpi_accept_rate:-0}" \
         --argjson verdict_total_drops "${_pp_kpi_drops:-0}" \
         --arg cycle_outcome "${_pp_kpi_outcome:-success}" \
+        --argjson eligible "${_pp_kpi_eligible:-0}" \
         --argjson slo_breach "${_pp_kpi_slo_breach:-0}" \
         '{ts:$ts, session:$session, cost_usd:$cost_usd, retry_count:$retry_count,
           retry_usd:$retry_usd, inv_count:$inv_count, picked_count:$picked_count,
           phase:$phase, phase_source:$phase_source,
           retry_acceptance_rate:$retry_acceptance_rate,
           verdict_total_drops:$verdict_total_drops, cycle_outcome:$cycle_outcome,
-          slo_breach:$slo_breach}' 2>/dev/null || printf '')
+          eligible:$eligible, slo_breach:$slo_breach}' 2>/dev/null || printf '')
       [ -n "$_pp_kpi_blob" ] && pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
 
       # === B2 (v0.5.1): auto-rollback SLO check =============================

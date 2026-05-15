@@ -439,10 +439,20 @@ _pp_rotate_jsonl() {
     # older than ~60s no live writer holds it, so force-remove and retry.
     if [ "$_attempts" -eq 10 ]; then
       local _lock_age=0 _lock_mtime=0
-      case "${_PP_STAT_FLAVOR:-gnu}" in
-        bsd) _lock_mtime=$(stat -f %m "$_lock" 2>/dev/null || echo 0) ;;
-        *)   _lock_mtime=$(stat -c %Y "$_lock" 2>/dev/null || echo 0) ;;
+      case "${_PP_STAT_FLAVOR:-}" in
+        bsd) _lock_mtime=$(stat -f %m "$_lock" 2>/dev/null) ;;
+        gnu) _lock_mtime=$(stat -c %Y "$_lock" 2>/dev/null) ;;
+        *)
+          # Same probe-order rationale as hooks/session-end.sh: BSD
+          # `stat -f` on GNU Linux exits 0 with garbage (mount-point
+          # string), so try GNU first + validate numeric, fall back
+          # to BSD only if GNU produced nothing usable.
+          _lock_mtime=$(stat -c %Y "$_lock" 2>/dev/null)
+          case "$_lock_mtime" in ''|*[!0-9]*) _lock_mtime="" ;; esac
+          [ -z "$_lock_mtime" ] && _lock_mtime=$(stat -f %m "$_lock" 2>/dev/null)
+          ;;
       esac
+      case "$_lock_mtime" in ''|*[!0-9]*) _lock_mtime=0 ;; esac
       _lock_age=$(( $(date +%s 2>/dev/null || echo 0) - _lock_mtime ))
       if [ "$_lock_age" -gt 60 ]; then
         rm -rf "$_lock" 2>/dev/null || true

@@ -41,13 +41,24 @@ mkdir -p "$(dirname "$_pending_file")" 2>/dev/null || exit 0
 _pp_stat_mtime() {
   local _path="${1:-}"
   [ -f "$_path" ] || { printf '0'; return; }
+  local _m=""
   case "${_PP_STAT_FLAVOR:-}" in
-    bsd) stat -f %m "$_path" 2>/dev/null || printf '0' ;;
-    gnu) stat -c %Y "$_path" 2>/dev/null || printf '0' ;;
-    *)   stat -f %m "$_path" 2>/dev/null \
-         || stat -c %Y "$_path" 2>/dev/null \
-         || printf '0' ;;
+    bsd) _m=$(stat -f %m "$_path" 2>/dev/null) ;;
+    gnu) _m=$(stat -c %Y "$_path" 2>/dev/null) ;;
+    *)
+      # Probe order matters: BSD `stat -f` on GNU Linux is `--file-system`
+      # which exits 0 with garbage (mount-point string) → silently masks
+      # the GNU branch. Try GNU first and require numeric output before
+      # accepting; fall back to BSD only if GNU returns nothing usable.
+      _m=$(stat -c %Y "$_path" 2>/dev/null)
+      case "$_m" in ''|*[!0-9]*) _m="" ;; esac
+      if [ -z "$_m" ]; then
+        _m=$(stat -f %m "$_path" 2>/dev/null)
+      fi
+      ;;
   esac
+  case "$_m" in ''|*[!0-9]*) _m="0" ;; esac
+  printf '%s' "$_m"
 }
 
 # Walk this session's injected-hash files

@@ -397,7 +397,38 @@ USAGE
         printf '  Shadow:         %s\n' "${PP_RETRY_ROUTER_SHADOW:-0}"
         printf '  Canary %%:       %s\n' "${PP_RETRY_ROUTER_CANARY_PCT:-0}"
         if pp_rollback_is_active; then
+          # R12 (v0.5.1 Round-2): when rollback is active, surface the
+          # information an operator needs to decide what to do — the
+          # engage timestamp, current escalation tier, when the backoff
+          # expires, and a concrete next-action hint. Read directly from
+          # the state files; fail-quiet if a field is missing.
+          # Use the lib's path helpers (already sourced via lib/auto-rollback.sh)
+          # so we don't drift from the canonical PP_STATE_DIR default
+          # ($HOME/.claude/pair-polymath) or the filenames.
+          _rb_state=$(_pp_rollback_state_file)
+          _rb_flag=$(_pp_rollback_flag_file)
+          _rb_engage_ts=""
+          _rb_tier="?"
+          if [ -f "$_rb_state" ]; then
+            _rb_engage_ts=$(jq -r '.last_engage_ts // ""' "$_rb_state" 2>/dev/null)
+            _rb_tier=$(jq -r '.disable_count // "?"' "$_rb_state" 2>/dev/null)
+          fi
+          _rb_expires=""
+          if [ -f "$_rb_flag" ]; then
+            _rb_expires_epoch=$(head -1 "$_rb_flag" 2>/dev/null | tr -d ' ')
+            case "$_rb_expires_epoch" in
+              ''|*[!0-9]*) ;;
+              *) _rb_expires=$(date -u -r "$_rb_expires_epoch" \
+                   +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                   || date -u -d "@$_rb_expires_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) ;;
+            esac
+          fi
           printf '  Rollback:       ACTIVE\n'
+          [ -n "$_rb_engage_ts" ] && printf '    Engaged at:   %s\n' "$_rb_engage_ts"
+          [ -n "$_rb_expires" ]   && printf '    Backoff until: %s\n' "$_rb_expires"
+          printf '    Tier:         %s (disable_count)\n' "$_rb_tier"
+          printf '    Next action:  polymath kpi  (investigate)\n'
+          printf '                  polymath retry-router clear-flag  (when safe)\n'
         else
           printf '  Rollback:       not active\n'
         fi
@@ -408,16 +439,83 @@ USAGE
         printf 'Rollback flag cleared.\n'
         ;;
       shadow-summary)
+        # R14 (v0.5.1 Round-2): give the operator a go/no-go signal, not
+        # just drop-reason counts. The shadow log row now carries
+        # est_cost_baseline + est_cost_shadow; sum them into a projected
+        # savings number and recommend whether to advance to canary.
+        # Threshold default 20% (PP_RETRY_CANARY_GO_PCT).
+        shift  # drop "shadow-summary"
+        _ss_json=0
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --json) _ss_json=1; shift ;;
+            *) shift ;;
+          esac
+        done
         _shadow="${PP_CACHE_DIR:-$HOME/.claude/cache}/retry-router-shadow.jsonl"
         if [ ! -f "$_shadow" ]; then
           printf 'No shadow data yet. Enable with PP_RETRY_ROUTER_SHADOW=1.\n'
           exit 0
         fi
-        jq -s '
-          sort_by(.drop_reason_class)
-          | group_by(.drop_reason_class)
-          | map({class: .[0].drop_reason_class, count: length})
-        ' "$_shadow"
+        # By-class counts (legacy view, preserved for compatibility).
+        _ss_classes=$(jq -R 'fromjson?' "$_shadow" 2>/dev/null \
+          | jq -s '
+              sort_by(.drop_reason_class)
+              | group_by(.drop_reason_class)
+              | map({class: .[0].drop_reason_class, count: length})
+            ' 2>/dev/null)
+        # Projected savings rollup. Rows lacking the new cost fields
+        # (legacy / pre-R14) contribute 0 to both sums — they show up in
+        # counts but don't poison the projection.
+        _ss_proj=$(jq -R 'fromjson?' "$_shadow" 2>/dev/null \
+          | jq -s '
+              (map(.est_cost_baseline // 0) | add // 0) as $b
+              | (map(.est_cost_shadow   // 0) | add // 0) as $s
+              | (length) as $n
+              | ((map(select(.est_cost_baseline != null)) | length)) as $with_cost
+              | { rows: $n,
+                  rows_with_cost: $with_cost,
+                  est_baseline_usd: $b,
+                  est_shadow_usd:   $s,
+                  projected_savings_usd: ($b - $s),
+                  projected_savings_pct:
+                    (if $b > 0 then ((($b - $s) / $b) * 100) else 0 end) }
+            ' 2>/dev/null)
+        _ss_go_pct="${PP_RETRY_CANARY_GO_PCT:-20}"
+        case "$_ss_go_pct" in ''|*[!0-9]*) _ss_go_pct=20 ;; esac
+        _ss_pct=$(printf '%s' "$_ss_proj" | jq -r '.projected_savings_pct // 0' 2>/dev/null)
+        _ss_rows_with_cost=$(printf '%s' "$_ss_proj" | jq -r '.rows_with_cost // 0' 2>/dev/null)
+        # Recommendation: need at least 20 cost-bearing rows AND pct >= threshold.
+        _ss_rec="keep collecting shadow data"
+        if [ "${_ss_rows_with_cost:-0}" -ge 20 ] \
+           && LC_ALL=C awk -v p="$_ss_pct" -v t="$_ss_go_pct" \
+              'BEGIN { exit !(p+0 >= t+0) }' 2>/dev/null; then
+          _ss_rec="enable canary"
+        fi
+        if [ "$_ss_json" = "1" ]; then
+          printf '%s' "$_ss_proj" | jq --argjson classes "${_ss_classes:-[]}" \
+            --arg rec "$_ss_rec" --argjson go_pct "$_ss_go_pct" \
+            '. + {by_class: $classes, recommendation: $rec, go_threshold_pct: $go_pct}'
+        else
+          printf '\nShadow-mode rollup\n'
+          printf '  Rows total:          %s\n' \
+            "$(printf '%s' "$_ss_proj" | jq -r '.rows // 0')"
+          printf '  Rows with cost data: %s\n' "${_ss_rows_with_cost:-0}"
+          printf '  Est baseline spend:  $%s\n' \
+            "$(printf '%s' "$_ss_proj" | jq -r '.est_baseline_usd // 0 | tostring' \
+                | awk '{ printf "%.6f", $1 }')"
+          printf '  Est shadow spend:    $%s\n' \
+            "$(printf '%s' "$_ss_proj" | jq -r '.est_shadow_usd // 0 | tostring' \
+                | awk '{ printf "%.6f", $1 }')"
+          printf '  Projected savings:   $%s (%.2f%%)\n' \
+            "$(printf '%s' "$_ss_proj" | jq -r '.projected_savings_usd // 0 | tostring' \
+                | awk '{ printf "%.6f", $1 }')" "${_ss_pct:-0}"
+          printf '  By-class counts:\n'
+          printf '%s' "$_ss_classes" | jq -r '.[] | "    \(.class): \(.count)"' 2>/dev/null
+          printf '\n  → recommendation: %s\n' "$_ss_rec"
+          printf '    (threshold: ≥%s%% projected savings AND ≥20 cost-bearing rows)\n\n' \
+            "$_ss_go_pct"
+        fi
         ;;
       *)
         printf 'polymath retry-router: unknown subcommand %s\n' "$1" >&2

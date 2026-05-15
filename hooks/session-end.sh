@@ -29,9 +29,26 @@ PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 . "$PP_ROOT/lib/config.sh" 2>/dev/null || true
 
 _now=$(date +%s)
-_now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 _pending_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/oar-pending.jsonl"
 mkdir -p "$(dirname "$_pending_file")" 2>/dev/null || exit 0
+
+# R10 (v0.5.1 Round-2): inject_ts must reflect when the observation was
+# actually INJECTED, not SessionEnd time. The hash file is written at
+# injection time (hooks/inject-monitor-insight.sh), so its mtime is the
+# closest proxy available without adding a separate timestamp file.
+# Use _PP_STAT_FLAVOR if probed; otherwise fall back to BSD-style stat
+# (macOS default) then GNU-style.
+_pp_stat_mtime() {
+  local _path="${1:-}"
+  [ -f "$_path" ] || { printf '0'; return; }
+  case "${_PP_STAT_FLAVOR:-}" in
+    bsd) stat -f %m "$_path" 2>/dev/null || printf '0' ;;
+    gnu) stat -c %Y "$_path" 2>/dev/null || printf '0' ;;
+    *)   stat -f %m "$_path" 2>/dev/null \
+         || stat -c %Y "$_path" 2>/dev/null \
+         || printf '0' ;;
+  esac
+}
 
 # Walk this session's injected-hash files
 find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
@@ -46,12 +63,17 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
       PRODUCT_BIZ|STRATEGIC_FOUNDER) _window_s=604800 ;;
       *) _window_s=86400 ;;
     esac
-    _scan_at=$(( _now + _window_s ))
+    _inject_epoch=$(_pp_stat_mtime "$_f")
+    case "$_inject_epoch" in ''|*[!0-9]*|0) _inject_epoch="$_now" ;; esac
+    _inject_iso=$(date -u -r "$_inject_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$_inject_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u +%Y-%m-%dT%H:%M:%SZ)
+    _scan_at=$(( _inject_epoch + _window_s ))
     jq -nc \
       --arg sid "$_session_id" \
       --arg lens "$_lens" \
       --arg hash "$_hash" \
-      --arg inject_ts "$_now_iso" \
+      --arg inject_ts "$_inject_iso" \
       --argjson scan_at "$_scan_at" \
       '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, status: "pending"}' \
       >> "$_pending_file" 2>/dev/null || true

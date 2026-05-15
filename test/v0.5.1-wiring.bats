@@ -312,6 +312,8 @@ teardown() { rm -rf "$HOME"; }
 @test "I6: polymath retry-router shadow-summary group_by produces correct counts" {
   # jq 1.7+ sorts internally for group_by; this regression test guards that
   # assumption (the v0.5.0 Phase-3 round-2 review verification approach).
+  # R14 (Round-2): shadow-summary default is now human-readable; use --json
+  # for the structured rollup that exposes by-class counts.
   printf '%s\n' \
     '{"drop_reason_class":"vague"}' \
     '{"drop_reason_class":"citation_fail"}' \
@@ -319,13 +321,113 @@ teardown() { rm -rf "$HOME"; }
     '{"drop_reason_class":"citation_fail"}' \
     '{"drop_reason_class":"vague"}' \
     > "$PP_CACHE_DIR/retry-router-shadow.jsonl"
-  run bash "$PP_ROOT/bin/polymath" retry-router shadow-summary
+  run bash "$PP_ROOT/bin/polymath" retry-router shadow-summary --json
   [ "$status" -eq 0 ]
   # vague:3, citation_fail:2 — group_by must NOT miscount despite interleaving.
-  run bash -c "bash '$PP_ROOT/bin/polymath' retry-router shadow-summary \
-    | jq -e 'map(select(.class==\"vague\"))[0].count == 3
+  run bash -c "bash '$PP_ROOT/bin/polymath' retry-router shadow-summary --json \
+    | jq -e '.by_class | map(select(.class==\"vague\"))[0].count == 3
              and map(select(.class==\"citation_fail\"))[0].count == 2'"
   [ "$status" -eq 0 ]
+}
+
+# ========================================================
+# R14 — shadow-summary projected savings + recommendation
+# ========================================================
+
+@test "R14: shadow-summary projected savings sums cost fields" {
+  # 5 rows: baseline=0.020, shadow=0.004 each → sums 0.100 vs 0.020,
+  # projected savings 0.080 (80%). With only 5 rows (< 20-row floor)
+  # the recommendation must be "keep collecting", not "enable canary".
+  local _i
+  for _i in $(seq 1 5); do
+    printf '{"ts":"2026-05-14T00:00:00Z","drop_reason_class":"vague","est_cost_baseline":0.020,"est_cost_shadow":0.004}\n' \
+      >> "$PP_CACHE_DIR/retry-router-shadow.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" retry-router shadow-summary --json
+  [ "$status" -eq 0 ]
+  # est_baseline=0.100, est_shadow=0.020, pct=80, recommendation=keep collecting
+  printf '%s\n' "$output" | jq -e '
+    (.est_baseline_usd - 0.100 | fabs < 0.0001)
+    and (.est_shadow_usd - 0.020 | fabs < 0.0001)
+    and (.projected_savings_pct - 80 | fabs < 0.01)
+    and (.recommendation == "keep collecting shadow data")
+  '
+}
+
+@test "R14: shadow-summary recommends canary when both gates clear" {
+  # 25 rows above the 20% pct threshold AND above the 20-row floor.
+  local _i
+  for _i in $(seq 1 25); do
+    printf '{"ts":"2026-05-14T00:00:00Z","drop_reason_class":"vague","est_cost_baseline":0.020,"est_cost_shadow":0.004}\n' \
+      >> "$PP_CACHE_DIR/retry-router-shadow.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" retry-router shadow-summary --json
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e '.recommendation == "enable canary"'
+}
+
+@test "R14: shadow log row carries baseline_model + cost fields when SHADOW=1" {
+  # Integration: a real statusline cycle with SHADOW=1 should write a row
+  # that includes the new fields (without these, projected savings is 0).
+  printf 'PP_RETRY_ROUTER_SHADOW=1\nPP_RETRY_ROUTER_ENABLE=1\n' > "$PP_USER_ENV"
+  export PP_EVAL_MODE=1 PP_EXTERNAL_LLM=1
+  bash "$PP_ROOT/bin/statusline.sh" < "$PP_STDIN" >/dev/null 2>&1 || true
+  # Either the cycle wrote a shadow row (with new fields) or it didn't write
+  # one at all — the regression we guard is "row exists but is missing the
+  # new fields". Skip cleanly when no row landed (eval-mode statusline does
+  # not always trigger the drop→retry path).
+  [ -f "$PP_CACHE_DIR/retry-router-shadow.jsonl" ] || skip "no shadow row produced in eval-mode"
+  run jq -e 'has("baseline_model") and has("est_cost_baseline") and has("est_cost_shadow")' \
+    "$PP_CACHE_DIR/retry-router-shadow.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+# ========================================================
+# R10 — SessionEnd inject_ts reflects original injection time
+# ========================================================
+
+@test "R10: SessionEnd inject_ts reflects hash file mtime, not SessionEnd time" {
+  export PP_OAR_ENABLE=1
+  export PP_CACHE_DIR="$HOME/.claude/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  local _hash_file="$PP_CACHE_DIR/cc-monitor-injected-hash-sess-abc-ENGINEERING.txt"
+  printf 'deadbeef\n' > "$_hash_file"
+  # Set the hash file mtime to 1 hour ago. `touch -t` interprets the
+  # stamp in LOCAL time, so format the date without -u to avoid the
+  # timezone-offset skew.
+  local _past_epoch=$(( $(date +%s) - 3600 ))
+  touch -t "$(date -r "$_past_epoch" +%Y%m%d%H%M 2>/dev/null \
+              || date -d "@$_past_epoch" +%Y%m%d%H%M)" "$_hash_file"
+  # Run SessionEnd with this session id.
+  printf '{"session_id":"sess-abc"}' | bash "$PP_ROOT/hooks/session-end.sh"
+  [ -f "$PP_CACHE_DIR/oar-pending.jsonl" ]
+  # The inject_ts must reflect the hash file mtime (~1h ago), not NOW.
+  local _row_iso
+  _row_iso=$(jq -r '.inject_ts' "$PP_CACHE_DIR/oar-pending.jsonl")
+  local _row_epoch
+  _row_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_row_iso" +%s 2>/dev/null \
+    || date -u -d "$_row_iso" +%s 2>/dev/null \
+    || echo 0)
+  # Should be within 60s of _past_epoch, never close to NOW.
+  local _delta=$(( _row_epoch - _past_epoch ))
+  [ "$_delta" -lt 60 ] && [ "$_delta" -gt -60 ]
+}
+
+# ========================================================
+# R12 — retry-router status surfaces engage/expire/tier when active
+# ========================================================
+
+@test "R12: retry-router status surfaces engage/expire/tier when rollback active" {
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  pp_rollback_engage 24
+  run bash "$PP_ROOT/bin/polymath" retry-router status
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q 'Rollback:       ACTIVE'
+  printf '%s\n' "$output" | grep -q 'Engaged at:'
+  printf '%s\n' "$output" | grep -q 'Backoff until:'
+  printf '%s\n' "$output" | grep -q 'Tier:'
+  printf '%s\n' "$output" | grep -q 'Next action:'
+  printf '%s\n' "$output" | grep -q 'clear-flag'
 }
 
 # ========================================================

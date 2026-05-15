@@ -1326,7 +1326,14 @@ $critique_input"
                   # Shadow log — only when SHADOW=1 (the pp_retry_log_shadow
                   # function gates internally too, but we skip the jq subshell
                   # entirely when off to keep the no-op path cheap).
+                  # R14 (Round-2): include baseline_model + per-row cost
+                  # estimates so shadow-summary can project actual $ savings,
+                  # not just drop-reason counts. Without these the operator
+                  # has no go/no-go signal to advance shadow → canary.
                   if [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ]; then
+                    _baseline_model="${PP_RETRY_MODEL:-$PP_MODEL}"
+                    _est_baseline=$(pp_metrics_estimate_retry_usd "$_baseline_model" 2>/dev/null || printf '0')
+                    _est_shadow=$(pp_metrics_estimate_retry_usd "$_shadow_model" 2>/dev/null || printf '0')
                     pp_retry_log_shadow "$(jq -nc \
                       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                       --arg sid "$session_id" \
@@ -1334,8 +1341,11 @@ $critique_input"
                       --arg drc "$_retry_reason_class" \
                       --arg conf "$_retry_confidence" \
                       --arg shadow_model "$_shadow_model" \
+                      --arg baseline_model "$_baseline_model" \
+                      --argjson est_cost_baseline "$_est_baseline" \
+                      --argjson est_cost_shadow "$_est_shadow" \
                       --argjson canary_active "$_canary_active" \
-                      '{ts:$ts,session:$sid,lens:$lens,drop_reason_class:$drc,confidence:$conf,shadow_model:$shadow_model,canary_active:$canary_active}' 2>/dev/null)" 2>/dev/null || true
+                      '{ts:$ts,session:$sid,lens:$lens,drop_reason_class:$drc,confidence:$conf,shadow_model:$shadow_model,baseline_model:$baseline_model,est_cost_baseline:$est_cost_baseline,est_cost_shadow:$est_cost_shadow,canary_active:$canary_active}' 2>/dev/null)" 2>/dev/null || true
                   fi
 
                   # Behavior switch: canary active → shadow model (with hard-cap

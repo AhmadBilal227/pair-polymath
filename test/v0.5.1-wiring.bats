@@ -327,3 +327,64 @@ teardown() { rm -rf "$HOME"; }
              and map(select(.class==\"citation_fail\"))[0].count == 2'"
   [ "$status" -eq 0 ]
 }
+
+# ========================================================
+# R4 — pp_rollback_clear resets disable_count (next engage back to first tier)
+# ========================================================
+
+@test "R4: pp_rollback_clear resets backoff to first-tier (24h)" {
+  . "$PP_ROOT/lib/auto-rollback.sh"
+  export PP_RETRY_BACKOFF_INITIAL_HOURS=24
+  export PP_RETRY_BACKOFF_REPEAT_HOURS=72
+  export PP_RETRY_BACKOFF_MAX_HOURS=168
+  # Baseline — never engaged, next backoff = initial tier.
+  run pp_rollback_next_backoff_hours
+  [ "$output" = "24" ]
+  # One engage → disable_count=1 → next backoff = repeat tier (72h).
+  pp_rollback_engage 24
+  run pp_rollback_next_backoff_hours
+  [ "$output" = "72" ]
+  # Two engages → disable_count=2 → next backoff = max tier (168h).
+  pp_rollback_engage 72
+  run pp_rollback_next_backoff_hours
+  [ "$output" = "168" ]
+  # Clear must reset state (R4), NOT just remove the active flag — next
+  # engage should be back at the initial tier.
+  pp_rollback_clear
+  run pp_rollback_next_backoff_hours
+  [ "$output" = "24" ]
+}
+
+# ========================================================
+# R7 — polymath kpi --window validates argument
+# ========================================================
+
+@test "R7: polymath kpi --window with non-numeric argument exits 2 with hint" {
+  run bash "$PP_ROOT/bin/polymath" kpi --window garbage
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -q 'positive integer'
+}
+
+@test "R7: polymath kpi --window 0 exits 2" {
+  run bash "$PP_ROOT/bin/polymath" kpi --window 0
+  [ "$status" -eq 2 ]
+}
+
+@test "R7: polymath kpi --window 7 accepted" {
+  printf '{"ts":"%s","session":"s","retry_usd":0.001,"eligible":1}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$PP_CACHE_DIR/kpi-cycle.jsonl"
+  run bash "$PP_ROOT/bin/polymath" kpi --window 7
+  [ "$status" -eq 0 ]
+}
+
+# ========================================================
+# R8 — polymath help lists kpi + retry-router subcommands
+# ========================================================
+
+@test "R8: polymath help mentions kpi and retry-router subcommands" {
+  run bash "$PP_ROOT/bin/polymath" help
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q 'polymath kpi'
+  printf '%s\n' "$output" | grep -q 'polymath retry-router'
+}

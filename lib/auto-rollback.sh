@@ -53,6 +53,12 @@ pp_rollback_engage() {
 
 pp_rollback_clear() {
   rm -f "$(_pp_rollback_flag_file)" 2>/dev/null || true
+  # R4: also reset disable_count state so the next engage starts at the
+  # first-tier backoff (24h), not the escalated tier. Without this,
+  # `polymath retry-router clear-flag` would only clear the active flag
+  # while leaving the escalation history intact — contradicting the CLI
+  # promise that clearing resets the backoff.
+  rm -f "$(_pp_rollback_state_file)" 2>/dev/null || true
 }
 
 pp_rollback_next_backoff_hours() {

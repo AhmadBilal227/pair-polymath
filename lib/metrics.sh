@@ -431,6 +431,24 @@ _pp_rotate_jsonl() {
   local _attempts=0
   while ! mkdir "$_lock" 2>/dev/null; do
     _attempts=$((_attempts + 1))
+    # R5: stale-lock recovery. A SIGKILL between mkdir and rmdir would
+    # otherwise orphan the lock dir permanently → every future cycle
+    # spins the retry loop, gives up, and the JSONL grows unbounded past
+    # the rotation cap. After 10 spins (~200ms), check the lock dir's
+    # age via the project's pre-probed stat flavor (bin/polymath:29); if
+    # older than ~60s no live writer holds it, so force-remove and retry.
+    if [ "$_attempts" -eq 10 ]; then
+      local _lock_age=0 _lock_mtime=0
+      case "${_PP_STAT_FLAVOR:-gnu}" in
+        bsd) _lock_mtime=$(stat -f %m "$_lock" 2>/dev/null || echo 0) ;;
+        *)   _lock_mtime=$(stat -c %Y "$_lock" 2>/dev/null || echo 0) ;;
+      esac
+      _lock_age=$(( $(date +%s 2>/dev/null || echo 0) - _lock_mtime ))
+      if [ "$_lock_age" -gt 60 ]; then
+        rm -rf "$_lock" 2>/dev/null || true
+        continue
+      fi
+    fi
     [ "$_attempts" -gt 100 ] && return 0
     sleep 0.02 2>/dev/null || sleep 1
   done

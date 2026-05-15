@@ -437,6 +437,16 @@ USAGE
         --window)
           [ -n "${2:-}" ] || { printf 'polymath kpi: --window requires a value (e.g. 7d)\n' >&2; exit 2; }
           _kpi_window="${2%d}"
+          # R7: validate window is a positive integer. Without this, a
+          # typo like `--window garbage` strips no `d`, then the later
+          # `$(( _kpi_window * 24 ))` raises an unbound-variable bash
+          # error and silently exits 0.
+          case "$_kpi_window" in
+            ''|*[!0-9]*|0)
+              printf 'polymath kpi: --window must be a positive integer number of days (e.g. 7 or 7d)\n' >&2
+              exit 2
+              ;;
+          esac
           shift 2
           ;;
         --json) _kpi_json=1; shift ;;
@@ -1366,7 +1376,10 @@ Usage:
   polymath disable     Disable the LLM cycle / status-only mode (PP_EXTERNAL_LLM=0)
   polymath logs        Tail recent lens observations (-n, --lens, --follow)
   polymath cost        Show estimated USD spend (--since, --by-lens, --json)
+  polymath kpi         Rolling cost / retry / phase summary (--window Nd, --json)
+  polymath retry-router   v0.5.1 cost-router state (status / shadow-summary / clear-flag)
   polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
+  polymath dismiss     Suppression rules (add / list / show / disable / enable / ack)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)
   polymath self-test   End-to-end LLM probe (~\$0.0001 per run)
   polymath version     Print version

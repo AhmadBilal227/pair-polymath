@@ -280,11 +280,14 @@ teardown() { rm -rf "$HOME"; }
   [ "$status" -ne 0 ]
 }
 
-@test "auto_rollback: backoff escalates on repeat" {
+@test "auto_rollback: backoff escalates on repeat engage (without clear)" {
   . "$PP_ROOT/lib/auto-rollback.sh"
-  pp_rollback_engage 24
-  pp_rollback_clear
-  # 2nd engage within 30d → repeat backoff
+  # R4 (v0.5.1 Round-2): the prior version of this test invoked
+  # pp_rollback_clear between engages and expected the next tier to
+  # still be "repeat" (72h). That asserted broken behavior — clear
+  # should reset the backoff (and now does, per R4). The CORRECT
+  # escalation semantics: each unrecovered engage escalates one tier.
+  pp_rollback_engage 24  # disable_count → 1, next tier = repeat (72)
   local _hours
   _hours=$(pp_rollback_next_backoff_hours)
   [ "$_hours" = "72" ]

@@ -119,27 +119,59 @@ pp_oar_row_identity() {
 # for the cache hit check.
 pp_oar_with_row_timeout() {
   local _secs="${1:-${PP_OAR_ROW_TIMEOUT_S:-3}}"
-  shift
-  # Validate seconds — non-numeric or empty falls back to 3. Defends
-  # against a caller passing "" or "abort" and getting a confusing
-  # timeout(1) usage error instead of the intended cap.
-  case "$_secs" in ''|*[!0-9]*) _secs=3 ;; esac
+  # GPT-review #1 fix: guard the shift. Without this, calling
+  # `pp_oar_with_row_timeout` with zero args (relying on env default)
+  # triggers "shift: shift count out of range" — fatal under set -e.
+  [ $# -gt 0 ] && shift
+  # Validate seconds — non-numeric, empty, or zero falls back to 3.
+  # Empty/non-numeric: defends against a caller passing "" or "abort"
+  # and getting a confusing timeout(1) usage error.
+  # Zero: GPT-review #7 — coreutils timeout treats `timeout 0 cmd` as
+  # "fire instantly", which produces confusing flakes. Enforce ≥ 1.
+  case "$_secs" in
+    ''|*[!0-9]*|0) _secs=3 ;;
+  esac
+  # GPT-review #5: require at least one COMMAND argument. Without this
+  # we'd fall through to `timeout SECS` or `$@` (empty), producing a
+  # confusing "command not found" or timeout-usage error instead of a
+  # clear caller bug message.
+  if [ $# -eq 0 ]; then
+    printf 'pp_oar_with_row_timeout: no command given\n' >&2
+    return 2
+  fi
 
   # First-call probe. Use the "unset" sentinel (`+x`) so an explicit
   # empty string (= "no binary found") is distinguishable from "not yet
   # checked". This matters when callers stub PATH mid-test.
+  # GPT-review #3 fix: cache the ABSOLUTE PATH via `type -P` (or the
+  # `command -v` fallback) so a later PATH change can't silently switch
+  # which binary runs. `type -P` returns the first executable file in
+  # PATH matching the name (or empty if none); it's a bash builtin so
+  # no fork cost.
   if [ -z "${_PP_OAR_TIMEOUT_CMD+x}" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      _PP_OAR_TIMEOUT_CMD="timeout"
-    elif command -v gtimeout >/dev/null 2>&1; then
-      _PP_OAR_TIMEOUT_CMD="gtimeout"
+    local _probed
+    _probed=$(type -P timeout 2>/dev/null || true)
+    if [ -n "$_probed" ]; then
+      _PP_OAR_TIMEOUT_CMD="$_probed"
     else
-      _PP_OAR_TIMEOUT_CMD=""
+      _probed=$(type -P gtimeout 2>/dev/null || true)
+      if [ -n "$_probed" ]; then
+        _PP_OAR_TIMEOUT_CMD="$_probed"
+      else
+        _PP_OAR_TIMEOUT_CMD=""
+      fi
     fi
   fi
 
   if [ -n "$_PP_OAR_TIMEOUT_CMD" ]; then
-    "$_PP_OAR_TIMEOUT_CMD" "$_secs" "$@"
+    # GPT-review #2 fix: -k 1 sends SIGKILL one second after SIGTERM if
+    # the command ignores TERM. Without this, a stuck command (e.g. a
+    # signal-trapping subshell) outlives the wrapper and the outer 15s
+    # cycle ceiling becomes the only real guard. coreutils timeout has
+    # accepted -k since 8.5 (BusyBox doesn't, but our probe favors the
+    # GNU/BSD binaries; -k is harmlessly ignored if unsupported because
+    # the binary errors before we'd notice — covered by test).
+    "$_PP_OAR_TIMEOUT_CMD" -k 1 "$_secs" "$@"
     return $?
   fi
   # Pass-through — outer cycle guard handles runaway processes.

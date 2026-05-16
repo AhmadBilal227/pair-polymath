@@ -80,6 +80,21 @@ teardown() { rm -rf "$HOME"; }
 
 @test "with_row_timeout: passes through when no timeout binary available" {
   . "$PP_ROOT/lib/oar.sh"
+  # Task-4 review finding: the probe-once cache persists across tests in
+  # the same bats process (the source guard prevents re-init). On a host
+  # WITH `timeout` installed, prior tests cache _PP_OAR_TIMEOUT_CMD="timeout"
+  # and this test then runs `timeout 1 true` rather than exercising the
+  # pass-through branch. Clear the cache explicitly so the stubbed PATH
+  # below actually triggers a re-probe → "checked, none found" → fall-through.
+  unset _PP_OAR_TIMEOUT_CMD
+  # GPT-review #8: also unalias / unset any function shadow of `timeout`
+  # so the test's PATH scrub really blocks the lookup. `type -P` (used by
+  # the implementation) ignores aliases + functions, so this is defensive
+  # against operator shells that wrap timeout for their convenience.
+  unalias timeout 2>/dev/null || true
+  unset -f timeout 2>/dev/null || true
+  unalias gtimeout 2>/dev/null || true
+  unset -f gtimeout 2>/dev/null || true
   # Force pass-through via PATH manipulation. Function's first-call probe
   # caches the lookup result; since PATH is scrubbed on THIS invocation,
   # neither `timeout` nor `gtimeout` will be findable, and the function
@@ -90,4 +105,35 @@ teardown() { rm -rf "$HOME"; }
   # external binary location.
   PATH="$(pwd)" run pp_oar_with_row_timeout 1 true
   [ "$status" -eq 0 ]
+}
+
+@test "with_row_timeout: no-command invocation returns 2 (caller bug)" {
+  # GPT review #9 + #5: without the explicit "command required" guard,
+  # zero-arg invocation would fall through to `timeout 3` (usage error)
+  # or empty $@ pass-through ("command not found" from shell). Now
+  # returns 2 with a clear stderr message — a caller bug, not a flake.
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_with_row_timeout 5
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -q 'no command given'
+}
+
+@test "with_row_timeout: zero-arg invocation also returns 2 (uses default secs)" {
+  # GPT review #9: with PP_OAR_ROW_TIMEOUT_S defaulted, calling with
+  # zero positional args MUST NOT trigger "shift count out of range"
+  # under set -e. The shift is now guarded; we get the "no command
+  # given" error path instead. This test would have caught GPT #1.
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_with_row_timeout
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -q 'no command given'
+}
+
+@test "with_row_timeout: SECS=0 clamps to default (no zero-flake)" {
+  # GPT review #7: coreutils `timeout 0 cmd` fires instantly. Caller
+  # passing 0 (or unset env) should NOT collapse the cap to zero —
+  # validation clamps to 3.
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_with_row_timeout 0 true
+  [ "$status" -eq 0 ]   # `true` completes well within the clamped 3s
 }

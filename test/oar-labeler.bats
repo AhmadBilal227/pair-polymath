@@ -330,3 +330,188 @@ _pp_pushed_back_setup_rules_file() {
   run pp_oar_pushed_back "deadbeef1234" 0 9999999999
   [ "$status" -eq 1 ]   # unparseable ts → null → filtered out → no match
 }
+
+# ----------------------------------------------------------------------------
+# pp_oar_acted_for_path — spec §B step 1 (per-cited-path git log --follow,
+# per-commit git show -M50% --unified=0, symbol_exact OR line_proximity).
+#
+# Plan addendum I1: lib/oar.sh sources lib/grounding.sh internally for
+# pp_safe_git_pathspec + pp_contain_path. Tests must NOT pre-source
+# grounding.sh — runtime-gap regression guard.
+#
+# Plan addendum risk #1: while-read in a pipeline runs the RHS in a subshell;
+# `return 0` only exits that subshell. The implementation uses the temp-file
+# flag pattern (mktemp in PP_CACHE_DIR with mkdir -p fallback).
+# ----------------------------------------------------------------------------
+
+@test "acted_for_path: symbol_exact match in diff returns 0 + commit SHA + label" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  # Write a file that mentions "doSomething" symbol, commit it.
+  printf '%s\n' 'doSomething();' > "$_repo/foo.ts"
+  ( cd "$_repo" && git add foo.ts \
+    && GIT_AUTHOR_DATE="2026-05-15T00:30:00Z" GIT_COMMITTER_DATE="2026-05-15T00:30:00Z" \
+       git -c user.email=t@t -c user.name=t commit -q -m "add foo" )
+  # Cite the symbol; assert acted.
+  local out rc
+  out=$(pp_oar_acted_for_path "$_repo" "foo.ts" "doSomething" "" \
+        1778803200 1778806800) ; rc=$?
+  [ "$rc" -eq 0 ]
+  # Format: "<40-hex SHA>|<label>"
+  printf '%s' "$out" | grep -qE '^[0-9a-f]{40}\|symbol_exact$'
+  rm -rf "$_repo"
+}
+
+@test "acted_for_path: line_proximity (within ±20) returns line_proximity label" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  # 25 blank lines then a real edit at line 26.
+  ( cd "$_repo" && yes '' | head -25 > big.ts \
+    && printf 'edited\n' >> big.ts \
+    && git add big.ts \
+    && GIT_AUTHOR_DATE="2026-05-15T00:30:00Z" GIT_COMMITTER_DATE="2026-05-15T00:30:00Z" \
+       git -c user.email=t@t -c user.name=t commit -q -m "edit big.ts" )
+  # Cite line range [20-30] — overlaps the edit at line 26 within ±20.
+  local out
+  out=$(pp_oar_acted_for_path "$_repo" "big.ts" "" "20-30" \
+        1778803200 1778806800)
+  printf '%s' "$out" | grep -qE '^[0-9a-f]{40}\|line_proximity$'
+  rm -rf "$_repo"
+}
+
+@test "acted_for_path: file-touch alone (no symbol/line match) → returns 1" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  printf '%s\n' 'unrelated content' > "$_repo/foo.ts"
+  ( cd "$_repo" && git add foo.ts \
+    && GIT_AUTHOR_DATE="2026-05-15T00:30:00Z" GIT_COMMITTER_DATE="2026-05-15T00:30:00Z" \
+       git -c user.email=t@t -c user.name=t commit -q -m "touch" )
+  run pp_oar_acted_for_path "$_repo" "foo.ts" "veryLongSymbolThatIsNotInDiff" "" \
+        1778803200 1778806800
+  [ "$status" -ne 0 ]
+  rm -rf "$_repo"
+}
+
+@test "acted_for_path: short symbol (<4 chars) is filtered out (no false positive)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  printf 'aaa\n' > "$_repo/foo.ts"
+  ( cd "$_repo" && git add foo.ts \
+    && GIT_AUTHOR_DATE="2026-05-15T00:30:00Z" GIT_COMMITTER_DATE="2026-05-15T00:30:00Z" \
+       git -c user.email=t@t -c user.name=t commit -q -m c )
+  # 3-char symbol — must be filtered (min length 4). No line range either.
+  run pp_oar_acted_for_path "$_repo" "foo.ts" "aaa" "" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+  rm -rf "$_repo"
+}
+
+@test "acted_for_path: rename-tracked via --follow + -M50%" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  printf 'identicalContent\nlineTwo\nlineThree\n' > "$_repo/old.ts"
+  ( cd "$_repo" && git add old.ts \
+    && GIT_AUTHOR_DATE="2026-05-15T00:30:00Z" GIT_COMMITTER_DATE="2026-05-15T00:30:00Z" \
+       git -c user.email=t@t -c user.name=t commit -q -m initial )
+  # Rename + small edit (preserve > 50% content for -M50%).
+  ( cd "$_repo" && git mv old.ts new.ts \
+    && printf 'identicalContent\nlineTwo\nlineThree\naddedRenameSymbol\n' > new.ts \
+    && git add new.ts \
+    && GIT_AUTHOR_DATE="2026-05-15T00:35:00Z" GIT_COMMITTER_DATE="2026-05-15T00:35:00Z" \
+       git -c user.email=t@t -c user.name=t commit -q -m rename )
+  # Query the NEW path; --follow should walk back through the rename and
+  # the rename-commit's diff should contain the added symbol.
+  local out
+  out=$(pp_oar_acted_for_path "$_repo" "new.ts" "addedRenameSymbol" "" \
+        1778803200 1778806800)
+  printf '%s' "$out" | grep -qE '^[0-9a-f]{40}\|symbol_exact$'
+  rm -rf "$_repo"
+}
+
+@test "acted_for_path: commit OUTSIDE time window does NOT match" {
+  # Plan brief: commit-outside-time-window (NOT acted). The --since/--until
+  # bounds must exclude commits stamped before inject_ts or after scan_at.
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  printf '%s\n' 'doSomething();' > "$_repo/foo.ts"
+  # Commit stamped 2026-05-14T00:30:00Z (1778675400) — BEFORE the window
+  # [1778803200, 1778806800] = 2026-05-15T00:00:00Z..2026-05-15T01:00:00Z.
+  ( cd "$_repo" && git add foo.ts \
+    && GIT_AUTHOR_DATE="2026-05-14T00:30:00Z" GIT_COMMITTER_DATE="2026-05-14T00:30:00Z" \
+       git -c user.email=t@t -c user.name=t commit -q -m "early commit" )
+  run pp_oar_acted_for_path "$_repo" "foo.ts" "doSomething" "" \
+        1778803200 1778806800
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  rm -rf "$_repo"
+}
+
+@test "acted_for_path: no matching commits → returns 1" {
+  # Plan brief: no-matching-commits (NOT acted). Empty git log result.
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  # No commits touching foo.ts at all. Query in a future window.
+  run pp_oar_acted_for_path "$_repo" "foo.ts" "doSomething" "" \
+        1778803200 1778806800
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  rm -rf "$_repo"
+}
+
+@test "acted_for_path: rejects empty path / empty repo (caller bug guard)" {
+  # Defensive: empty PATH or empty REPO_DIR → return 1. Containment is the
+  # caller's responsibility, but the function still validates its own
+  # inputs to fail fast.
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_acted_for_path "" "foo.ts" "doSomething" "" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+  run pp_oar_acted_for_path "/tmp" "" "doSomething" "" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+}
+
+@test "acted_for_path: rejects non-repo directory" {
+  # Plan brief: containment + git availability. We assert that a directory
+  # without .git/ short-circuits to rc=1 (no git operations attempted).
+  . "$PP_ROOT/lib/oar.sh"
+  local _nongit
+  _nongit=$(mktemp -d)
+  printf 'doSomething();' > "$_nongit/foo.ts"
+  run pp_oar_acted_for_path "$_nongit" "foo.ts" "doSomething" "" \
+        1778803200 1778806800
+  [ "$status" -ne 0 ]
+  rm -rf "$_nongit"
+}
+
+@test "acted_for_path: option-injection guard on path (leading dash → return 1)" {
+  # pp_safe_git_pathspec rejects leading-`-` paths to prevent option injection.
+  # This is the helper's contract; the function inherits it.
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q && git -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m base ) || skip "git unavailable"
+  run pp_oar_acted_for_path "$_repo" "-rf" "doSomething" "" \
+        1778803200 1778806800
+  [ "$status" -ne 0 ]
+  rm -rf "$_repo"
+}

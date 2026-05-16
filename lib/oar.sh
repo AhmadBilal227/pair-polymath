@@ -38,6 +38,19 @@ if [ -n "${_PP_OAR_SOURCED:-}" ]; then
 fi
 _PP_OAR_SOURCED=1
 
+# Plan addendum I1 (2026-05-16): pp_oar_acted_for_path and other oar.sh
+# helpers depend on pp_safe_git_pathspec + pp_contain_path from
+# lib/grounding.sh. The tests in test/oar-labeler.bats intentionally do NOT
+# pre-source grounding.sh — this guards against a runtime gap where
+# bin/statusline.sh's source order would mask the dependency. Source it
+# here once, idempotently: pp_contain_path becoming redefined is harmless
+# (same definition every time).
+if ! type pp_safe_git_pathspec >/dev/null 2>&1 \
+   || ! type pp_contain_path >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}/lib/grounding.sh" 2>/dev/null || true
+fi
+
 # Defaults — match spec §E.
 : "${PP_OAR_REF_TAU:=0.5}"
 : "${PP_OAR_LABEL_PER_CYCLE_CAP:=5}"
@@ -263,4 +276,200 @@ pp_oar_pushed_back() {
   ' "$_rules" 2>/dev/null | head -1)
   [ -n "$_id" ] || return 1
   printf '%s' "$_id"
+}
+
+# pp_oar_acted_for_path REPO_DIR PATH SYMBOL LINE_RANGE INJECT_EPOCH SCAN_AT_EPOCH
+# Spec §B step 1: per cited path, git log --follow → for each touching commit
+# git show -M50% --unified=0 → inspect diff for cited symbol token OR a +/-
+# line within ±20 of cited LINE_RANGE.
+#
+# Returns 0 + prints "<full-40-hex-SHA>|<label>" on positive match.
+# <label> is "symbol_exact" (preferred) or "line_proximity".
+# Returns 1 with empty stdout otherwise.
+#
+# SYMBOL: empty → skip symbol check. Space-separated tokens supported
+#         (forward-compat with multi-symbol citations). Per-token filter:
+#         length >= 4 + not in lib/citations.sh::_PP_CITATION_STOPWORDS.
+# LINE_RANGE: empty → skip line check. Format "N-M" or "N".
+#
+# Plan addendum risk #1 (2026-05-16) — subshell return semantics:
+# A `printf | while read` pipeline runs the RHS in a subshell under bash 3.2;
+# `return 0` inside the body only exits the subshell, leaving the outer
+# function's exit status at 1. This implementation uses a TEMP-FILE FLAG:
+# on first positive match, write "<sha>|<label>" to a flag file and break.
+# After the outer loop, if the flag is non-empty, cat + return 0.
+#
+# Containment: pp_contain_path is the caller's responsibility for cwd
+# membership (Task 8 wires it via pp_oar_label_pending). This function
+# enforces only basic shape: non-empty REPO_DIR with .git/, non-empty PATH
+# accepted by pp_safe_git_pathspec.
+pp_oar_acted_for_path() {
+  local _repo="${1:-}" _path="${2:-}" _symbol="${3:-}" _lrange="${4:-}"
+  local _inj="${5:-0}" _scan="${6:-0}"
+  [ -z "$_repo" ] && return 1
+  [ -z "$_path" ] && return 1
+  [ -d "$_repo/.git" ] || return 1
+  # Defensive epoch validation — non-numeric silently failing would mask
+  # a caller bug. Matches pp_oar_pushed_back's input validation.
+  case "$_inj" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_scan" in ''|*[!0-9]*) return 1 ;; esac
+
+  # Guard against the grounding-sourcing race: if pp_safe_git_pathspec is
+  # still missing at call time (e.g. caller bypassed our source guard at
+  # the top of the file), refuse rather than fall through to a raw path.
+  if ! type pp_safe_git_pathspec >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local _pathspec
+  _pathspec=$(pp_safe_git_pathspec "$_path") || return 1
+
+  # Filter symbol tokens: length >= 4, not in citation stopwords. The
+  # plan's tests pass a single token; we tokenize on whitespace for
+  # forward-compat with comma- or newline-separated citation lists.
+  # _PP_CITATION_STOPWORDS is a space-padded string for case-pattern match.
+  local _sym_tokens=""
+  if [ -n "$_symbol" ]; then
+    # Lazy source for stopwords — same idempotent guard pattern as above.
+    if [ -z "${_PP_CITATION_STOPWORDS:-}" ]; then
+      # shellcheck disable=SC1091
+      . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}/lib/citations.sh" 2>/dev/null || true
+    fi
+    local _tok
+    # Iterate tokens via parameter expansion + IFS=' \t\n' word splitting.
+    # Avoids `read -a` (bash 4+).
+    for _tok in $_symbol; do
+      [ "${#_tok}" -lt 4 ] && continue
+      case " ${_PP_CITATION_STOPWORDS:-} " in
+        *" $_tok "*) continue ;;
+      esac
+      if [ -z "$_sym_tokens" ]; then
+        _sym_tokens="$_tok"
+      else
+        _sym_tokens="$_sym_tokens $_tok"
+      fi
+    done
+  fi
+
+  # Parse LINE_RANGE "N-M" or "N".
+  local _l_lo=0 _l_hi=0
+  if [ -n "$_lrange" ]; then
+    case "$_lrange" in
+      *-*) _l_lo="${_lrange%-*}"; _l_hi="${_lrange#*-}" ;;
+      *)   _l_lo="$_lrange"; _l_hi="$_lrange" ;;
+    esac
+    case "$_l_lo" in ''|*[!0-9]*) _l_lo=0 ;; esac
+    case "$_l_hi" in ''|*[!0-9]*) _l_hi=0 ;; esac
+  fi
+
+  # Short-circuit: if neither check is active, no work possible. Returning
+  # 1 here avoids spending git on guaranteed-no-match cases.
+  if [ -z "$_sym_tokens" ] && [ "$_l_lo" -eq 0 ]; then
+    return 1
+  fi
+
+  # git log --follow is undefined behavior on multi-path; we already accept
+  # exactly one path, so this is safe.
+  local _commits
+  _commits=$(cd "$_repo" 2>/dev/null && git log \
+    --since="@${_inj}" --until="@${_scan}" --follow \
+    --pretty=format:%H -- "$_pathspec" 2>/dev/null)
+  [ -z "$_commits" ] && return 1
+
+  # Plan addendum M2: mktemp in PP_CACHE_DIR assumes the dir exists. Ensure
+  # it does. Fall back to a system-tmp mktemp on dir-missing.
+  local _cache_dir="${PP_CACHE_DIR:-$HOME/.claude/cache}"
+  mkdir -p "$_cache_dir" 2>/dev/null || true
+  local _flag
+  if [ -d "$_cache_dir" ] && [ -w "$_cache_dir" ]; then
+    _flag=$(mktemp "${_cache_dir}/.oar-flag.XXXXXX" 2>/dev/null) || \
+      _flag=$(mktemp -t pp-oar-flag 2>/dev/null) || return 1
+  else
+    _flag=$(mktemp -t pp-oar-flag 2>/dev/null) || return 1
+  fi
+
+  # Outer loop: walk commits. while-read runs in a subshell, but here the
+  # subshell can WRITE TO the flag file (file mutations cross subshell
+  # boundaries cleanly under Unix semantics). On first match we break;
+  # post-loop we detect the flag's contents.
+  printf '%s\n' "$_commits" | while IFS= read -r _commit; do
+    [ -z "$_commit" ] && continue
+    local _diff
+    _diff=$(cd "$_repo" 2>/dev/null && git show -M50% --unified=0 \
+            "$_commit" -- "$_pathspec" 2>/dev/null)
+    [ -z "$_diff" ] && continue
+
+    # --- Symbol check ---
+    # Inspect ONLY added/removed content lines (`^[+-]` excluding the
+    # `+++`/`---` file headers that git show emits). grep -wF gives word-
+    # boundary fixed-string match — portable across GNU/BSD/BusyBox.
+    if [ -n "$_sym_tokens" ]; then
+      local _diff_changes
+      _diff_changes=$(printf '%s\n' "$_diff" \
+        | LC_ALL=C grep -E '^[+-][^+-]' 2>/dev/null || true)
+      if [ -n "$_diff_changes" ]; then
+        local _tok2 _hit=0
+        for _tok2 in $_sym_tokens; do
+          if printf '%s\n' "$_diff_changes" \
+             | LC_ALL=C grep -wF -- "$_tok2" >/dev/null 2>&1; then
+            _hit=1
+            break
+          fi
+        done
+        if [ "$_hit" = "1" ]; then
+          printf '%s|symbol_exact' "$_commit" > "$_flag"
+          break
+        fi
+      fi
+    fi
+
+    # --- Line proximity check ---
+    # @@ hunk header form: `@@ -OLD_START[,OLD_COUNT] +NEW_START[,NEW_COUNT] @@ ...`
+    # With --unified=0, missing `,N` means N=1. We care about the +NEW range.
+    if [ "$_l_lo" -gt 0 ]; then
+      local _hunks
+      _hunks=$(printf '%s\n' "$_diff" \
+        | LC_ALL=C grep -E '^@@ ' 2>/dev/null || true)
+      if [ -n "$_hunks" ]; then
+        local _h _h_start _h_count _h_end _lo_ext _hi_ext _proximity_hit=0
+        # Iterate hunk headers via while-read in a subshell. The flag-file
+        # write pattern works at any nesting depth — the inner subshell's
+        # write is visible to the outer reader after the loop ends.
+        while IFS= read -r _h; do
+          [ -z "$_h" ] && continue
+          _h_start=$(printf '%s' "$_h" \
+            | LC_ALL=C sed -nE 's/^@@ -[0-9,]+ \+([0-9]+)(,[0-9]+)? @@.*/\1/p')
+          _h_count=$(printf '%s' "$_h" \
+            | LC_ALL=C sed -nE 's/^@@ -[0-9,]+ \+[0-9]+,([0-9]+) @@.*/\1/p')
+          case "$_h_start" in ''|*[!0-9]*) continue ;; esac
+          case "$_h_count" in ''|*[!0-9]*) _h_count=1 ;; esac
+          _h_end=$(( _h_start + _h_count - 1 ))
+          _lo_ext=$(( _l_lo - 20 ))
+          _hi_ext=$(( _l_hi + 20 ))
+          [ "$_lo_ext" -lt 1 ] && _lo_ext=1
+          # Overlap test: [h_start, h_end] intersects [lo_ext, hi_ext]
+          if [ "$_h_end" -ge "$_lo_ext" ] && [ "$_h_start" -le "$_hi_ext" ]; then
+            printf '%s|line_proximity' "$_commit" > "$_flag"
+            _proximity_hit=1
+            break
+          fi
+        done <<EOF
+$_hunks
+EOF
+        # Inner while-read with `<<EOF` runs in the SAME subshell as the
+        # outer while-read (no pipeline), so $_proximity_hit IS visible.
+        if [ "$_proximity_hit" = "1" ]; then
+          break
+        fi
+      fi
+    fi
+  done
+
+  if [ -s "$_flag" ]; then
+    cat "$_flag"
+    rm -f "$_flag"
+    return 0
+  fi
+  rm -f "$_flag"
+  return 1
 }

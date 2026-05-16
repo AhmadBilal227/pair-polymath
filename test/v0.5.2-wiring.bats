@@ -81,8 +81,11 @@ teardown() { rm -rf "$HOME"; }
   # The cycle backgrounds the labeler — give it a beat to land. Inside
   # eval mode the outer cycle waits, but the OAR subshell is fire-and-forget
   # so we poll briefly.
+  # GPT-review #8: extend poll window from 5s to 17s (matches the labeler's
+  # 15s watchdog + 1s SIGTERM-grace + 1s buffer). 5s could flake on slow CI
+  # hosts where the labeler takes longer than expected.
   local _i
-  for _i in 1 2 3 4 5; do
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ] && break
     [ -f "$PP_CACHE_DIR/oar-stuck.jsonl" ] && break
     sleep 1

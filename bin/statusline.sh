@@ -1430,39 +1430,58 @@ $critique_input"
         # so the cycle path stays byte-identical to v0.5.1.
         #
         # Telemetry never blocks the cycle: all stderr/stdout suppressed,
-        # `|| true` on every failure path, and the OUTER subshell is NOT
-        # waited on synchronously — the cycle itself is already inside a
-        # background `& wait` group (see line ~1610), and the labeler's
-        # inner watchdog self-bounds via the kill-after-15s pattern.
-        if [ "${PP_OAR_ENABLE:-0}" = "1" ] \
-           && command -v pp_oar_label_pending >/dev/null 2>&1; then
-          (
-            pp_oar_label_pending >/dev/null 2>&1 &
-            _pp_oar_pid=$!
-            _pp_oar_waited=0
-            # Poll every 1s for up to 15s. kill -0 = "still running?".
-            while [ "$_pp_oar_waited" -lt 15 ]; do
-              if ! kill -0 "$_pp_oar_pid" 2>/dev/null; then
-                # Process finished — reap to avoid a zombie. Wait returns
-                # immediately when the child is already dead.
+        # `|| true` on every failure path. The inner watchdog (15s SIGTERM-then-
+        # SIGKILL polling) is the SOLE bound on labeler lifetime; in production
+        # (PP_EVAL_MODE=0) the outer cycle fires this subshell and forgets,
+        # while PP_EVAL_MODE=1 (tests) does sync-wait on the outer cycle.
+        #
+        # Task-11 review (GPT #2/#3/#6): direct-pid kill leaves grandchildren
+        # (git commands inside pp_oar_with_row_timeout) orphaned on watchdog
+        # firing. Bash 3.2 process-group manipulation requires `set -m` + the
+        # parent's job-control state, which can perturb the outer statusline
+        # subshell's semantics. Accepted leak window is bounded by the
+        # labeler's INNER per-row 3s timeout — orphaned git child lives ≤3s
+        # before its own per-row timeout fires. Documented limit.
+        #
+        # GPT-review #5: when PP_OAR_ENABLE=1 but the function failed to
+        # source (sourcing block at file top has `2>/dev/null || true`),
+        # log a one-shot warning so the operator knows OAR is silently
+        # disabled rather than running.
+        if [ "${PP_OAR_ENABLE:-0}" = "1" ]; then
+          if ! command -v pp_oar_label_pending >/dev/null 2>&1; then
+            printf 'pair-polymath: PP_OAR_ENABLE=1 but pp_oar_label_pending unavailable (lib/oar.sh sourcing failed?)\n' >&2 2>/dev/null
+          else
+            (
+              pp_oar_label_pending >/dev/null 2>&1 &
+              _pp_oar_pid=$!
+              _pp_oar_waited=0
+              # Poll every 1s for up to 15s. kill -0 = "still running?".
+              while [ "$_pp_oar_waited" -lt 15 ]; do
+                if ! kill -0 "$_pp_oar_pid" 2>/dev/null; then
+                  # Process finished — reap to avoid a zombie. Wait returns
+                  # immediately when the child is already dead.
+                  wait "$_pp_oar_pid" 2>/dev/null || true
+                  break
+                fi
+                sleep 1
+                _pp_oar_waited=$((_pp_oar_waited + 1))
+              done
+              # GPT-review #4: SIGTERM-then-SIGKILL grace, not immediate kill.
+              # SIGTERM lets the labeler release the mkdir-lock + finish any
+              # atomic mv-rewrite of oar-pending.jsonl. 1s grace, then SIGKILL.
+              if kill -0 "$_pp_oar_pid" 2>/dev/null; then
+                kill -TERM "$_pp_oar_pid" >/dev/null 2>&1 || true
+                sleep 1
+                if kill -0 "$_pp_oar_pid" 2>/dev/null; then
+                  kill -9 "$_pp_oar_pid" >/dev/null 2>&1 || true
+                fi
+                # Reap so the parent shell doesn't leak a defunct entry.
                 wait "$_pp_oar_pid" 2>/dev/null || true
-                break
               fi
-              sleep 1
-              _pp_oar_waited=$((_pp_oar_waited + 1))
-            done
-            # If still alive after 15s, escalate to SIGKILL. Bash 3.2 portable:
-            # avoid `&>/dev/null` (bash 4+), redirect both streams explicitly.
-            if kill -0 "$_pp_oar_pid" 2>/dev/null; then
-              kill -9 "$_pp_oar_pid" >/dev/null 2>&1 || true
-              # Reap the killed process so the parent shell doesn't leak
-              # a defunct entry into the eval-mode wait queue.
-              wait "$_pp_oar_pid" 2>/dev/null || true
-            fi
-          ) >/dev/null 2>&1 &
-          # Fire-and-forget: do NOT wait for this subshell synchronously.
-          # The outer cycle's `& wait` (or PP_EVAL_MODE sync wait) handles
-          # reaping; the inner watchdog ensures bounded lifetime.
+            ) >/dev/null 2>&1 &
+            # Fire-and-forget; the inner watchdog above is what guarantees
+            # bounded lifetime. Outer cycle does NOT synchronously wait.
+          fi
         fi
 
         # === Memory subsystem post-cycle ===

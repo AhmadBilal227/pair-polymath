@@ -70,12 +70,19 @@ setup() {
   . "$PP_ROOT/lib/grounding.sh"
   local _tmp
   _tmp=$(mktemp -d) || skip "mktemp failed"
+  # GPT review #9: ensure the temp dir is removed even when assertions
+  # fail mid-test. bats teardown_per_test is per-file, not per-test, so
+  # we use a local cleanup variable + trap analogue (since bats EXIT
+  # trap is reserved by the runner).
+  TEST_TMP="$_tmp"
   ( cd "$_tmp" && git init -q && touch 'star*.txt' real.txt \
     && git add -A && git -c user.email=t@t -c user.name=t commit -q -m init ) \
     || { rm -rf "$_tmp"; skip "git init/commit failed in temp dir"; }
   local pathspec
   pathspec=$(pp_safe_git_pathspec "star*.txt")
   ( cd "$_tmp" && git log --pretty=%H -- "$pathspec" >/dev/null 2>&1 )
-  [ "$?" -eq 0 ]
-  rm -rf "$_tmp"
+  local _rc="$?"
+  rm -rf "$_tmp"   # always cleanup before assertion (bats short-circuits)
+  unset TEST_TMP
+  [ "$_rc" -eq 0 ]
 }

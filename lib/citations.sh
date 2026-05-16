@@ -169,6 +169,16 @@ pp_extract_citations() {
 # the oar-pending row at SessionEnd time, so the v0.5.2 OAR labeler is a
 # pure function of the pending row (no filesystem coupling on rotated
 # observation files).
+#
+# MUTUALLY EXCLUSIVE WITH pp_extract_citations: both write the same
+# $_pp_valid_paths / $_pp_valid_symbols globals. If you need both call
+# results in the same process, save one before calling the other:
+#   pp_extract_citations "$grounded_blob"
+#   _saved_paths="$_pp_valid_paths"; _saved_syms="$_pp_valid_symbols"
+#   pp_extract_citations_from_text "$body"
+#   # now $_pp_valid_* are the per-text results
+# (Currently safe because the two callers — statusline.sh + session-end.sh —
+# run in different processes. Documented for future maintainers.)
 pp_extract_citations_from_text() {
   _pp_valid_paths=""
   _pp_valid_symbols=""

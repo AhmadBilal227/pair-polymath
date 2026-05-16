@@ -31,6 +31,13 @@ PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # cited_symbols in the pending row (C2 fix path A from plan addendum).
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/citations.sh" 2>/dev/null || true
+# GPT review #2: surface silent degradation if the citations lib failed to
+# source. Without this, missing helper → empty cite arrays silently → OAR
+# labeler's referenced-detection rate gets biased toward zero exactly the
+# way the pre-mortem warned about.
+if ! command -v pp_extract_citations_from_text >/dev/null 2>&1; then
+  printf 'pair-polymath session-end: pp_extract_citations_from_text unavailable; cite arrays will be empty\n' >&2
+fi
 
 _now=$(date +%s)
 _pending_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/oar-pending.jsonl"
@@ -91,6 +98,16 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
     # per-lens cache that statusline.sh writes alongside the hash file —
     # filename pattern matches the v0.5.1 convention used at
     # bin/statusline.sh:1064 (PP_CACHE_LENS).
+    #
+    # GPT review #5: defense-in-depth sanitize the lens id before
+    # constructing a filesystem path. The lens registry already validates
+    # IDs at load time, but a path containing `/` or whitespace here would
+    # escape PP_CACHE_DIR and hit the wrong file. Reject those lenses
+    # (skip the row entirely; better than mis-reading a sibling lens's
+    # observation).
+    case "$_lens" in
+      *[/[:space:]]*) continue ;;
+    esac
     _obs_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/cc-monitor-${_session_id}-${_lens}.txt"
     _body=""
     if [ -f "$_obs_file" ]; then
@@ -98,11 +115,16 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
       # Body = everything after the first `|||` separator on line 1. We use
       # `head -1` then `cut`/`sed` to extract — `awk -F '\\|\\|\\|'` would
       # work too, but cut is simpler since we only want the tail half.
-      _line=$(head -1 "$_obs_file" 2>/dev/null)
+      #
+      # GPT review #12 + code-reviewer minor #3: strip CRLF. If a user
+      # manually edited the obs file in a Windows editor, head -1 keeps
+      # the \r which then lands in body + gets stored in pending row JSON.
+      _line=$(head -1 "$_obs_file" 2>/dev/null | tr -d '\r')
       case "$_line" in
         *'|||'*)
-          # Strip everything through the first `|||` (greediest single
-          # match) so a body that itself contains `|||` is preserved.
+          # Strip the shortest prefix through the first `|||` (parameter
+          # expansion `#` is shortest-match-from-left, NOT greedy — that's
+          # `##`). So a body that itself contains `|||` is preserved.
           _body="${_line#*|||}"
           ;;
         *)
@@ -123,7 +145,13 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
       | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null \
       || printf '[]')
 
-    jq -nc \
+    # GPT review #1: surface jq write failures. The pre-mortem flagged
+    # silent data loss as the most likely v0.5.2 failure mode. Without
+    # this, a permission/disk/quota error → pending row silently dropped
+    # → operator sees fewer labeled rows than expected → can't tell if
+    # the metric is broken or just nobody acted. Telemetry stays
+    # fail-open (hook returns 0), but the operator gets a stderr signal.
+    if ! jq -nc \
       --arg sid "$_session_id" \
       --arg lens "$_lens" \
       --arg hash "$_hash" \
@@ -133,7 +161,10 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
       --argjson cited_paths "$_cited_paths_json" \
       --argjson cited_symbols "$_cited_symbols_json" \
       '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: $body, cited_paths: $cited_paths, cited_symbols: $cited_symbols}' \
-      >> "$_pending_file" 2>/dev/null || true
+      >> "$_pending_file" 2>/dev/null; then
+      printf 'pair-polymath session-end: failed to append pending row for lens=%s (check %s permissions)\n' \
+        "$_lens" "$_pending_file" >&2
+    fi
   done
 
 exit 0

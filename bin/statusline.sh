@@ -56,6 +56,15 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/metrics.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/citations.sh"
+# v0.5.2 — OAR labeler + hallucination shadow post-check. Both libs are
+# function-only at top level (no side effects beyond an _PP_*_SOURCED guard),
+# so unconditional sourcing preserves byte-identity when their gating flags
+# (PP_OAR_ENABLE, PP_HALLUC_GATE_ENABLE) are 0. The `|| true` is a defensive
+# guard for legacy installs where the file hasn't been bundled yet.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/oar.sh" 2>/dev/null || true
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/hallucination.sh" 2>/dev/null || true
 # v0.5 Phase 3: dismiss subsystem (project-constraints rendering for analyst
 # prompts). Sourced unconditionally — the render call short-circuits cheaply
 # when no rules exist (single stat + write of empty cache).
@@ -1410,6 +1419,51 @@ $critique_input"
         # Bound history sizes after all writes finish
         tail -50 "$HIST_FILE_SESSION" > "${HIST_FILE_SESSION}.tmp" 2>/dev/null && mv "${HIST_FILE_SESSION}.tmp" "$HIST_FILE_SESSION"
         tail -100 "$HIST_FILE_PROJECT" > "${HIST_FILE_PROJECT}.tmp" 2>/dev/null && mv "${HIST_FILE_PROJECT}.tmp" "$HIST_FILE_PROJECT"
+
+        # === v0.5.2: OAR labeler — inline, gated, bounded ===================
+        # Wire pp_oar_label_pending into the cycle. The driver is FIFO + per-row
+        # 3s timeout + per-cycle cap of 5, so worst-case is 15s. We additionally
+        # enforce a 15s ceiling here as a watchdog: a runaway git on a mono-repo
+        # can NEVER block the next cycle. Spec §G invariant 2.
+        #
+        # Gating: PP_OAR_ENABLE=1 (default 0). When 0, this is a strict no-op
+        # so the cycle path stays byte-identical to v0.5.1.
+        #
+        # Telemetry never blocks the cycle: all stderr/stdout suppressed,
+        # `|| true` on every failure path, and the OUTER subshell is NOT
+        # waited on synchronously — the cycle itself is already inside a
+        # background `& wait` group (see line ~1610), and the labeler's
+        # inner watchdog self-bounds via the kill-after-15s pattern.
+        if [ "${PP_OAR_ENABLE:-0}" = "1" ] \
+           && command -v pp_oar_label_pending >/dev/null 2>&1; then
+          (
+            pp_oar_label_pending >/dev/null 2>&1 &
+            _pp_oar_pid=$!
+            _pp_oar_waited=0
+            # Poll every 1s for up to 15s. kill -0 = "still running?".
+            while [ "$_pp_oar_waited" -lt 15 ]; do
+              if ! kill -0 "$_pp_oar_pid" 2>/dev/null; then
+                # Process finished — reap to avoid a zombie. Wait returns
+                # immediately when the child is already dead.
+                wait "$_pp_oar_pid" 2>/dev/null || true
+                break
+              fi
+              sleep 1
+              _pp_oar_waited=$((_pp_oar_waited + 1))
+            done
+            # If still alive after 15s, escalate to SIGKILL. Bash 3.2 portable:
+            # avoid `&>/dev/null` (bash 4+), redirect both streams explicitly.
+            if kill -0 "$_pp_oar_pid" 2>/dev/null; then
+              kill -9 "$_pp_oar_pid" >/dev/null 2>&1 || true
+              # Reap the killed process so the parent shell doesn't leak
+              # a defunct entry into the eval-mode wait queue.
+              wait "$_pp_oar_pid" 2>/dev/null || true
+            fi
+          ) >/dev/null 2>&1 &
+          # Fire-and-forget: do NOT wait for this subshell synchronously.
+          # The outer cycle's `& wait` (or PP_EVAL_MODE sync wait) handles
+          # reaping; the inner watchdog ensures bounded lifetime.
+        fi
 
         # === Memory subsystem post-cycle ===
         # When enabled, persist this cycle's accepted observations to the

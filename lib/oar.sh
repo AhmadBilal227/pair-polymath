@@ -98,3 +98,50 @@ pp_oar_row_identity() {
     fi
   fi
 }
+
+# pp_oar_with_row_timeout SECS COMMAND [ARGS...]
+# Run COMMAND with a soft per-row time cap (default $PP_OAR_ROW_TIMEOUT_S=3).
+# Uses timeout (GNU coreutils) if present, else gtimeout (macOS via brew
+# coreutils), else passes through unbounded. Pass-through is acceptable
+# because the cycle has its own outer guard (statusline's `& wait` subshell
+# with 15s hard ceiling, see Task 11).
+#
+# Same fallback pattern as bin/statusline.sh:152 `run_llm`.
+# Exit code is the COMMAND's exit code (or 124 / 137 / 143 for the
+# timeout-binary-killed-it cases per GNU coreutils semantics).
+#
+# Probe-once optimization: `command -v` is cheap but the labeler may call
+# this 5+ times per cycle (per-cycle row cap) and the function may be
+# invoked from tight retry loops in future tasks. Cache the resolved
+# timeout binary path in _PP_OAR_TIMEOUT_CMD on first call. Empty string
+# means "checked, none available — pass through". Unset means "not yet
+# probed". This makes the second-and-later invocations branch-free except
+# for the cache hit check.
+pp_oar_with_row_timeout() {
+  local _secs="${1:-${PP_OAR_ROW_TIMEOUT_S:-3}}"
+  shift
+  # Validate seconds — non-numeric or empty falls back to 3. Defends
+  # against a caller passing "" or "abort" and getting a confusing
+  # timeout(1) usage error instead of the intended cap.
+  case "$_secs" in ''|*[!0-9]*) _secs=3 ;; esac
+
+  # First-call probe. Use the "unset" sentinel (`+x`) so an explicit
+  # empty string (= "no binary found") is distinguishable from "not yet
+  # checked". This matters when callers stub PATH mid-test.
+  if [ -z "${_PP_OAR_TIMEOUT_CMD+x}" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      _PP_OAR_TIMEOUT_CMD="timeout"
+    elif command -v gtimeout >/dev/null 2>&1; then
+      _PP_OAR_TIMEOUT_CMD="gtimeout"
+    else
+      _PP_OAR_TIMEOUT_CMD=""
+    fi
+  fi
+
+  if [ -n "$_PP_OAR_TIMEOUT_CMD" ]; then
+    "$_PP_OAR_TIMEOUT_CMD" "$_secs" "$@"
+    return $?
+  fi
+  # Pass-through — outer cycle guard handles runaway processes.
+  "$@"
+}

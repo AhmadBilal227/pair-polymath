@@ -60,3 +60,34 @@ teardown() { rm -rf "$HOME"; }
   [ "$base" != "$id_lens" ]
   [ "$base" != "$id_hash" ]
 }
+
+@test "with_row_timeout: returns command exit code when under cap" {
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_with_row_timeout 2 true
+  [ "$status" -eq 0 ]
+}
+
+@test "with_row_timeout: returns non-zero when command exceeds cap" {
+  . "$PP_ROOT/lib/oar.sh"
+  # Skip if neither timeout nor gtimeout is available (BusyBox/Alpine
+  # without coreutils): the function passes through, so the test is moot.
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    skip "no timeout binary on PATH"
+  fi
+  run pp_oar_with_row_timeout 1 sleep 3
+  [ "$status" -ne 0 ]
+}
+
+@test "with_row_timeout: passes through when no timeout binary available" {
+  . "$PP_ROOT/lib/oar.sh"
+  # Force pass-through via PATH manipulation. Function's first-call probe
+  # caches the lookup result; since PATH is scrubbed on THIS invocation,
+  # neither `timeout` nor `gtimeout` will be findable, and the function
+  # falls through to direct exec of the command. We use the bash builtin
+  # `true` (not /bin/true — macOS keeps it at /usr/bin/true, so the bare
+  # absolute path is non-portable). Builtins resolve before PATH lookup,
+  # so this exercises the pass-through branch without depending on any
+  # external binary location.
+  PATH="$(pwd)" run pp_oar_with_row_timeout 1 true
+  [ "$status" -eq 0 ]
+}

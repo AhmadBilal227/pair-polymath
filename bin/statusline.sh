@@ -1057,6 +1057,12 @@ GROUND
         # exhausted / idle / no grounding / no llm) emit eligible:0 KPI rows
         # that must not dilute the rolling p95 or the min-samples gate.
         _pp_analyst_ran=1
+        # Task-12 GPT-review #7: per-cycle counter reset.
+        # _pp_halluc_post_drops is incremented in the critique loop's PASS
+        # branch when PP_HALLUC_GATE_ENABLE=1 + post-check fails. Must reset
+        # at cycle start, else the KPI row (Task 13) reports cumulative,
+        # not per-cycle. Same pattern as _pp_concurrent_drops below.
+        _pp_halluc_post_drops=0
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"
@@ -1427,8 +1433,12 @@ $critique_input"
                     _pp_halluc_paths=$(printf '%s\n' "${_pp_valid_paths:-}")
                     _pp_halluc_syms=$(printf '%s\n' "${_pp_valid_symbols:-}")
                     _pp_halluc_body=$(head -1 "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt" 2>/dev/null)
+                    # GPT-review #2: silence BOTH stdout and stderr. The
+                    # verifier is contractually side-effect-free, but a
+                    # bug or shell-trace leak would otherwise corrupt
+                    # statusline STDOUT and violate byte-identity.
                     if ! pp_halluc_verify_citations "$cwd" "$_pp_halluc_body" \
-                           "$_pp_halluc_paths" "$_pp_halluc_syms" 2>/dev/null; then
+                           "$_pp_halluc_paths" "$_pp_halluc_syms" >/dev/null 2>&1; then
                       _pp_halluc_post_drops=$(( ${_pp_halluc_post_drops:-0} + 1 ))
                       if [ "${PP_HALLUC_GATE_ACTIVE:-0}" = "1" ]; then
                         # Flip verdict PASS → DROP. verdict_file is
@@ -1438,7 +1448,26 @@ $critique_input"
                         # be visible to downstream consumers (display
                         # reader + dashboard); v0.5.2 keeps this path
                         # OFF by default (active mode lands in v0.5.3).
-                        echo "lens${ci}: DROP (halluc_post_check)" > "$verdict_file"
+                        # Task-12 review S1: use ci_id (lens registry ID), not ci
+                        # (numeric loop index). Mixing them is the C3 footgun;
+                        # downstream verdict consumers key on registry ID.
+                        echo "lens${ci_id}: DROP (halluc_post_check)" > "$verdict_file"
+                        # GPT-review #1: also update the in-memory $verdict
+                        # so downstream logic (drop streak, retry-router
+                        # branch, KPI counters in this same cycle) sees
+                        # the flipped state. Without this, the file says
+                        # DROP but the cycle's $verdict still says PASS —
+                        # streak was already reset to 0 above, so the
+                        # next cycle reads inconsistent state.
+                        verdict="DROP"
+                        # Re-establish the drop-streak counter that the
+                        # PASS branch reset to 0. Increment from the
+                        # pre-PASS streak (which is what would have
+                        # happened if critique had returned DROP).
+                        # Not in a function — bare assignment (shellcheck SC2168).
+                        _streak_prev=$(cat "$streak_file" 2>/dev/null || echo 0)
+                        case "$_streak_prev" in ''|*[!0-9]*) _streak_prev=0 ;; esac
+                        echo $((_streak_prev + 1)) > "$streak_file"
                       fi
                     fi
                   fi

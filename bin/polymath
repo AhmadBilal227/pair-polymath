@@ -728,6 +728,145 @@ HELP
     fi
     ;;
 
+  oar-label)
+    # v0.5.2 (Task 15) — manual catchup labeler (spec §B + §D).
+    #
+    # Bypasses the inline per-cycle cap (PP_OAR_LABEL_PER_CYCLE_CAP=5) so an
+    # operator can drain a backlog without waiting for natural cycles. The
+    # per-row 3s timeout (PP_OAR_ROW_TIMEOUT_S) still applies — bounded work
+    # per row, no global timeout.
+    #
+    # --limit N is an additional defensive ceiling (env override OF the
+    # per-cycle cap via argument; takes precedence over PP_OAR_LABEL_PER_CYCLE_CAP
+    # in the env because we re-export it inside this case).
+    shift
+    _ol_all_due=0
+    _ol_limit=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --all-due) _ol_all_due=1; shift ;;
+        --limit)
+          [ -n "${2:-}" ] || { printf 'polymath oar-label: --limit requires a value\n' >&2; exit 2; }
+          # Strip a leading + (positive sign) but reject 0, non-numeric,
+          # and any string with a `-` (so `-5` fails the numeric class).
+          case "$2" in
+            ''|*[!0-9]*|0)
+              printf 'polymath oar-label: --limit must be a positive integer\n' >&2
+              exit 2
+              ;;
+          esac
+          _ol_limit="$2"
+          shift 2
+          ;;
+        -h|--help)
+          cat <<HELP
+polymath oar-label — Manually label pending OAR rows
+
+Usage:
+  polymath oar-label --all-due           Process all due rows now
+                                         (bypasses PP_OAR_LABEL_PER_CYCLE_CAP=5)
+  polymath oar-label --all-due --limit N Cap manual run at N rows
+                                         (positive integer)
+
+Per-row 3s timeout still applies (PP_OAR_ROW_TIMEOUT_S).
+
+Use after enabling PP_OAR_ENABLE=1 to drain a backlog from a
+long-running session, or before running 'polymath history' to make
+sure recent observations are reflected in the rollup.
+HELP
+          exit 0
+          ;;
+        *)
+          printf 'polymath oar-label: unknown flag %s\n' "$1" >&2
+          exit 2
+          ;;
+      esac
+    done
+    if [ "$_ol_all_due" != "1" ]; then
+      printf 'polymath oar-label: --all-due is required\n' >&2
+      printf '  Try: polymath oar-label --all-due [--limit N]\n' >&2
+      exit 2
+    fi
+
+    _ol_cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+    _ol_pending="${_ol_cache_dir}/oar-pending.jsonl"
+    _ol_labeled="${_ol_cache_dir}/oar-labeled.jsonl"
+    _ol_stuck="${_ol_cache_dir}/oar-stuck.jsonl"
+    mkdir -p "$_ol_cache_dir" 2>/dev/null || true
+
+    # Empty-state: no pending file OR pending file is zero-byte. Exit 0
+    # with a friendly hint rather than calling the driver (which would
+    # also return 0 silently).
+    if [ ! -s "$_ol_pending" ]; then
+      printf 'oar-label: no pending observations to process.\n'
+      printf '  Enable with: PP_OAR_ENABLE=1 in user.env, then run sessions.\n'
+      printf '  See current state: polymath history\n'
+      exit 0
+    fi
+
+    # Pre-snapshot counts so the summary line can report deltas accurately.
+    _ol_labeled_before=0
+    if [ -f "$_ol_labeled" ]; then
+      _ol_labeled_before=$(wc -l < "$_ol_labeled" 2>/dev/null | tr -d ' ')
+      case "$_ol_labeled_before" in ''|*[!0-9]*) _ol_labeled_before=0 ;; esac
+    fi
+    _ol_stuck_before=0
+    if [ -f "$_ol_stuck" ]; then
+      _ol_stuck_before=$(wc -l < "$_ol_stuck" 2>/dev/null | tr -d ' ')
+      case "$_ol_stuck_before" in ''|*[!0-9]*) _ol_stuck_before=0 ;; esac
+    fi
+
+    # Cap selection: --limit takes precedence over any inherited env value.
+    # Without --limit we set a very large ceiling — still bounded in practice
+    # by pending file size and the per-row 3s timeout (at 3s/row, draining
+    # 999999 rows would take ~35 days, so "unbounded" is hyperbole, but the
+    # only realistic stop conditions are pending-empty or operator Ctrl-C).
+    if [ -n "$_ol_limit" ]; then
+      PP_OAR_LABEL_PER_CYCLE_CAP="$_ol_limit"
+    else
+      PP_OAR_LABEL_PER_CYCLE_CAP=999999
+    fi
+    export PP_OAR_LABEL_PER_CYCLE_CAP
+
+    # Export PP_CACHE_DIR so the labeler resolves the same paths we just
+    # measured (defends against CLAUDE_DIR vs PP_CACHE_DIR drift).
+    PP_CACHE_DIR="$_ol_cache_dir"
+    export PP_CACHE_DIR
+
+    # shellcheck source=lib/oar.sh disable=SC1091
+    . "$PP_ROOT/lib/oar.sh"
+
+    pp_oar_label_pending || true
+
+    # Post-snapshot counts.
+    _ol_labeled_after=0
+    if [ -f "$_ol_labeled" ]; then
+      _ol_labeled_after=$(wc -l < "$_ol_labeled" 2>/dev/null | tr -d ' ')
+      case "$_ol_labeled_after" in ''|*[!0-9]*) _ol_labeled_after=0 ;; esac
+    fi
+    _ol_stuck_after=0
+    if [ -f "$_ol_stuck" ]; then
+      _ol_stuck_after=$(wc -l < "$_ol_stuck" 2>/dev/null | tr -d ' ')
+      case "$_ol_stuck_after" in ''|*[!0-9]*) _ol_stuck_after=0 ;; esac
+    fi
+    _ol_pending_after=0
+    if [ -f "$_ol_pending" ]; then
+      _ol_pending_after=$(wc -l < "$_ol_pending" 2>/dev/null | tr -d ' ')
+      case "$_ol_pending_after" in ''|*[!0-9]*) _ol_pending_after=0 ;; esac
+    fi
+
+    _ol_labeled_delta=$(( _ol_labeled_after - _ol_labeled_before ))
+    _ol_stuck_delta=$(( _ol_stuck_after - _ol_stuck_before ))
+    # Defensive clamps: deltas should never be negative (labeled.jsonl is
+    # append-only), but a concurrent rotation could in principle reduce
+    # the count. Clamp to >=0 so the summary stays sensible.
+    [ "$_ol_labeled_delta" -lt 0 ] && _ol_labeled_delta=0
+    [ "$_ol_stuck_delta" -lt 0 ] && _ol_stuck_delta=0
+
+    printf 'Labeled %s rows; %s stuck; %s still pending.\n' \
+      "$_ol_labeled_delta" "$_ol_stuck_delta" "$_ol_pending_after"
+    ;;
+
   kpi)
     # v0.5.1 — rolling cost / retry / phase summary from kpi-cycle.jsonl.
     # Default window 7 days. --window Nd to override. --json for machine output.

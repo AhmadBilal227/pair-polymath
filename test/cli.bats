@@ -1400,3 +1400,125 @@ SHIM
   [ "$status" -eq 0 ]
   printf '%s' "$output" | grep -qE 'polymath history'
 }
+
+# === v0.5.2 Task 15: polymath oar-label --all-due ============================
+# Manual catchup subcommand. Bypasses PP_OAR_LABEL_PER_CYCLE_CAP (5) but still
+# honors the per-row 3s timeout. Spec §B + §D.
+
+@test "polymath oar-label --all-due: empty-state when no pending file" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE 'no pending|0 pending|No pending'
+}
+
+@test "polymath oar-label --all-due: drains pending past per-cycle cap" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base )
+  : > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    jq -nc --arg sid "s-$_i" '{session_id:$sid,lens:"ENGINEERING",
+        hash:("h-" + $sid),inject_ts:"2026-05-15T00:00:00Z",
+        scan_at_epoch:1,attempts:0,status:"pending",
+        cited_paths:[],cited_symbols:[]}' \
+      >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  done
+  CLAUDE_PROJECT_DIR="$_repo" \
+    run bash "$PP_ROOT/bin/polymath" oar-label --all-due
+  [ "$status" -eq 0 ]
+  local _n
+  _n=$(wc -l < "$CLAUDE_DIR/cache/oar-labeled.jsonl" | tr -d ' ')
+  [ "$_n" -eq 10 ]
+  rm -rf "$_repo"
+}
+
+@test "polymath oar-label --all-due --limit 3: respects --limit" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base )
+  : > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  local _i
+  for _i in 1 2 3 4 5; do
+    jq -nc --arg sid "s-l$_i" '{session_id:$sid,lens:"ENG",
+        hash:("h-" + $sid),inject_ts:"2026-05-15T00:00:00Z",
+        scan_at_epoch:1,attempts:0,status:"pending",
+        cited_paths:[],cited_symbols:[]}' \
+      >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  done
+  CLAUDE_PROJECT_DIR="$_repo" \
+    run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit 3
+  [ "$status" -eq 0 ]
+  local _n
+  _n=$(wc -l < "$CLAUDE_DIR/cache/oar-labeled.jsonl" | tr -d ' ')
+  [ "$_n" -eq 3 ]
+  rm -rf "$_repo"
+}
+
+@test "polymath oar-label --all-due: prints summary with labeled/stuck/pending counts" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base )
+  : > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  jq -nc '{session_id:"summ1",lens:"ENGINEERING",hash:"hs1",
+       inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:1,
+       attempts:0,status:"pending",cited_paths:[],cited_symbols:[]}' \
+    >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" \
+    run bash "$PP_ROOT/bin/polymath" oar-label --all-due
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE 'Labeled [0-9]+ row'
+  printf '%s' "$output" | grep -qE 'stuck'
+  printf '%s' "$output" | grep -qE 'pending'
+  rm -rf "$_repo"
+}
+
+@test "polymath oar-label --limit: rejects 0" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive integer"* ]]
+}
+
+@test "polymath oar-label --limit: rejects non-numeric" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit abc
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive integer"* ]]
+}
+
+@test "polymath oar-label --limit: rejects negative" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit -5
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive integer"* ]]
+}
+
+@test "polymath oar-label: --all-due is required" {
+  run bash "$PP_ROOT/bin/polymath" oar-label
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--all-due"* ]]
+}
+
+@test "polymath oar-label: unknown flag rejected" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --nope
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown flag"* ]]
+}
+
+@test "polymath oar-label: help flag prints usage and exits 0" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Manually label pending OAR rows"* ]] \
+    || [[ "$output" == *"oar-label"* ]]
+  [[ "$output" == *"--all-due"* ]]
+  [[ "$output" == *"--limit"* ]]
+}

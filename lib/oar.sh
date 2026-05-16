@@ -837,21 +837,44 @@ pp_oar_label_pending() {
   [ -f "$_pending" ] || return 0
   mkdir -p "$_cache_dir" 2>/dev/null || true
 
+  # Task-8 review (code-reviewer + GPT): concurrent runs would clobber
+  # oar-pending.jsonl mid-rewrite. Two cycles can both snapshot, both build
+  # their kept files, then race on `mv -f kept → pending`. The second mv
+  # wins; the first's surviving rows are lost. mkdir-lock the same way
+  # lib/budget.sh::pp_budget_reserve guards the daily counter. If we can't
+  # acquire the lock, this cycle is a no-op — next cycle picks up. No
+  # stale-lock detection here; the inner work is bounded by per-row 3s
+  # and per-cycle cap=5 → at most ~15s; a stale lock older than 60s is
+  # rare and a no-op next cycle is acceptable.
+  local _lock="${_cache_dir}/.oar-labeler.lock"
+  if ! mkdir "$_lock" 2>/dev/null; then
+    return 0
+  fi
+
   local _now
   _now=$(date +%s 2>/dev/null) || _now=0
   case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+  # GPT-review: now=0 → all rows look "not yet due" (because scan_at_epoch
+  # is always > 0) → labeling stalls silently. If clock retrieval failed,
+  # exit cleanly so the next cycle retries with a working clock.
+  if [ "$_now" -eq 0 ]; then
+    rmdir "$_lock" 2>/dev/null
+    return 0
+  fi
 
-  # Working temp files. Trap-cleanup with explicit `trap - RETURN` to avoid
-  # the shell-wide leak (Task 7 GPT-review #1).
+  # Working temp files. Each mktemp MUST land in the same filesystem as
+  # the target file we'll later mv into (atomic rename only works
+  # intra-filesystem). GPT-review: the fallback `mktemp -t` path lands
+  # in $TMPDIR which is often a tmpfs on Linux → cross-FS mv is non-atomic.
+  # If we can't create the temp file in the cache dir, fail cleanly
+  # rather than fall back to system-tmp.
   local _seen _snapshot _kept
-  _seen=$(mktemp "${_cache_dir}/.oar-seen.XXXXXX" 2>/dev/null) \
-    || _seen=$(mktemp -t pp-oar-seen 2>/dev/null) || return 0
-  _snapshot=$(mktemp "${_cache_dir}/.oar-snap.XXXXXX" 2>/dev/null) \
-    || _snapshot=$(mktemp -t pp-oar-snap 2>/dev/null) \
-    || { rm -f "$_seen"; return 0; }
-  _kept=$(mktemp "${_cache_dir}/.oar-kept.XXXXXX" 2>/dev/null) \
-    || _kept=$(mktemp -t pp-oar-kept 2>/dev/null) \
-    || { rm -f "$_seen" "$_snapshot"; return 0; }
+  _seen=$(mktemp "${_cache_dir}/.oar-seen.XXXXXX" 2>/dev/null) || {
+    rmdir "$_lock" 2>/dev/null; return 0; }
+  _snapshot=$(mktemp "${_cache_dir}/.oar-snap.XXXXXX" 2>/dev/null) || {
+    rm -f "$_seen"; rmdir "$_lock" 2>/dev/null; return 0; }
+  _kept=$(mktemp "${_cache_dir}/.oar-kept.XXXXXX" 2>/dev/null) || {
+    rm -f "$_seen" "$_snapshot"; rmdir "$_lock" 2>/dev/null; return 0; }
   # Cleanup discipline: this function calls multiple sub-functions
   # (pp_oar_row_identity, pp_contain_path, the three detectors), each of
   # which RETURNs and would fire a shell-wide `trap RETURN` mid-loop and
@@ -882,12 +905,33 @@ pp_oar_label_pending() {
   while IFS= read -r _line; do
     [ -z "$_line" ] && continue
 
-    _sid=$(printf '%s' "$_line" | jq -r '.session_id // ""' 2>/dev/null)
-    _lens=$(printf '%s' "$_line" | jq -r '.lens // ""' 2>/dev/null)
-    _hash=$(printf '%s' "$_line" | jq -r '.hash // ""' 2>/dev/null)
-    _inj_ts=$(printf '%s' "$_line" | jq -r '.inject_ts // ""' 2>/dev/null)
-    _scan=$(printf '%s' "$_line" | jq -r '.scan_at_epoch // 0' 2>/dev/null)
-    _attempts=$(printf '%s' "$_line" | jq -r '.attempts // 0' 2>/dev/null)
+    # Bad-JSON guard (GPT-review): a single corrupt row in pending will
+    # cause jq to exit non-zero. Under bats `set -eET` the $() capture
+    # then aborts the whole function. The `|| true` tail keeps the
+    # assignment unconditionally rc=0; jq's stderr is /dev/null'd; we
+    # detect the bad row via empty session_id and KEEP it in pending
+    # (operator may want to inspect it manually).
+    _sid=$(printf '%s' "$_line" | jq -r '.session_id // ""' 2>/dev/null || true)
+    _lens=$(printf '%s' "$_line" | jq -r '.lens // ""' 2>/dev/null || true)
+    _hash=$(printf '%s' "$_line" | jq -r '.hash // ""' 2>/dev/null || true)
+    _inj_ts=$(printf '%s' "$_line" | jq -r '.inject_ts // ""' 2>/dev/null || true)
+    _scan=$(printf '%s' "$_line" | jq -r '.scan_at_epoch // 0' 2>/dev/null || true)
+    _attempts=$(printf '%s' "$_line" | jq -r '.attempts // 0' 2>/dev/null || true)
+    # Corrupt row → keep verbatim in pending (don't lose data).
+    if [ -z "$_sid" ] || [ -z "$_lens" ] || [ -z "$_hash" ]; then
+      printf '%s\n' "$_line" >> "$_kept"
+      continue
+    fi
+    # GPT-review: sanitize session_id to prevent path traversal via
+    # transcript-tail-${_sid}.txt. session_id comes from SessionEnd's
+    # JSON event but is operator-influenceable. Reject anything that's
+    # not a strictly safe-filename pattern: alphanumeric + `-` + `_`.
+    case "$_sid" in
+      *[!A-Za-z0-9_-]*|''|.|..)
+        printf '%s\n' "$_line" >> "$_kept"
+        continue
+        ;;
+    esac
     case "$_scan" in ''|*[!0-9]*) _scan=0 ;; esac
     case "$_attempts" in ''|*[!0-9]*) _attempts=0 ;; esac
 
@@ -998,8 +1042,19 @@ pp_oar_label_pending() {
                        "$_inj_epoch" "$_upper" 2>/dev/null) || _rc=$?
         if [ "$_rc" -eq 0 ] && [ -n "$_acted_out" ]; then
           _outcome="acted"
-          _evid_id="${_acted_out%%|*}"
-          _conf="${_acted_out#*|}"
+          # GPT-review: guard against future detector contract drift —
+          # if output lacks `|`, the %% / # parameter expansions both
+          # return the whole string, conflating evidence_id and confidence.
+          case "$_acted_out" in
+            *\|*)
+              _evid_id="${_acted_out%%|*}"
+              _conf="${_acted_out#*|}"
+              ;;
+            *)
+              _evid_id="$_acted_out"
+              _conf="unknown"
+              ;;
+          esac
           break
         elif [ "$_rc" -eq 2 ]; then
           _err=1
@@ -1021,8 +1076,17 @@ EOF
                      "$_body" "$_cited_symbols" 2>/dev/null) || _rc=$?
         if [ "$_rc" -eq 0 ] && [ -n "$_ref_out" ]; then
           _outcome="referenced"
-          _evid_id="${_ref_out%%|*}"
-          _conf="${_ref_out#*|}"
+          # Same missing-pipe guard as the acted branch above.
+          case "$_ref_out" in
+            *\|*)
+              _evid_id="${_ref_out%%|*}"
+              _conf="${_ref_out#*|}"
+              ;;
+            *)
+              _evid_id="$_ref_out"
+              _conf="unknown"
+              ;;
+          esac
         elif [ "$_rc" -eq 2 ]; then
           _err=1
         fi
@@ -1086,5 +1150,7 @@ EOF
   # Explicit cleanup (we don't use trap RETURN — sub-functions fire it).
   rm -f "$_seen" "$_snapshot" 2>/dev/null
   [ -n "$_kept" ] && rm -f "$_kept" 2>/dev/null
+  # Release the concurrency lock (acquired at function entry).
+  rmdir "$_lock" 2>/dev/null
   return 0
 }

@@ -386,3 +386,42 @@ pp_project_key() {
 pp_file_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
 }
+
+# pp_safe_git_pathspec PATH
+# Stdout: a git-pathspec-safe string suitable for `git ... -- "$out"`.
+# The string is prefixed with `:(literal)` magic so git disables its own
+# globbing (otherwise a filename like `*.txt` would be interpreted as a
+# glob). Trailing slashes on directory inputs are stripped (git treats
+# `path/` differently from `path` in --follow).
+#
+# Caller-quotes contract (C1 from plan addendum, 2026-05-16):
+#   The helper returns the raw pathspec bytes (including any embedded
+#   apostrophes) WITHOUT POSIX `'\''` escaping. Callers MUST invoke as:
+#       git ... -- "$(pp_safe_git_pathspec "$p")"
+#   The whole output is one argv element from the shell's double-quoted
+#   command substitution, so embedded apostrophes cannot break argv
+#   tokenization. Git's `:(literal)` pathspec syntax accepts apostrophes
+#   as literal filename characters; no further escaping is required.
+#
+# Returns 1 with no stdout on:
+#   - empty input
+#   - leading `-` (option-injection guard)
+#   - input that reduces to empty after stripping a trailing slash
+# Otherwise returns 0.
+#
+# Distinct from pp_safe_grep_pattern (which validates grep -E regexes).
+# Used by lib/oar.sh::pp_oar_acted_for_path before passing a cited path
+# to `git log --follow -- ...` and `git show -M50% -- ...`.
+pp_safe_git_pathspec() {
+  local p="${1:-}"
+  [ -z "$p" ] && return 1
+  case "$p" in
+    -*) return 1 ;;
+  esac
+  # Strip a single trailing slash (don't recurse: `path//` becomes `path/`).
+  case "$p" in
+    */) p="${p%/}" ;;
+  esac
+  [ -z "$p" ] && return 1
+  printf ':(literal)%s' "$p"
+}

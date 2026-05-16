@@ -39,3 +39,83 @@ teardown() { rm -rf "$HOME"; }
   local _ms=$(( (_end - _start) / 1000000 ))
   [ "$_ms" -lt 50 ]
 }
+
+# === v0.5.2: schema extension (Task 2) ===
+# Plan addendum C2 fix path A: SessionEnd writes attempts, status, body,
+# cited_paths, cited_symbols so the labeler is a pure function of pending
+# rows (no filesystem coupling on rotated observation files).
+
+@test "session-end: emitted record carries attempts:0 and status:\"pending\"" {
+  printf 'ENG: refactor pp_oar_foo|||The pp_oar_foo function in lib/oar.sh needs hardening.\n' \
+    > "$PP_CACHE_DIR/cc-monitor-s2-ENGINEERING.txt"
+  printf 'hash-a1' > "$PP_CACHE_DIR/cc-monitor-injected-hash-s2-ENGINEERING.txt"
+  export PP_OAR_ENABLE=1
+  run bash -c "printf '{\"session_id\":\"s2\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  [ -f "$PP_CACHE_DIR/oar-pending.jsonl" ]
+  jq -e '.attempts == 0 and .status == "pending"' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}
+
+@test "session-end: schema has all 7 baseline fields + 3 v0.5.2 fields" {
+  printf 'SEC: review credentials|||content with symbols pp_check_creds and paths lib/sec.sh\n' \
+    > "$PP_CACHE_DIR/cc-monitor-s3-SECURITY.txt"
+  printf 'hash-b2' > "$PP_CACHE_DIR/cc-monitor-injected-hash-s3-SECURITY.txt"
+  export PP_OAR_ENABLE=1
+  run bash -c "printf '{\"session_id\":\"s3\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  # Baseline 5 + v0.5.2 additions: attempts, status, body, cited_paths, cited_symbols.
+  jq -e '
+    has("session_id") and has("lens") and has("hash")
+    and has("inject_ts") and has("scan_at_epoch")
+    and has("attempts") and has("status")
+    and has("body") and has("cited_paths") and has("cited_symbols")
+  ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}
+
+# PM2 — schema contract test (mandatory per plan addendum). Asserts the
+# pending row carries the exact fields the labeler (Task 8) consumes. This
+# is the test that prevents the silent-zero regression where SessionEnd
+# writes a schema the labeler can't actually use.
+@test "v0.5.2 PM2 contract: oar-pending row matches labeler's expected input shape" {
+  printf 'ENG: harden labeler|||The pp_oar_label_pending function in lib/oar.sh needs hardening.\n' \
+    > "$PP_CACHE_DIR/cc-monitor-sess-pm2-ENGINEERING.txt"
+  printf 'hash-pm2' > "$PP_CACHE_DIR/cc-monitor-injected-hash-sess-pm2-ENGINEERING.txt"
+  export PP_OAR_ENABLE=1
+  run bash -c "printf '{\"session_id\":\"sess-pm2\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  # Per fix path A: pending row must carry body + cite arrays.
+  jq -e 'has("body") and has("cited_paths") and has("cited_symbols")' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+  # Cite arrays must be JSON arrays, not strings.
+  jq -e '(.cited_paths | type) == "array" and (.cited_symbols | type) == "array"' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+  # Body extraction: the `LENS: title|||body` line should yield the body
+  # portion. Assert the body is non-empty AND does NOT include the title.
+  jq -e '.body | test("hardening")' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+  jq -e '.body | test("ENG: harden labeler") | not' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+  # Cited paths + symbols must surface what the labeler will scan against.
+  # The body cites lib/oar.sh (path) and pp_oar_label_pending (symbol).
+  jq -e '.cited_paths | index("lib/oar.sh") != null' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+  jq -e '.cited_symbols | index("pp_oar_label_pending") != null' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}
+
+@test "session-end: cite arrays are JSON arrays even when observation file is missing" {
+  # Hash file present, observation file absent — pending row still written
+  # but with empty body + empty cite arrays (NOT string defaults).
+  printf 'hash-missing' > "$PP_CACHE_DIR/cc-monitor-injected-hash-s4-UX_DESIGN.txt"
+  export PP_OAR_ENABLE=1
+  run bash -c "printf '{\"session_id\":\"s4\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  jq -e '
+    .body == "" and
+    (.cited_paths | type) == "array" and
+    (.cited_symbols | type) == "array" and
+    (.cited_paths | length) == 0 and
+    (.cited_symbols | length) == 0
+  ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}

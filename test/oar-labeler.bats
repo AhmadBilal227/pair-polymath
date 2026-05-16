@@ -293,3 +293,40 @@ _pp_pushed_back_setup_rules_file() {
   run pp_oar_pushed_back "deadbeef1234" "not-a-number" 1778806800
   [ "$status" -eq 1 ]
 }
+
+@test "pushed_back: case-insensitive hash match (GPT-review #7)" {
+  # User might run `polymath dismiss ack DEADBE` (uppercase); dismiss.sh
+  # stores .hash verbatim. Pending row always carries lowercase hash from
+  # the injection pipeline. Comparison must be case-insensitive — both
+  # sides normalized to lowercase before startswith.
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  # Rule stores UPPERCASE prefix
+  jq -nc \
+    '{id:"a-2026-05-15-upper",ts:"2026-05-15T00:30:00Z",
+      reason_summary:"User typed uppercase hex",scope:"project",lens_id:null,
+      hash:"DEADBE",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  local out rc
+  # Pending row carries lowercase hash — must still match
+  out=$(pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800); rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$out" = "a-2026-05-15-upper" ]
+}
+
+@test "pushed_back: unparseable rule timestamp does NOT match with inject=0" {
+  # GPT-review #4: was `// 0` which collapses unparseable ts → 0. If a
+  # caller passes INJECT_TS_EPOCH=0, a malformed-ts rule would have
+  # falsely matched (0 >= 0 && 0 <= scan). Explicit null filter prevents.
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  jq -nc \
+    '{id:"a-2026-05-15-bad",ts:"not-an-iso-date",
+      reason_summary:"corrupted",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  run pp_oar_pushed_back "deadbeef1234" 0 9999999999
+  [ "$status" -eq 1 ]   # unparseable ts → null → filtered out → no match
+}

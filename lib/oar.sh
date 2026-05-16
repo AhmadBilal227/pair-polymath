@@ -188,9 +188,25 @@ pp_oar_with_row_timeout() {
 #   - source == "ack"   (NOT manual/auto_suppress — those are different intent)
 #   - deleted == false  (latest-line-wins per id, so a disable→enable cycle is honored)
 #   - HASH startswith(.hash)  (rule stores the SHORT prefix the user typed;
-#                              pending row carries the full hash)
+#                              pending row carries the full hash; comparison
+#                              is case-insensitive — applied lowercase to both
+#                              per Task 5 GPT-review #7)
 #   - .ts (ISO-8601 UTC) within [INJECT_TS_EPOCH, SCAN_AT_EPOCH] inclusive
 # Returns 1 (and prints nothing on stdout) otherwise.
+#
+# SEMANTICS NOTE — state vs event (Task 5 GPT-review #2):
+# The spec wording "rule with source=ack ... with created_at falling in
+# window" is technically event-based, but this implementation uses
+# STATE-BASED semantics: the latest line for each id wins, so a user who
+# ack'd then later disabled the ack will NOT be marked pushed-back. The
+# choice matches (a) lib/dismiss.sh's authoritative "is this rule active
+# now?" model used everywhere else, and (b) test "pushed_back: disabled
+# ack does NOT count" which is the load-bearing regression test for this
+# function. Event-based semantics would also match the spec but would
+# require ignoring the dismiss-subsystem's own deleted=true semantics.
+# Revisit if v0.5.3 OAR data shows ack-then-undo cycles are common — for
+# now, "currently endorsed by operator at scan time" is the signal we
+# want for OAR labeling.
 #
 # Reads the project-scoped dismiss file via pp_dismiss_file_path — the same
 # canonical store pp_dismiss_ack writes to. The spec narrative names this
@@ -223,15 +239,26 @@ pp_oar_pushed_back() {
   # Slurped jq with latest-line-wins fold: honors a disable→enable cycle
   # on the same id (the dismiss subsystem is append-only; the latest line
   # for an id is authoritative — see lib/dismiss.sh:108 group_by/last).
+  #
+  # GPT-review #4: explicit null filter on ts (was `// 0` which would
+  # treat an unparseable timestamp as epoch 0 and accidentally match if
+  # the caller passed INJECT_TS_EPOCH=0).
+  # GPT-review #7: case-insensitive hash comparison (`ascii_downcase`).
+  # User could type uppercase hex (`ABCDEF`) which dismiss.sh stores
+  # verbatim; pending rows always carry lowercase. Normalize both sides.
+  local _hash_lc
+  _hash_lc=$(printf '%s' "$_hash" | tr '[:upper:]' '[:lower:]')
   local _id
-  _id=$(jq -s -r --arg h "$_hash" --argjson inj "$_inj" --argjson scan "$_scan" '
+  _id=$(jq -s -r --arg h "$_hash_lc" --argjson inj "$_inj" --argjson scan "$_scan" '
     group_by(.id) | map(last)
     | .[]
     | select(.source == "ack")
     | select(.deleted == false)
-    | select(.hash != null and .hash != "" and (.hash as $p | $h | startswith($p)))
-    | select((.ts | fromdateiso8601? // 0) >= $inj
-             and (.ts | fromdateiso8601? // 0) <= $scan)
+    | select(.hash != null and .hash != "")
+    | (.hash | ascii_downcase) as $p
+    | select($h | startswith($p))
+    | (.ts | fromdateiso8601?) as $t
+    | select($t != null and $t >= $inj and $t <= $scan)
     | .id
   ' "$_rules" 2>/dev/null | head -1)
   [ -n "$_id" ] || return 1

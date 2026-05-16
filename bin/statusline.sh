@@ -1276,6 +1276,55 @@ $critique_input"
             _pp_concurrent_drops=$(printf '%s\n' "$critique_output" | grep -Ec '^lens[0-9]+:[[:space:]]*DROP\b' 2>/dev/null || true)
             case "$_pp_concurrent_drops" in ''|*[!0-9]*) _pp_concurrent_drops=0 ;; esac
 
+            # v0.5.2 (Task 13, addresses plan addendum I4):
+            # Two cycle-scoped counters feed the KPI emitter's hallucination
+            # split below. Both denominators are deliberately chosen so the
+            # `_rate` suffix in the emitted field is accurate (not a
+            # conditional proportion masquerading as a rate).
+            #
+            #   _pp_halluc_pre_drops   = critique DROPs classified as
+            #                            `citation_fail` by the retry-router
+            #                            (the "hallucination caught before
+            #                            display" class). Numerator for
+            #                            halluc_pre_drop_rate; denominator is
+            #                            _pp_concurrent_drops (total DROPs
+            #                            THIS cycle) — proportion of pre-drops
+            #                            that were hallucination-class.
+            #
+            #   _pp_halluc_post_passes_checked = critique PASSes this cycle
+            #                            — the SET that the hallucination
+            #                            post-check (Task 12) actually inspects.
+            #                            Denominator for halluc_post_would_drop_rate;
+            #                            numerator is _pp_halluc_post_drops
+            #                            (incremented in the PASS branch when
+            #                            the post-check returns rc=1).
+            #
+            # Why these denominators (not PP_LENS_COUNT, not session-wide):
+            #   - PP_LENS_COUNT counts ALL lenses incl. ones that returned
+            #     SILENT / failed critique-format / weren't even run. The
+            #     post-check only runs on critique-PASSes, so dividing by
+            #     PP_LENS_COUNT understates the rate whenever critique drops
+            #     happen — which is exactly when we care about the metric.
+            #   - Per-cycle (not per-session) keeps the rate comparable
+            #     across cycles regardless of how many cycles have elapsed.
+            _pp_halluc_pre_drops=0
+            _pp_halluc_post_passes_checked=$(printf '%s\n' "$critique_output" | grep -Ec '^lens[0-9]+:[[:space:]]*PASS\b' 2>/dev/null || true)
+            case "$_pp_halluc_post_passes_checked" in ''|*[!0-9]*) _pp_halluc_post_passes_checked=0 ;; esac
+            if command -v pp_retry_classify_reason >/dev/null 2>&1; then
+              # Re-scan DROP rows + run the classifier. Bash 3.2-portable
+              # while-read against a here-doc so a missing classifier or an
+              # empty critique_output is a clean no-op (count stays 0).
+              while IFS= read -r _pp_dline; do
+                [ -n "$_pp_dline" ] || continue
+                _pp_dreason=$(printf '%s' "$_pp_dline" | sed 's/^lens[0-9]*:[[:space:]]*//;s/^DROP[[:space:]]*-[[:space:]]*//')
+                _pp_dclass=$(pp_retry_classify_reason "$_pp_dreason" 2>/dev/null || printf 'unknown')
+                [ "$_pp_dclass" = "citation_fail" ] \
+                  && _pp_halluc_pre_drops=$((_pp_halluc_pre_drops + 1))
+              done <<EOF
+$(printf '%s\n' "$critique_output" | LC_ALL=C grep -E '^lens[0-9]+:[[:space:]]*DROP\b' 2>/dev/null || true)
+EOF
+            fi
+
             # I7 (v0.5.1): normalize the canary percentage ONCE here, where
             # the retry-router env is first consumed. A value like "10%"
             # (or any non-integer) used to slip through the `-lt` comparison
@@ -1676,6 +1725,31 @@ $critique_input"
       # verdict_total_drops: the cycle-wide concurrent-drop count (I2-fixed).
       _pp_kpi_drops="${_pp_concurrent_drops:-0}"
       case "$_pp_kpi_drops" in ''|*[!0-9]*) _pp_kpi_drops=0 ;; esac
+      # v0.5.2 (Task 13, plan addendum I4): hallucination rates.
+      #   halluc_pre_drop_rate = citation_fail DROPs ÷ total DROPs THIS cycle.
+      #     Proportion: of all critique-DROPs this cycle, what share were
+      #     hallucination-class (i.e. caught by the citation allowlist gate
+      #     BEFORE display). Denominator 0 (no DROPs) → 0.
+      #   halluc_post_would_drop_rate = post-check would-DROPs ÷ critique
+      #     PASSes THIS cycle. The post-check ONLY runs against critique
+      #     PASSes, so the PASS count is the true denominator (not
+      #     PP_LENS_COUNT, which would understate the rate whenever critique
+      #     DROPs happen — exactly when the post-check matters most).
+      #     Denominator 0 (no PASSes) → 0.
+      _pp_kpi_halluc_pre="${_pp_halluc_pre_drops:-0}"
+      case "$_pp_kpi_halluc_pre" in ''|*[!0-9]*) _pp_kpi_halluc_pre=0 ;; esac
+      _pp_kpi_halluc_post="${_pp_halluc_post_drops:-0}"
+      case "$_pp_kpi_halluc_post" in ''|*[!0-9]*) _pp_kpi_halluc_post=0 ;; esac
+      _pp_kpi_halluc_post_denom="${_pp_halluc_post_passes_checked:-0}"
+      case "$_pp_kpi_halluc_post_denom" in ''|*[!0-9]*) _pp_kpi_halluc_post_denom=0 ;; esac
+      _pp_kpi_halluc_pre_rate=$(LC_ALL=C awk \
+        -v c="$_pp_kpi_halluc_pre" -v t="$_pp_kpi_drops" \
+        'BEGIN { if (t > 0) printf "%.4f", c / t; else printf "0" }' 2>/dev/null)
+      case "$_pp_kpi_halluc_pre_rate" in ''|*[!0-9.]*) _pp_kpi_halluc_pre_rate=0 ;; esac
+      _pp_kpi_halluc_post_rate=$(LC_ALL=C awk \
+        -v c="$_pp_kpi_halluc_post" -v p="$_pp_kpi_halluc_post_denom" \
+        'BEGIN { if (p > 0) printf "%.4f", c / p; else printf "0" }' 2>/dev/null)
+      case "$_pp_kpi_halluc_post_rate" in ''|*[!0-9.]*) _pp_kpi_halluc_post_rate=0 ;; esac
       # retry_acceptance_rate: count "(retry accepted)" verdict files for this
       # session vs total retries this cycle. Best-effort; 0 when no retries.
       _pp_kpi_retry_accepted=$(grep -l 'retry accepted' \
@@ -1713,6 +1787,8 @@ $critique_input"
         --arg phase_source "${_pp_kpi_phase_source:-unknown}" \
         --argjson retry_acceptance_rate "${_pp_kpi_accept_rate:-0}" \
         --argjson verdict_total_drops "${_pp_kpi_drops:-0}" \
+        --argjson halluc_pre_drop_rate "${_pp_kpi_halluc_pre_rate:-0}" \
+        --argjson halluc_post_would_drop_rate "${_pp_kpi_halluc_post_rate:-0}" \
         --arg cycle_outcome "${_pp_kpi_outcome:-success}" \
         --argjson eligible "${_pp_kpi_eligible:-0}" \
         --argjson slo_breach "${_pp_kpi_slo_breach:-0}" \
@@ -1720,7 +1796,10 @@ $critique_input"
           retry_usd:$retry_usd, inv_count:$inv_count, picked_count:$picked_count,
           phase:$phase, phase_source:$phase_source,
           retry_acceptance_rate:$retry_acceptance_rate,
-          verdict_total_drops:$verdict_total_drops, cycle_outcome:$cycle_outcome,
+          verdict_total_drops:$verdict_total_drops,
+          halluc_pre_drop_rate:$halluc_pre_drop_rate,
+          halluc_post_would_drop_rate:$halluc_post_would_drop_rate,
+          cycle_outcome:$cycle_outcome,
           eligible:$eligible, slo_breach:$slo_breach}' 2>/dev/null || printf '')
       [ -n "$_pp_kpi_blob" ] && pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
 

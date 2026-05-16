@@ -1107,28 +1107,32 @@ _pp_oar_set_mtime() {
   [ "$(pp_kpi_wilson_lower_95 0 0)" = "0.0000" ]
 }
 
-@test "wilson_lower_95: 1/1 (point estimate 1.0) returns lower-bound < 1" {
+@test "wilson_lower_95: 1/1 (point estimate 1.0) returns ~0.2065" {
+  # GPT-review #4 + combined-reviewer S2: tightened from [0.05, 0.99] to
+  # [0.20, 0.22] — actual two-sided value is 0.2065, so a regression
+  # producing a one-sided value (0.3416) would now fail.
   . "$PP_ROOT/lib/metrics.sh"
   local _lo
   _lo=$(pp_kpi_wilson_lower_95 1 1)
-  # 1/1 with Wilson should be ~0.21 (n=1 has wide CI)
-  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.05 && v+0 < 0.99) }'
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.20 && v+0 < 0.22) }'
 }
 
-@test "wilson_lower_95: 2/7 (~28.6%) returns lower bound around 6%" {
+@test "wilson_lower_95: 2/7 (~28.6%) returns ~0.0822 (two-sided)" {
+  # Task 10 review note: spec §D's example "0.064" used one-sided z=1.645.
+  # Plan + impl use two-sided z=1.96 → 0.0822. Tightened from [0.04, 0.10]
+  # to [0.075, 0.090] to distinguish the two parametrizations.
   . "$PP_ROOT/lib/metrics.sh"
   local _lo
   _lo=$(pp_kpi_wilson_lower_95 2 7)
-  # Spec §D example: SECURITY 2/7 → Wilson 95% lower ≈ 6.4%
-  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.04 && v+0 < 0.10) }'
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.075 && v+0 < 0.090) }'
 }
 
-@test "wilson_lower_95: 50/100 returns lower bound around 40%" {
+@test "wilson_lower_95: 50/100 returns ~0.4038" {
+  # Tightened from [0.38, 0.43] to [0.40, 0.41] — textbook value is 0.4038.
   . "$PP_ROOT/lib/metrics.sh"
   local _lo
   _lo=$(pp_kpi_wilson_lower_95 50 100)
-  # Classic Wilson 50% / 100: ~40.4%
-  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.38 && v+0 < 0.43) }'
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.40 && v+0 < 0.41) }'
 }
 
 @test "wilson_lower_95: 0/10 returns 0 (zero successes clamp)" {
@@ -1138,29 +1142,39 @@ _pp_oar_set_mtime() {
   [ "$(pp_kpi_wilson_lower_95 0 10)" = "0.0000" ]
 }
 
-@test "wilson_lower_95: 10/10 returns positive lower bound < 1" {
+@test "wilson_lower_95: 10/10 returns ~0.7225 (textbook)" {
+  # Tightened from [0.60, 1.00] to [0.71, 0.73].
   . "$PP_ROOT/lib/metrics.sh"
   local _lo
   _lo=$(pp_kpi_wilson_lower_95 10 10)
-  # k=n=10: Wilson 95% lower ≈ 0.7225 (textbook). Asserts > 0.6, < 1.
-  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.60 && v+0 < 1.00) }'
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.71 && v+0 < 0.73) }'
 }
 
-@test "wilson_lower_95: 1/2 returns ~0.0943 (textbook fixed-point)" {
+@test "wilson_lower_95: 1/2 returns ~0.0945 (textbook fixed-point)" {
+  # Tightened from [0.07, 0.12] to [0.09, 0.10]. Two-sided value is 0.0945.
   . "$PP_ROOT/lib/metrics.sh"
   local _lo
   _lo=$(pp_kpi_wilson_lower_95 1 2)
-  # k=1, n=2: phat=0.5, denom=1+1.96²/2≈2.9208, center≈0.5, margin≈0.4057
-  # lower ≈ 0.0943 (well-known small-sample example).
-  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.07 && v+0 < 0.12) }'
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.09 && v+0 < 0.10) }'
 }
 
-@test "wilson_lower_95: large n approaches k/n" {
+@test "wilson_lower_95: large n approaches k/n (~0.4691)" {
+  # Tightened from [0.45, 0.50] to [0.46, 0.48]. Value is 0.4691.
   . "$PP_ROOT/lib/metrics.sh"
   local _lo
   _lo=$(pp_kpi_wilson_lower_95 500 1000)
-  # n=1000, phat=0.5 → CI half-width ~0.031. lower ≈ 0.469.
-  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.45 && v+0 < 0.50) }'
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.46 && v+0 < 0.48) }'
+}
+
+@test "wilson_lower_95: s > n clamps (GPT-review #1: prevents sqrt(NaN))" {
+  # If successes exceeds trials (corrupt counter, double-count, etc.),
+  # p(1-p) goes negative and sqrt() emits NaN. Function must clamp s≤n.
+  # Result should be the same as s=n=10 (lower bound at 100% success).
+  . "$PP_ROOT/lib/metrics.sh"
+  local _lo
+  _lo=$(pp_kpi_wilson_lower_95 15 10)   # s > n
+  # Should be clamped → same as 10/10 → ~0.7225
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.71 && v+0 < 0.73) }'
 }
 
 @test "wilson_lower_95: non-numeric input is coerced to 0 (defensive)" {

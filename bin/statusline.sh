@@ -1308,7 +1308,11 @@ $critique_input"
             #   - Per-cycle (not per-session) keeps the rate comparable
             #     across cycles regardless of how many cycles have elapsed.
             _pp_halluc_pre_drops=0
-            _pp_halluc_post_passes_checked=$(printf '%s\n' "$critique_output" | grep -Ec '^lens[0-9]+:[[:space:]]*PASS\b' 2>/dev/null || true)
+            # GPT-review #1: pin LC_ALL=C consistently with the DROP-scan
+            # below. Without this, `[[:space:]]` / `\b` boundary semantics
+            # can disagree across locales — denominator and numerator
+            # must use the same locale or rates skew.
+            _pp_halluc_post_passes_checked=$(printf '%s\n' "$critique_output" | LC_ALL=C grep -Ec '^lens[0-9]+:[[:space:]]*PASS\b' 2>/dev/null || true)
             case "$_pp_halluc_post_passes_checked" in ''|*[!0-9]*) _pp_halluc_post_passes_checked=0 ;; esac
             if command -v pp_retry_classify_reason >/dev/null 2>&1; then
               # Re-scan DROP rows + run the classifier. Bash 3.2-portable
@@ -1317,7 +1321,14 @@ $critique_input"
               while IFS= read -r _pp_dline; do
                 [ -n "$_pp_dline" ] || continue
                 _pp_dreason=$(printf '%s' "$_pp_dline" | sed 's/^lens[0-9]*:[[:space:]]*//;s/^DROP[[:space:]]*-[[:space:]]*//')
-                _pp_dclass=$(pp_retry_classify_reason "$_pp_dreason" 2>/dev/null || printf 'unknown')
+                # GPT-review #2: capture classifier stdout INDEPENDENT of
+                # exit code. The old form
+                #   _pp_dclass=$(classifier ... || printf 'unknown')
+                # would concatenate "citation_fail" + "unknown" if the
+                # classifier wrote partial output then exited non-zero.
+                # Capture once; fall back ONLY when output is empty.
+                _pp_dclass=$(pp_retry_classify_reason "$_pp_dreason" 2>/dev/null)
+                [ -z "$_pp_dclass" ] && _pp_dclass="unknown"
                 [ "$_pp_dclass" = "citation_fail" ] \
                   && _pp_halluc_pre_drops=$((_pp_halluc_pre_drops + 1))
               done <<EOF
@@ -1742,14 +1753,30 @@ EOF
       case "$_pp_kpi_halluc_post" in ''|*[!0-9]*) _pp_kpi_halluc_post=0 ;; esac
       _pp_kpi_halluc_post_denom="${_pp_halluc_post_passes_checked:-0}"
       case "$_pp_kpi_halluc_post_denom" in ''|*[!0-9]*) _pp_kpi_halluc_post_denom=0 ;; esac
+      # GPT-review #5: clamp rates to [0,1] in awk itself (mismatched
+      # numerator/denominator from upstream bugs could otherwise produce
+      # >1.0 leaks into the KPI stream). Defensive belt for downstream
+      # consumers expecting probability-shaped values.
+      # GPT-review #7: case regex `[!0-9.]*` accepts malformed strings
+      # like "1.2.3" or ".." — jq --argjson would then reject the JSON.
+      # Tighten to "single dot, digits only" using a two-stage case:
+      # (a) reject non-digit/non-dot, (b) reject multi-dot.
       _pp_kpi_halluc_pre_rate=$(LC_ALL=C awk \
         -v c="$_pp_kpi_halluc_pre" -v t="$_pp_kpi_drops" \
-        'BEGIN { if (t > 0) printf "%.4f", c / t; else printf "0" }' 2>/dev/null)
-      case "$_pp_kpi_halluc_pre_rate" in ''|*[!0-9.]*) _pp_kpi_halluc_pre_rate=0 ;; esac
+        'BEGIN {
+          if (t > 0) { r = c / t; if (r > 1) r = 1; if (r < 0) r = 0;
+            printf "%.4f", r } else printf "0" }' 2>/dev/null)
+      case "$_pp_kpi_halluc_pre_rate" in
+        ''|*[!0-9.]*|*.*.*) _pp_kpi_halluc_pre_rate=0 ;;
+      esac
       _pp_kpi_halluc_post_rate=$(LC_ALL=C awk \
         -v c="$_pp_kpi_halluc_post" -v p="$_pp_kpi_halluc_post_denom" \
-        'BEGIN { if (p > 0) printf "%.4f", c / p; else printf "0" }' 2>/dev/null)
-      case "$_pp_kpi_halluc_post_rate" in ''|*[!0-9.]*) _pp_kpi_halluc_post_rate=0 ;; esac
+        'BEGIN {
+          if (p > 0) { r = c / p; if (r > 1) r = 1; if (r < 0) r = 0;
+            printf "%.4f", r } else printf "0" }' 2>/dev/null)
+      case "$_pp_kpi_halluc_post_rate" in
+        ''|*[!0-9.]*|*.*.*) _pp_kpi_halluc_post_rate=0 ;;
+      esac
       # retry_acceptance_rate: count "(retry accepted)" verdict files for this
       # session vs total retries this cycle. Best-effort; 0 when no retries.
       _pp_kpi_retry_accepted=$(grep -l 'retry accepted' \

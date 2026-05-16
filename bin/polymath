@@ -614,12 +614,24 @@ HELP
     # Read labeled rows (current + rotated). Filter by window + optional
     # --lens + --outcome. The cat-of-missing-file emits stderr — silence
     # only stderr so a real jq error still surfaces.
-    _h_rows=$( { cat "${_h_labeled}.1" "$_h_labeled" 2>/dev/null; } \
+    #
+    # GPT-review #5: build TWO row sets — one with --outcome filter for
+    # totals/per-outcome stats, one WITHOUT --outcome for per-lens stats
+    # (top lenses by acted%). Without this split, --outcome=acted makes
+    # every lens display 100% acted (because the filter pre-removed
+    # every non-acted row). --lens filter applies to both (the report's
+    # scope IS that lens regardless of outcome breakdown).
+    _h_rows_unfiltered=$( { cat "${_h_labeled}.1" "$_h_labeled" 2>/dev/null; } \
               | jq -R 'fromjson?' 2>/dev/null \
-              | jq -s --argjson cut "$_h_cutoff" --arg lens "$_h_lens" --arg out "$_h_outcome" '
+              | jq -s --argjson cut "$_h_cutoff" --arg lens "$_h_lens" '
                   map(select((.labeled_at | fromdateiso8601? // 0) >= $cut))
                   | (if $lens != "" then map(select(.lens == $lens)) else . end)
-                  | (if $out != "" and $out != "all" then map(select(.outcome == $out)) else . end)
+                ' 2>/dev/null)
+    [ -n "$_h_rows_unfiltered" ] || _h_rows_unfiltered='[]'
+    # _h_rows applies the additional --outcome filter on top.
+    _h_rows=$(printf '%s' "$_h_rows_unfiltered" \
+              | jq --arg out "$_h_outcome" '
+                  if $out != "" and $out != "all" then map(select(.outcome == $out)) else . end
                 ' 2>/dev/null)
     [ -n "$_h_rows" ] || _h_rows='[]'
 
@@ -641,8 +653,23 @@ HELP
     # Per-lens grouping: emit "lens\tn\tacted" rows for the bash loop.
     # Build per-lens JSON via jq -n --arg/--argjson (addendum M3) so a
     # lens name like ' "quote" ' or ' \backslash ' cannot break the JSON.
-    _h_per_lens_tsv=$(printf '%s' "$_h_rows" | jq -r '
-      group_by(.lens)
+    #
+    # GPT-review #1: sort_by(.lens) BEFORE group_by. Without the sort,
+    # non-contiguous rows for the same lens get split into separate
+    # groups → wrong n/acted counts. Project-canonical fix (matches
+    # lib/dismiss.sh:108 and the shadow-summary fix from v0.5.1).
+    #
+    # GPT-review #5: --outcome filter applied upstream to _h_rows would
+    # make "Top lenses by acted%" meaningless (e.g., --outcome acted
+    # makes every lens show 100% acted). Per-lens stats must be
+    # computed from the UNFILTERED window — use _h_rows_for_lens which
+    # is built without the outcome filter when outcome != all.
+    _h_lens_src="$_h_rows"
+    if [ -n "${_h_rows_unfiltered:-}" ]; then
+      _h_lens_src="$_h_rows_unfiltered"
+    fi
+    _h_per_lens_tsv=$(printf '%s' "$_h_lens_src" | jq -r '
+      sort_by(.lens) | group_by(.lens)
       | .[]
       | "\(.[0].lens)\t\(length)\t\(map(select(.outcome == "acted")) | length)"
     ' 2>/dev/null)

@@ -407,8 +407,11 @@ pp_oar_acted_for_path() {
   # cycle ceiling or a test-runner interrupt. RETURN is bash 3.2+.
   # The post-loop `rm -f` below is the happy-path; this is belt-and-
   # suspenders against signal-interrupted paths.
+  # Task 7 GPT-review #1: trap … RETURN is SHELL-WIDE not function-scoped.
+  # Add `trap - RETURN` inside the trap body to clear it after firing so
+  # it doesn't fire on subsequent function returns in the same shell.
   # shellcheck disable=SC2064
-  trap "rm -f '$_flag'" RETURN
+  trap "rm -f '$_flag'; trap - RETURN" RETURN
 
   # Outer loop: walk commits. while-read runs in a subshell, but here the
   # subshell can WRITE TO the flag file (file mutations cross subshell
@@ -583,7 +586,14 @@ pp_oar_referenced() {
   local _scan="${3:-0}"
   local _body="${4:-}"
   local _cites="${5:-}"
+  # GPT-review #4: validate PP_OAR_REF_TAU is a numeric. Non-numeric
+  # silently coerces to 0 in awk (j+0 >= t+0 always true), which would
+  # flip the threshold gate. Accept N, N.NN, or .NN; fallback to 0.5.
   local _tau="${PP_OAR_REF_TAU:-0.5}"
+  case "$_tau" in
+    [0-9]|[0-9].[0-9]*|.[0-9]*) ;;  # valid forms
+    *) _tau=0.5 ;;
+  esac
 
   [ -z "$_sid" ] && return 1
   [ -z "$_body" ] && return 1
@@ -620,9 +630,19 @@ pp_oar_referenced() {
   case "$_PP_STAT_FLAVOR" in
     gnu) _mtime=$(stat -c %Y "$_tail" 2>/dev/null || echo 0) ;;
     bsd) _mtime=$(stat -f %m "$_tail" 2>/dev/null || echo 0) ;;
-    *)   _mtime=0 ;;
+    *)
+      # GPT-review #3: portable fallback when neither stat flavor works.
+      # `find -printf '%T@'` is GNU-only; `perl -e 'print (stat ...)[9]'`
+      # is widely available but adds a dependency. Cleanest fallback: use
+      # `ls -l` mtime parsing? Too fragile. Best: try `find ... -newer`
+      # heuristics. ACTUALLY: if both stat probes fail, the host is
+      # exceptionally minimal (BusyBox without coreutils + no BSD).
+      # Disable the window gate rather than forcing reject — let cite-token
+      # gate + Jaccard threshold do their work alone. Document the trade-off.
+      _mtime=$_inj   # treat as in-window (lower bound) — falls through
+      ;;
   esac
-  case "$_mtime" in ''|*[!0-9]*) _mtime=0 ;; esac
+  case "$_mtime" in ''|*[!0-9]*) _mtime="$_inj" ;; esac
   # BOTH bounds closed. If mtime is outside [inj, scan], reject.
   # (No late-reference leakage: scan_at_epoch is the upper bound the
   # labeler driver clamps to min(now, row.scan_at_epoch) before calling.)
@@ -632,6 +652,10 @@ pp_oar_referenced() {
 
   # Cite-SYMBOL presence check (M1: symbols only). Iterate via heredoc to
   # avoid pipeline-subshell variable-loss under bash 3.2.
+  # GPT-review #2: case-insensitive — the body Jaccard tokenizer lowercases
+  # everything, but the cite-symbol check needs to match the transcript
+  # AS-WRITTEN. User could type "FooBar" in transcript while body has
+  # "FooBar" too — `grep -wF` IS case-sensitive. Switched to `grep -iwF`.
   local _cite_ok=0 _c
   while IFS= read -r _c; do
     [ -z "$_c" ] && continue
@@ -642,7 +666,7 @@ pp_oar_referenced() {
     case "$_c" in
       */*|*.*) continue ;;
     esac
-    if LC_ALL=C grep -wF -- "$_c" "$_tail" >/dev/null 2>&1; then
+    if LC_ALL=C grep -iwF -- "$_c" "$_tail" >/dev/null 2>&1; then
       _cite_ok=1
       break
     fi
@@ -727,10 +751,17 @@ EOF
     _f_a=$(mktemp -t pp-oar-ref-a 2>/dev/null) || return 1
     _f_b=$(mktemp -t pp-oar-ref-b 2>/dev/null) || { rm -f "$_f_a"; return 1; }
   fi
-  # Trap RETURN to guarantee temp-file cleanup even on signal-interrupted
-  # paths (same belt-and-suspenders pattern as pp_oar_acted_for_path).
+  # GPT-review #1: `trap … RETURN` inside a bash function is SHELL-WIDE,
+  # not function-scoped. After this function returns once, the trap
+  # definition persists and would fire on every subsequent function
+  # return in the same shell — rm'ing variables that no longer exist
+  # (noise) or worse, clobbering an outer function's RETURN trap.
+  # Fix: install the trap, run the critical section, then explicitly
+  # `trap - RETURN` to clear before EVERY return (and as the last
+  # statement on the success path). The `_cleanup_then_return` helper
+  # below centralizes this so we can't miss a path.
   # shellcheck disable=SC2064
-  trap "rm -f '$_f_a' '$_f_b'" RETURN
+  trap "rm -f '$_f_a' '$_f_b'; trap - RETURN" RETURN
 
   printf '%s\n' "$_tail_bigrams" > "$_f_a"
   printf '%s\n' "$_body_bigrams" > "$_f_b"

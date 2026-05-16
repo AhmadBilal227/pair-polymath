@@ -1409,6 +1409,39 @@ $critique_input"
                 elif echo "$verdict" | grep -Eqi '\bPASS\b'; then
                   # PASS → reset drop streak
                   echo 0 > "$streak_file"
+
+                  # v0.5.2 — hallucination shadow post-check (spec §C).
+                  # Gated on PP_HALLUC_GATE_ENABLE=1. Pure verifier:
+                  # rc=0 → would-pass, rc=1 → would-drop. Emits a per-cycle
+                  # telemetry counter (_pp_halluc_post_drops; consumed by
+                  # Task 13's kpi-cycle emitter). ACTIVE mode
+                  # (PP_HALLUC_GATE_ACTIVE=1) is the ONLY path that
+                  # actually flips PASS → DROP. Shadow path leaves the
+                  # verdict file untouched so the OAR denominator
+                  # (injected count) stays causally clean.
+                  # NOTE: byte-identity invariant — when both flags are
+                  # unset/0, this block is a no-op and STDOUT must remain
+                  # sha256-identical to v0.5.1.0.
+                  if [ "${PP_HALLUC_GATE_ENABLE:-0}" = "1" ] \
+                     && command -v pp_halluc_verify_citations >/dev/null 2>&1; then
+                    _pp_halluc_paths=$(printf '%s\n' "${_pp_valid_paths:-}")
+                    _pp_halluc_syms=$(printf '%s\n' "${_pp_valid_symbols:-}")
+                    _pp_halluc_body=$(head -1 "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt" 2>/dev/null)
+                    if ! pp_halluc_verify_citations "$cwd" "$_pp_halluc_body" \
+                           "$_pp_halluc_paths" "$_pp_halluc_syms" 2>/dev/null; then
+                      _pp_halluc_post_drops=$(( ${_pp_halluc_post_drops:-0} + 1 ))
+                      if [ "${PP_HALLUC_GATE_ACTIVE:-0}" = "1" ]; then
+                        # Flip verdict PASS → DROP. verdict_file is
+                        # per-lens (suffix -${ci_id}-verdict.txt) so a
+                        # single-line overwrite is safe — does not
+                        # clobber other lenses' verdicts. The DROP will
+                        # be visible to downstream consumers (display
+                        # reader + dashboard); v0.5.2 keeps this path
+                        # OFF by default (active mode lands in v0.5.3).
+                        echo "lens${ci}: DROP (halluc_post_check)" > "$verdict_file"
+                      fi
+                    fi
+                  fi
                 fi
                 # FIX (review I1): no verdict match (model omitted line or used unknown verb) → no streak update
               fi

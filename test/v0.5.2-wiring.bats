@@ -190,3 +190,99 @@ teardown() { rm -rf "$HOME"; }
   grep -q 'kill -0 "\$_pp_oar_pid"' "$PP_ROOT/bin/statusline.sh"
   grep -q 'kill -9 "\$_pp_oar_pid"' "$PP_ROOT/bin/statusline.sh"
 }
+
+# ========================================================
+# Task 12 — hallucination post-check call site (shadow, gated)
+# ========================================================
+#
+# Spec §C: after critique PASS, run pp_halluc_verify_citations.
+#   - PP_HALLUC_GATE_ENABLE=0 (default): block is a no-op (byte-identity).
+#   - PP_HALLUC_GATE_ENABLE=1 + PP_HALLUC_GATE_ACTIVE=0: shadow — count
+#     would-drops in _pp_halluc_post_drops, verdict file unchanged.
+#   - PP_HALLUC_GATE_ENABLE=1 + PP_HALLUC_GATE_ACTIVE=1: flip verdict to
+#     DROP (active mode; not default in v0.5.2).
+#
+# End-to-end behavior assertions (counter increments, verdict flips)
+# live in Task 13's kpi-cycle test where _pp_halluc_post_drops is
+# emitted to the metrics blob. Here we lock down the WIRING — the code
+# shape that proves Task 12 is committed and matches the spec.
+
+@test "T12 wiring: PASS branch contains PP_HALLUC_GATE_ENABLE gate" {
+  # Code-shape guard: the hallucination post-check is mounted under
+  # the critique-PASS branch (after `echo 0 > "$streak_file"`), gated
+  # on PP_HALLUC_GATE_ENABLE=1, and only flips the verdict when
+  # PP_HALLUC_GATE_ACTIVE=1 ALSO. This is the contract the byte-identity
+  # invariant depends on.
+  grep -q 'PP_HALLUC_GATE_ENABLE:-0' "$PP_ROOT/bin/statusline.sh"
+  grep -q 'PP_HALLUC_GATE_ACTIVE:-0' "$PP_ROOT/bin/statusline.sh"
+  grep -q 'pp_halluc_verify_citations' "$PP_ROOT/bin/statusline.sh"
+}
+
+@test "T12 wiring: counter variable is _pp_halluc_post_drops (Task 13 reads this)" {
+  # The counter name is load-bearing — Task 13's KPI emitter reads
+  # ${_pp_halluc_post_drops:-0} when building the cycle blob. If this
+  # name drifts the telemetry silently zeros out.
+  grep -q '_pp_halluc_post_drops=' "$PP_ROOT/bin/statusline.sh"
+}
+
+@test "T12 wiring: active-mode flip writes verdict file with halluc_post_check reason" {
+  # When PP_HALLUC_GATE_ACTIVE=1 ALSO set, the PASS → DROP transition
+  # must write a verdict line tagged with the halluc_post_check reason
+  # (so pp_retry_classify_reason can route it as citation_fail). Verify
+  # the literal flip-string lives in the source.
+  grep -q 'lens.*DROP (halluc_post_check)' "$PP_ROOT/bin/statusline.sh"
+}
+
+@test "T12 wiring: PP_HALLUC_GATE_ENABLE=0 → byte-identity holds (no post-check side effect)" {
+  # End-to-end byte-identity guard for the gating flag itself.
+  # Without PP_HALLUC_GATE_ENABLE set, STDOUT must match the OAR-off run
+  # byte-for-byte (modulo known time-varying surfaces stripped by the
+  # same normalizer as test/v0.5.1-byte-identity.bats).
+  unset PP_HALLUC_GATE_ENABLE PP_HALLUC_GATE_ACTIVE PP_HALLUC_GATE_DEEP
+  unset PP_RETRY_ROUTER_ENABLE PP_RETRY_ROUTER_SHADOW PP_KPI_ENABLE PP_OAR_ENABLE
+  local _baseline_file="$PP_ROOT/test/fixtures/v0.5.0-baseline-stdout.txt"
+  [ -f "$_baseline_file" ] || skip "baseline file missing"
+  _norm() {
+    perl -CSD -pe '
+      s/\x1b\[[0-9;]*[A-Za-z]//g;
+      s/^(?:\x{1FA94}|\x{1FA84}|\x{2728}|\x{1F4AB})(?:\s+cpu\s+\S+)?\s*\n//;
+      s/^(?:\x{1FA94}|\x{1FA84}|\x{2728}|\x{1F4AB})\s*//;
+    '
+  }
+  local _baseline_sha _current_sha
+  _baseline_sha=$(_norm < "$_baseline_file" | shasum -a 256 | cut -d' ' -f1)
+  _current_sha=$(cat "$PP_ROOT/test/fixtures/stdin-sample.json" \
+    | bash "$PP_ROOT/bin/statusline.sh" 2>/dev/null \
+    | _norm | shasum -a 256 | cut -d' ' -f1)
+  [ "$_baseline_sha" = "$_current_sha" ]
+}
+
+@test "T12 wiring: ENABLE=1 + body with fake citation → counter incremented (unit)" {
+  # Direct exercise of the post-check primitive at the call-site
+  # contract. We can't synthesize a full critique-PASS cycle in
+  # bats (requires LLM output parsing), so we drive the function
+  # the way statusline.sh does: source the lib, set up cwd + body
+  # + allowlists, call the verifier, and assert rc=1 (would-drop).
+  # The integration block's only job is to forward this rc=1 to
+  # the counter — verified by the source-shape guards above.
+  . "$PP_ROOT/lib/hallucination.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  # Body cites a fake file that's NOT in the allowlist either.
+  run pp_halluc_verify_citations "$_repo" \
+      "Refactor totally-fake.ts to handle errors" "totally-fake.ts" ""
+  [ "$status" -eq 1 ]
+  rm -rf "$_repo"
+}
+
+@test "T12 wiring: ENABLE=1 + ACTIVE=0 → shadow contract (no verdict mutation)" {
+  # The library function MUST NOT write to verdict files even when
+  # rc=1. That's the call site's job, gated on PP_HALLUC_GATE_ACTIVE=1.
+  # Re-asserts the shadow-contract guard already in hallucination-gate.bats
+  # but in the wiring file so a refactor of the call site is visible
+  # here too.
+  . "$PP_ROOT/lib/hallucination.sh"
+  local _src
+  _src=$(declare -f pp_halluc_verify_citations)
+  ! printf '%s\n' "$_src" | LC_ALL=C grep -E 'verdict_file|PP_VERDICT' >/dev/null
+}

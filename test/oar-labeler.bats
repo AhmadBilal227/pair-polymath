@@ -137,3 +137,159 @@ teardown() { rm -rf "$HOME"; }
   run pp_oar_with_row_timeout 0 true
   [ "$status" -eq 0 ]   # `true` completes well within the clamped 3s
 }
+
+# ----------------------------------------------------------------------------
+# pp_oar_pushed_back — spec §B step 2 (explicit dismiss-ack only, no
+# transcript-negation heuristic in v0.5.2). Schema matches lib/dismiss.sh
+# (fields: id, ts ISO-8601, hash=short prefix, source, deleted).
+# Window: [INJECT_TS_EPOCH, SCAN_AT_EPOCH] inclusive on both ends.
+# Test timestamps below: 2026-05-15T00:00:00Z = 1778803200 (verified via
+# `date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "..." "+%s"`); the plan's example
+# values 1778889600/1778893200 are off by one day — actual values used.
+# ----------------------------------------------------------------------------
+
+# Helper: source dismiss.sh + memory schema, return the project-scoped path
+# pp_oar_pushed_back will read. Tests write rules directly to this file
+# (rather than via pp_dismiss_ack) so they can control .ts deterministically.
+_pp_pushed_back_setup_rules_file() {
+  # shellcheck source=../lib/memory/schema.sh
+  . "$PP_ROOT/lib/memory/schema.sh"
+  # shellcheck source=../lib/dismiss.sh
+  . "$PP_ROOT/lib/dismiss.sh"
+  mkdir -p "$PP_STATE_DIR/dismiss"
+  pp_dismiss_file_path
+}
+
+@test "pushed_back: returns 0 + rule id when matching ack rule is in window" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  # inject_ts = 2026-05-15T00:00:00Z (epoch 1778803200)
+  # scan_at   = 2026-05-15T01:00:00Z (epoch 1778806800)
+  # rule.ts   = 2026-05-15T00:30:00Z → in window
+  jq -nc \
+    '{id:"a-2026-05-15-test",ts:"2026-05-15T00:30:00Z",
+      reason_summary:"Acked — keep firing",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  local out rc
+  out=$(pp_oar_pushed_back "deadbeef1234567890abcd" 1778803200 1778806800)
+  rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$out" = "a-2026-05-15-test" ]
+}
+
+@test "pushed_back: returns non-zero when ack is AFTER scan_at (outside window)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  # rule.ts = 02:00Z → after scan_at 01:00Z window upper bound
+  jq -nc \
+    '{id:"a-late",ts:"2026-05-15T02:00:00Z",
+      reason_summary:"Acked — keep firing",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  run pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "pushed_back: returns non-zero when ack is BEFORE inject_ts (outside window)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  # rule.ts = previous day → before inject_ts 00:00Z window lower bound
+  jq -nc \
+    '{id:"a-early",ts:"2026-05-14T23:00:00Z",
+      reason_summary:"Acked — keep firing",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  run pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+}
+
+@test "pushed_back: returns non-zero when hash does not match (different prefix)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  # rule.hash = "feedba" → does NOT prefix "deadbeef..."
+  jq -nc \
+    '{id:"a-other",ts:"2026-05-15T00:30:00Z",
+      reason_summary:"Acked — keep firing",scope:"project",lens_id:null,
+      hash:"feedba",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  run pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+}
+
+@test "pushed_back: ignores non-ack rules (source=manual is NOT 'ack-this-observation')" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  # source=manual → user dismissed for other reasons, not an explicit ack.
+  # Hash + ts BOTH match; only source disqualifies.
+  jq -nc \
+    '{id:"d-manual",ts:"2026-05-15T00:30:00Z",
+      reason_summary:"Different concern",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"manual"}' >> "$_f"
+  run pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+}
+
+@test "pushed_back: ignores auto_suppress rules (only explicit source=ack qualifies)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  jq -nc \
+    '{id:"d-auto",ts:"2026-05-15T00:30:00Z",
+      reason_summary:"Auto-suppressed",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:false,deleted_reason:null,
+      ttl_days:7,source:"auto_suppress"}' >> "$_f"
+  run pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+}
+
+@test "pushed_back: latest-line-wins — disabled ack does NOT count as pushed-back" {
+  # Append-only schema: a disable appends a deleted=true line for the same
+  # id. Latest line wins. An enable would re-flip it. pp_oar_pushed_back
+  # must honor that fold, otherwise a re-enabled-then-disabled ack rule
+  # would still match — silent miscoding of the outcome.
+  . "$PP_ROOT/lib/oar.sh"
+  local _f
+  _f=$(_pp_pushed_back_setup_rules_file)
+  # Initial ack (deleted=false) at 00:30Z, then a disabled follow-up at 00:31Z.
+  jq -nc \
+    '{id:"a-toggle",ts:"2026-05-15T00:30:00Z",
+      reason_summary:"Acked — keep firing",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  jq -nc \
+    '{id:"a-toggle",ts:"2026-05-15T00:31:00Z",
+      reason_summary:"Acked — keep firing",scope:"project",lens_id:null,
+      hash:"deadbe",deleted:true,deleted_reason:"user_disabled",
+      ttl_days:null,source:"ack"}' >> "$_f"
+  run pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800
+  [ "$status" -ne 0 ]
+}
+
+@test "pushed_back: returns 1 when rules file is absent (fresh install)" {
+  . "$PP_ROOT/lib/oar.sh"
+  # Don't seed any dismiss file — pp_oar_pushed_back must not error,
+  # just return 1.
+  run pp_oar_pushed_back "deadbeef1234" 1778803200 1778806800
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "pushed_back: empty hash returns 1 (caller bug guard)" {
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_pushed_back "" 1778803200 1778806800
+  [ "$status" -eq 1 ]
+}
+
+@test "pushed_back: non-numeric epoch returns 1 (caller bug guard)" {
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_pushed_back "deadbeef1234" "not-a-number" 1778806800
+  [ "$status" -eq 1 ]
+}

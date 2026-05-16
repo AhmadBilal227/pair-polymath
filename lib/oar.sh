@@ -177,3 +177,63 @@ pp_oar_with_row_timeout() {
   # Pass-through — outer cycle guard handles runaway processes.
   "$@"
 }
+
+# pp_oar_pushed_back HASH INJECT_TS_EPOCH SCAN_AT_EPOCH
+# Spec §B step 2: explicit `polymath dismiss ack <hash-prefix>` only — no
+# transcript-negation heuristic (deferred to v0.5.3 per spec §A intentional
+# limit; the heuristic version is too noisy without ground-truth labels).
+#
+# Returns 0 + prints the matching rule's id (so the caller can use it as the
+# row's evidence_id) when a dismiss-ack rule satisfies ALL of:
+#   - source == "ack"   (NOT manual/auto_suppress — those are different intent)
+#   - deleted == false  (latest-line-wins per id, so a disable→enable cycle is honored)
+#   - HASH startswith(.hash)  (rule stores the SHORT prefix the user typed;
+#                              pending row carries the full hash)
+#   - .ts (ISO-8601 UTC) within [INJECT_TS_EPOCH, SCAN_AT_EPOCH] inclusive
+# Returns 1 (and prints nothing on stdout) otherwise.
+#
+# Reads the project-scoped dismiss file via pp_dismiss_file_path — the same
+# canonical store pp_dismiss_ack writes to. The spec narrative names this
+# `~/.claude/state/dismiss-rules.jsonl`, but the v0.5.0 dismiss subsystem
+# uses a project-scoped path (one JSONL per project hash); this function
+# delegates to lib/dismiss.sh::pp_dismiss_file_path to stay in lockstep with
+# wherever pp_dismiss_ack writes. Schema fields (id/ts/hash/source) match
+# pp_dismiss_ack at lib/dismiss.sh:413.
+#
+# Window is closed on BOTH ends. Caller is responsible for passing
+# SCAN_AT_EPOCH = min(now, row.scan_at_epoch) per spec §B.
+pp_oar_pushed_back() {
+  local _hash="${1:-}"
+  local _inj="${2:-0}"
+  local _scan="${3:-0}"
+  [ -z "$_hash" ] && return 1
+  # Defensive validation — non-numeric epoch silently failing would
+  # mask a caller bug. Empty string / non-digits → reject.
+  case "$_inj" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_scan" in ''|*[!0-9]*) return 1 ;; esac
+  # Source dismiss.sh on first call. Idempotent (dismiss.sh has no source
+  # guard, but redefining the functions is harmless). Use PP_ROOT to locate.
+  if ! type pp_dismiss_file_path >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "${PP_ROOT:-.}/lib/dismiss.sh" 2>/dev/null || return 1
+  fi
+  local _rules
+  _rules=$(pp_dismiss_file_path 2>/dev/null) || return 1
+  [ -f "$_rules" ] || return 1
+  # Slurped jq with latest-line-wins fold: honors a disable→enable cycle
+  # on the same id (the dismiss subsystem is append-only; the latest line
+  # for an id is authoritative — see lib/dismiss.sh:108 group_by/last).
+  local _id
+  _id=$(jq -s -r --arg h "$_hash" --argjson inj "$_inj" --argjson scan "$_scan" '
+    group_by(.id) | map(last)
+    | .[]
+    | select(.source == "ack")
+    | select(.deleted == false)
+    | select(.hash != null and .hash != "" and (.hash as $p | $h | startswith($p)))
+    | select((.ts | fromdateiso8601? // 0) >= $inj
+             and (.ts | fromdateiso8601? // 0) <= $scan)
+    | .id
+  ' "$_rules" 2>/dev/null | head -1)
+  [ -n "$_id" ] || return 1
+  printf '%s' "$_id"
+}

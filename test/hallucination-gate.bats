@@ -186,12 +186,26 @@ teardown() {
   # Library contract assertion: the function body must not touch any
   # observable verdict-state surface. This protects the OAR denominator
   # (spec §C "Critical change from v2"). Inspect the function source.
+  #
+  # Task-9 review (code-reviewer P2 + GPT #10): the earlier regex missed
+  # single `>` redirects, `cp`/`mv`/`rm`, `eval`, and `command sub > path`
+  # patterns. Tightened to catch the full write surface.
   . "$PP_ROOT/lib/hallucination.sh"
   local _src
   _src=$(declare -f pp_halluc_verify_citations)
   ! printf '%s\n' "$_src" | LC_ALL=C grep -E 'PP_VERDICT|verdict=|verdict_file' >/dev/null
-  # Also must not write to common state surfaces.
-  ! printf '%s\n' "$_src" | LC_ALL=C grep -E '>>|tee |mktemp' >/dev/null
+  # Write surfaces — must NOT appear in the function body. Note: the test
+  # uses anchored patterns so common reads (e.g. `< file`) don't fire.
+  # The function is allowed to use READ stdin redirection ( `<` ) and
+  # process substitution; what it cannot do is WRITE.
+  ! printf '%s\n' "$_src" | LC_ALL=C grep -E '>>|tee | mktemp' >/dev/null
+  # Single `>` redirect (excluding `>=`, `>&` and `>/dev/null`-style
+  # discards which we tolerate as no-op writes). Empirically detect the
+  # WRITE TO A NAMED PATH form: ` > /` or ` > $`, which would be a real
+  # external write.
+  ! printf '%s\n' "$_src" | LC_ALL=C grep -E ' > /|> \$|> [a-z]' >/dev/null
+  # Mutating shell commands.
+  ! printf '%s\n' "$_src" | LC_ALL=C grep -E ' (cp|mv|rm) |eval ' >/dev/null
 }
 
 @test "halluc: missing cwd dir → rc=1" {

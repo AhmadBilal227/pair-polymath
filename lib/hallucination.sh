@@ -54,6 +54,12 @@ if ! type pp_contain_path >/dev/null 2>&1; then
   # shellcheck disable=SC1091
   . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}/lib/grounding.sh" 2>/dev/null || true
 fi
+# Task-9 GPT-review #3: if pp_contain_path is STILL undefined after the lazy-
+# source attempt, every cited path would fail with "command not found" silently
+# under `2>/dev/null`. That would inflate the shadow-mode FPR with FALSE bug
+# reports. Detect this state and have the function return rc=2 (explicit
+# missing-dependency) at the call site rather than rc=1 (citation failed).
+# Caller's PP_HALLUC_GATE_ACTIVE gate should treat rc=2 as "skip" not "drop."
 
 # Minimum symbol length to be considered a real (non-stopword) citation.
 # Matches spec §B's acted-check stopword/length floor. Citations shorter than
@@ -90,6 +96,14 @@ pp_halluc_verify_citations() {
 
   [ -n "$_cwd" ] || return 1
   [ -d "$_cwd" ] || return 1
+
+  # GPT-review #3: explicit missing-dep guard. If lazy-source failed and
+  # pp_contain_path is undefined, fail with rc=2 (distinct from rc=1
+  # "citation failed") so the caller can detect the misconfig vs treat
+  # everything as hallucinated.
+  if ! type pp_contain_path >/dev/null 2>&1; then
+    return 2
+  fi
 
   # === Step 1: empty inputs → trivially PASS ===
   if [ -z "$_paths" ] && [ -z "$_syms" ]; then
@@ -130,12 +144,17 @@ pp_halluc_verify_citations() {
       # Use grep -wF (fixed-string, word-boundary). -F neutralises regex
       # metacharacters in the symbol; -w enforces token boundaries so
       # `handleRetry` does NOT match inside `handleRetryQueueDispatcher`.
+      # GPT-review #6: skip directories (grep emits to stderr and exits
+      # non-zero, but the loop's `2>/dev/null` masks that — directory cite
+      # with no symbol would silently PASS). [-f] guard rejects.
+      # GPT-review #8: `-I` ignores binary files (random byte sequences in
+      # PNG/PDF could spuriously match a 4-char symbol, inflating PASS rate).
       if [ -n "$_resolved_paths" ]; then
         local _rp
         while IFS= read -r _rp || [ -n "$_rp" ]; do
           [ -z "$_rp" ] && continue
           [ -f "$_rp" ] || continue
-          if LC_ALL=C grep -wF -q -- "$_s" "$_rp" 2>/dev/null; then
+          if LC_ALL=C grep -IwF -q -- "$_s" "$_rp" 2>/dev/null; then
             _found=1
             break
           fi
@@ -154,7 +173,7 @@ pp_halluc_verify_citations() {
           # field 1 = symbol name. `$1 == s` is an EXACT match (no
           # word-boundary fuzz needed — the field is already tokenised).
           if LC_ALL=C awk -v s="$_s" -F'\t' \
-              '$1 == s { found=1; exit } END { exit !found }' \
+              '$1 == s && $1 !~ /^!_TAG/ { found=1; exit } END { exit !found }' \
               "$_cwd/tags" >/dev/null 2>&1; then
             _found=1
           fi

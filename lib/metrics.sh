@@ -555,3 +555,35 @@ pp_kpi_compute_p95() {
       printf "%.6f", v[idx]
     }'
 }
+
+# === v0.5.2 Wilson 95% CI lower bound =========================================
+# pp_kpi_wilson_lower_95 SUCCESSES TRIALS
+# Stdout: 4-decimal float in [0, 1] — the Wilson score interval's lower
+# bound at 95% confidence (z = 1.959963984540054). Pure awk; bash-3.2-portable.
+# Used by `polymath history` to display per-lens acted% confidence floors.
+#
+# Formula (Wilson score interval, lower bound):
+#   center = (p + z²/(2n)) / (1 + z²/n)
+#   margin = (z * sqrt(p(1-p)/n + z²/(4n²))) / (1 + z²/n)
+#   lower  = max(0, center - margin)
+# where p = SUCCESSES / TRIALS, n = TRIALS, z = 1.959963984540054 (95% two-sided).
+#
+# Edge case: TRIALS=0 → return 0.0000 (no data, no claim). Non-numeric inputs
+# are coerced to 0 (defensive). Output is locale-independent (LC_ALL=C).
+pp_kpi_wilson_lower_95() {
+  local _s="${1:-0}" _n="${2:-0}"
+  case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+  case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+  [ "$_n" -eq 0 ] && { printf '0.0000'; return 0; }
+  LC_ALL=C awk -v s="$_s" -v n="$_n" '
+    BEGIN {
+      z = 1.959963984540054
+      z2 = z * z
+      p = s / n
+      center = (p + z2 / (2 * n)) / (1 + z2 / n)
+      margin = (z * sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / (1 + z2 / n)
+      lower = center - margin
+      if (lower < 0) lower = 0
+      printf "%.4f", lower
+    }'
+}

@@ -1097,3 +1097,84 @@ _pp_oar_set_mtime() {
   [ "$output" = "referenced" ]
   rm -rf "$_isolated"
 }
+
+# === v0.5.2 Task 10 — pp_kpi_wilson_lower_95 ==================================
+# Per plan: pure-awk Wilson 95% CI lower bound on acted% for polymath history.
+# Spec §D example: SECURITY 2/7 → Wilson 95% lower ≈ 6.4%.
+
+@test "wilson_lower_95: 0/0 returns 0" {
+  . "$PP_ROOT/lib/metrics.sh"
+  [ "$(pp_kpi_wilson_lower_95 0 0)" = "0.0000" ]
+}
+
+@test "wilson_lower_95: 1/1 (point estimate 1.0) returns lower-bound < 1" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _lo
+  _lo=$(pp_kpi_wilson_lower_95 1 1)
+  # 1/1 with Wilson should be ~0.21 (n=1 has wide CI)
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.05 && v+0 < 0.99) }'
+}
+
+@test "wilson_lower_95: 2/7 (~28.6%) returns lower bound around 6%" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _lo
+  _lo=$(pp_kpi_wilson_lower_95 2 7)
+  # Spec §D example: SECURITY 2/7 → Wilson 95% lower ≈ 6.4%
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.04 && v+0 < 0.10) }'
+}
+
+@test "wilson_lower_95: 50/100 returns lower bound around 40%" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _lo
+  _lo=$(pp_kpi_wilson_lower_95 50 100)
+  # Classic Wilson 50% / 100: ~40.4%
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.38 && v+0 < 0.43) }'
+}
+
+@test "wilson_lower_95: 0/10 returns 0 (zero successes clamp)" {
+  . "$PP_ROOT/lib/metrics.sh"
+  # k=0 → p=0 → center = (z²/(2n))/D, margin = z*sqrt(z²/(4n²))/D
+  # = (z²/(2n))/D and (z²/(2n))/D respectively → lower = 0 exactly.
+  [ "$(pp_kpi_wilson_lower_95 0 10)" = "0.0000" ]
+}
+
+@test "wilson_lower_95: 10/10 returns positive lower bound < 1" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _lo
+  _lo=$(pp_kpi_wilson_lower_95 10 10)
+  # k=n=10: Wilson 95% lower ≈ 0.7225 (textbook). Asserts > 0.6, < 1.
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.60 && v+0 < 1.00) }'
+}
+
+@test "wilson_lower_95: 1/2 returns ~0.0943 (textbook fixed-point)" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _lo
+  _lo=$(pp_kpi_wilson_lower_95 1 2)
+  # k=1, n=2: phat=0.5, denom=1+1.96²/2≈2.9208, center≈0.5, margin≈0.4057
+  # lower ≈ 0.0943 (well-known small-sample example).
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.07 && v+0 < 0.12) }'
+}
+
+@test "wilson_lower_95: large n approaches k/n" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _lo
+  _lo=$(pp_kpi_wilson_lower_95 500 1000)
+  # n=1000, phat=0.5 → CI half-width ~0.031. lower ≈ 0.469.
+  LC_ALL=C awk -v v="$_lo" 'BEGIN { exit !(v+0 > 0.45 && v+0 < 0.50) }'
+}
+
+@test "wilson_lower_95: non-numeric input is coerced to 0 (defensive)" {
+  . "$PP_ROOT/lib/metrics.sh"
+  # Garbage successes → coerced to 0 → k=0/n=10 → 0.0000.
+  [ "$(pp_kpi_wilson_lower_95 abc 10)" = "0.0000" ]
+  # Garbage trials → coerced to 0 → n=0 branch → 0.0000.
+  [ "$(pp_kpi_wilson_lower_95 5 xyz)" = "0.0000" ]
+}
+
+@test "wilson_lower_95: output is always 4 decimal places" {
+  . "$PP_ROOT/lib/metrics.sh"
+  local _out
+  _out=$(pp_kpi_wilson_lower_95 50 100)
+  # Match exact format: ^[0-9]\.[0-9]{4}$
+  [[ "$_out" =~ ^[0-9]\.[0-9]{4}$ ]]
+}

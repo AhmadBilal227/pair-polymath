@@ -515,3 +515,99 @@ _pp_pushed_back_setup_rules_file() {
   [ "$status" -ne 0 ]
   rm -rf "$_repo"
 }
+
+# GPT-review #10: pure-deletion test. A commit that deletes lines near the
+# cited range produces hunks like `@@ -100,5 +99,0 @@` (5 lines removed,
+# 0 added at line 99). The OLD-range overlap check must catch this; the
+# NEW range alone would miss (start=99, count=0 → end=98 → empty interval).
+@test "acted_for_path: line_proximity catches pure deletion near cited range" {
+  command -v git >/dev/null 2>&1 || skip "git not installed"
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d) || skip "mktemp failed"
+  (
+    cd "$_repo" && git init -q \
+      && git config gc.auto 0 && git config maintenance.auto false \
+      && git config user.email t@t && git config user.name t
+    # Create a 200-line file
+    awk 'BEGIN{for(i=1;i<=200;i++) print "line " i}' > big.txt
+    git add big.txt && git -c commit.gpgsign=false commit -q -m "init"
+    export GIT_COMMITTER_DATE="2026-05-15T00:30:00Z"
+    export GIT_AUTHOR_DATE="2026-05-15T00:30:00Z"
+    # Pure deletion at lines 100-110 (the cited area)
+    sed -i.bak '100,110d' big.txt && rm -f big.txt.bak
+    git add big.txt && git commit -q -m "delete lines 100-110"
+  ) >/dev/null 2>&1 || { rm -rf "$_repo"; skip "git fixture setup failed"; }
+  # Cite lines 105-108 (inside the deleted range)
+  local out rc
+  out=$(pp_oar_acted_for_path "$_repo" "big.txt" "" "105-108" \
+         1778803200 1778806800); rc=$?
+  rm -rf "$_repo"
+  [ "$rc" -eq 0 ]
+  printf '%s\n' "$out" | grep -qE '^[0-9a-f]{40}\|line_proximity$'
+}
+
+# GPT-review #11: pre-rename test. A commit BEFORE the rename adds the
+# cited symbol on the OLD path. Without the pathspec-drop fix in git show,
+# the show command filters to the NEW path and emits empty for the
+# pre-rename commit → symbol scan misses. With the fix, the diff is shown
+# in full and the symbol is found.
+@test "acted_for_path: catches symbol added in pre-rename commit (via --follow)" {
+  command -v git >/dev/null 2>&1 || skip "git not installed"
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d) || skip "mktemp failed"
+  (
+    cd "$_repo" && git init -q \
+      && git config gc.auto 0 && git config maintenance.auto false \
+      && git config user.email t@t && git config user.name t
+    # Initial: empty old.ts
+    printf 'placeholder\n' > old.ts
+    git add old.ts && git -c commit.gpgsign=false commit -q -m "init"
+    # Commit 1 (in window): ADD the cited symbol on the OLD path
+    export GIT_COMMITTER_DATE="2026-05-15T00:15:00Z"
+    export GIT_AUTHOR_DATE="2026-05-15T00:15:00Z"
+    printf 'function pp_my_special_symbol_42() {}\n' >> old.ts
+    git add old.ts && git commit -q -m "add pp_my_special_symbol_42 to old.ts"
+    # Commit 2 (in window): rename old.ts → new.ts (content stays)
+    export GIT_COMMITTER_DATE="2026-05-15T00:30:00Z"
+    export GIT_AUTHOR_DATE="2026-05-15T00:30:00Z"
+    git mv old.ts new.ts && git commit -q -m "rename old.ts → new.ts"
+  ) >/dev/null 2>&1 || { rm -rf "$_repo"; skip "git fixture setup failed"; }
+  # Cite by the CURRENT path (new.ts) — git log --follow walks back to
+  # old.ts via -M50%. The pre-rename commit's diff must be scanned even
+  # though its filename is old.ts at that commit.
+  local out rc
+  out=$(pp_oar_acted_for_path "$_repo" "new.ts" "pp_my_special_symbol_42" "" \
+         1778803200 1778806800); rc=$?
+  rm -rf "$_repo"
+  [ "$rc" -eq 0 ]
+  printf '%s\n' "$out" | grep -qE '^[0-9a-f]{40}\|symbol_exact$'
+}
+
+# GPT-review #6: malformed LINE_RANGE rejection. "20-" (empty after dash)
+# previously silently set _l_hi=0, which after ±20 expansion produced the
+# bizarre window [1, 20] meaning "near line 20" — surprising to callers
+# who meant "from line 20 onward". Now treated as invalid → line check
+# disabled → falls through to symbol-only or returns 1.
+@test "acted_for_path: malformed LINE_RANGE '20-' is rejected (no bizarre window)" {
+  command -v git >/dev/null 2>&1 || skip "git not installed"
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d) || skip "mktemp failed"
+  (
+    cd "$_repo" && git init -q \
+      && git config gc.auto 0 && git config maintenance.auto false \
+      && git config user.email t@t && git config user.name t
+    printf 'just a line\n' > big.txt
+    git add big.txt && git -c commit.gpgsign=false commit -q -m init
+    export GIT_COMMITTER_DATE="2026-05-15T00:30:00Z"
+    export GIT_AUTHOR_DATE="2026-05-15T00:30:00Z"
+    printf 'modified\n' >> big.txt
+    git add big.txt && git commit -q -m "edit"
+  ) >/dev/null 2>&1 || { rm -rf "$_repo"; skip "git fixture setup failed"; }
+  # Malformed range + no symbol → both checks disabled → returns 1
+  run pp_oar_acted_for_path "$_repo" "big.txt" "" "20-" 1778803200 1778806800
+  rm -rf "$_repo"
+  [ "$status" -ne 0 ]
+}

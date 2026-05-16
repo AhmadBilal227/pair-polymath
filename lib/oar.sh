@@ -351,15 +351,30 @@ pp_oar_acted_for_path() {
     done
   fi
 
-  # Parse LINE_RANGE "N-M" or "N".
+  # Parse LINE_RANGE "N-M" or "N". GPT-review #6: reject malformed forms
+  # like "20-" (empty after -) or "-5" (empty before -) by treating both
+  # halves as required. Without this, "20-" silently set _l_hi=0 → after
+  # ±20 expansion the window became [1, 20] which is "near line 20" but
+  # the caller said "from line 20 onward" — confusing.
   local _l_lo=0 _l_hi=0
   if [ -n "$_lrange" ]; then
     case "$_lrange" in
-      *-*) _l_lo="${_lrange%-*}"; _l_hi="${_lrange#*-}" ;;
-      *)   _l_lo="$_lrange"; _l_hi="$_lrange" ;;
+      *-*)
+        _l_lo="${_lrange%-*}"
+        _l_hi="${_lrange#*-}"
+        # Malformed: either half empty or non-numeric → disable line check
+        case "$_l_lo" in ''|*[!0-9]*) _l_lo=0; _l_hi=0 ;; esac
+        case "$_l_hi" in ''|*[!0-9]*) _l_lo=0; _l_hi=0 ;; esac
+        # Inverted range "10-5" — disable
+        if [ "$_l_lo" -gt 0 ] && [ "$_l_hi" -lt "$_l_lo" ]; then
+          _l_lo=0; _l_hi=0
+        fi
+        ;;
+      *)
+        _l_lo="$_lrange"; _l_hi="$_lrange"
+        case "$_l_lo" in ''|*[!0-9]*) _l_lo=0; _l_hi=0 ;; esac
+        ;;
     esac
-    case "$_l_lo" in ''|*[!0-9]*) _l_lo=0 ;; esac
-    case "$_l_hi" in ''|*[!0-9]*) _l_hi=0 ;; esac
   fi
 
   # Short-circuit: if neither check is active, no work possible. Returning
@@ -387,26 +402,47 @@ pp_oar_acted_for_path() {
   else
     _flag=$(mktemp -t pp-oar-flag 2>/dev/null) || return 1
   fi
+  # GPT-review #8 / code-reviewer P2: trap RETURN ensures the flag is
+  # removed on EVERY exit path including SIGTERM from the outer 15s
+  # cycle ceiling or a test-runner interrupt. RETURN is bash 3.2+.
+  # The post-loop `rm -f` below is the happy-path; this is belt-and-
+  # suspenders against signal-interrupted paths.
+  # shellcheck disable=SC2064
+  trap "rm -f '$_flag'" RETURN
 
   # Outer loop: walk commits. while-read runs in a subshell, but here the
   # subshell can WRITE TO the flag file (file mutations cross subshell
   # boundaries cleanly under Unix semantics). On first match we break;
   # post-loop we detect the flag's contents.
+  #
+  # GPT-review #1 (rename-history correctness): `git show ... -- "$_pathspec"`
+  # filters to the CURRENT path. For pre-rename commits (file lived at a
+  # different path back then), the pathspec excludes them and we miss
+  # legitimate diff content. Fix: drop the pathspec from `git show` and
+  # accept that we scan the whole commit's diff. Trade-off documented as
+  # cross-file FP risk — bounded by single-commit scope; spec §A "Known
+  # limits" calibration concern. The path filter at `git log --follow`
+  # already constrained the commit SET to those touching the path through
+  # rename history; we just relax the symbol/line scan to cover any file
+  # in those commits.
   printf '%s\n' "$_commits" | while IFS= read -r _commit; do
     [ -z "$_commit" ] && continue
     local _diff
     _diff=$(cd "$_repo" 2>/dev/null && git show -M50% --unified=0 \
-            "$_commit" -- "$_pathspec" 2>/dev/null)
+            "$_commit" 2>/dev/null)
     [ -z "$_diff" ] && continue
 
     # --- Symbol check ---
-    # Inspect ONLY added/removed content lines (`^[+-]` excluding the
-    # `+++`/`---` file headers that git show emits). grep -wF gives word-
-    # boundary fixed-string match — portable across GNU/BSD/BusyBox.
+    # GPT-review #2: header exclusion was `^[+-][^+-]` which incorrectly
+    # rejected valid content lines starting with `++` or `--` (e.g.
+    # `++i;`, `--count;`). Use the precise inverse: `^[+-]` selects all
+    # add/remove lines, then drop lines matching `^(--- |+++ )` which is
+    # the git-show file-header form (three chars + literal space).
     if [ -n "$_sym_tokens" ]; then
       local _diff_changes
       _diff_changes=$(printf '%s\n' "$_diff" \
-        | LC_ALL=C grep -E '^[+-][^+-]' 2>/dev/null || true)
+        | LC_ALL=C grep -E '^[+-]' 2>/dev/null \
+        | LC_ALL=C grep -Ev '^(---|\+\+\+) ' 2>/dev/null || true)
       if [ -n "$_diff_changes" ]; then
         local _tok2 _hit=0
         for _tok2 in $_sym_tokens; do
@@ -425,30 +461,60 @@ pp_oar_acted_for_path() {
 
     # --- Line proximity check ---
     # @@ hunk header form: `@@ -OLD_START[,OLD_COUNT] +NEW_START[,NEW_COUNT] @@ ...`
-    # With --unified=0, missing `,N` means N=1. We care about the +NEW range.
+    # With --unified=0, missing `,N` means N=1.
+    # GPT-review #3: must overlap BOTH -OLD and +NEW ranges. Pure deletions
+    # produce hunks like `@@ -100,5 +99,0 @@` (5 lines removed, 0 added at
+    # destination). The +NEW range alone (start=99, count=0) gives an empty
+    # interval that never overlaps the cited range — so the deletion would
+    # be missed. Check the OLD range too so removals near the cited area
+    # count as "acted."
     if [ "$_l_lo" -gt 0 ]; then
       local _hunks
       _hunks=$(printf '%s\n' "$_diff" \
         | LC_ALL=C grep -E '^@@ ' 2>/dev/null || true)
       if [ -n "$_hunks" ]; then
-        local _h _h_start _h_count _h_end _lo_ext _hi_ext _proximity_hit=0
+        local _h _ho_start _ho_count _ho_end _hn_start _hn_count _hn_end
+        local _lo_ext _hi_ext _proximity_hit=0
         # Iterate hunk headers via while-read in a subshell. The flag-file
         # write pattern works at any nesting depth — the inner subshell's
         # write is visible to the outer reader after the loop ends.
         while IFS= read -r _h; do
           [ -z "$_h" ] && continue
-          _h_start=$(printf '%s' "$_h" \
+          # Parse OLD range
+          _ho_start=$(printf '%s' "$_h" \
+            | LC_ALL=C sed -nE 's/^@@ -([0-9]+)(,[0-9]+)? \+[0-9,]+ @@.*/\1/p')
+          _ho_count=$(printf '%s' "$_h" \
+            | LC_ALL=C sed -nE 's/^@@ -[0-9]+,([0-9]+) \+[0-9,]+ @@.*/\1/p')
+          # Parse NEW range
+          _hn_start=$(printf '%s' "$_h" \
             | LC_ALL=C sed -nE 's/^@@ -[0-9,]+ \+([0-9]+)(,[0-9]+)? @@.*/\1/p')
-          _h_count=$(printf '%s' "$_h" \
+          _hn_count=$(printf '%s' "$_h" \
             | LC_ALL=C sed -nE 's/^@@ -[0-9,]+ \+[0-9]+,([0-9]+) @@.*/\1/p')
-          case "$_h_start" in ''|*[!0-9]*) continue ;; esac
-          case "$_h_count" in ''|*[!0-9]*) _h_count=1 ;; esac
-          _h_end=$(( _h_start + _h_count - 1 ))
+          case "$_ho_start" in ''|*[!0-9]*) _ho_start=0 ;; esac
+          case "$_ho_count" in ''|*[!0-9]*) _ho_count=1 ;; esac
+          case "$_hn_start" in ''|*[!0-9]*) _hn_start=0 ;; esac
+          case "$_hn_count" in ''|*[!0-9]*) _hn_count=1 ;; esac
+          _ho_end=$(( _ho_start + _ho_count - 1 ))
+          _hn_end=$(( _hn_start + _hn_count - 1 ))
           _lo_ext=$(( _l_lo - 20 ))
           _hi_ext=$(( _l_hi + 20 ))
           [ "$_lo_ext" -lt 1 ] && _lo_ext=1
-          # Overlap test: [h_start, h_end] intersects [lo_ext, hi_ext]
-          if [ "$_h_end" -ge "$_lo_ext" ] && [ "$_h_start" -le "$_hi_ext" ]; then
+          # Overlap test: cited window intersects EITHER the OLD or NEW
+          # range. Empty-range case (count=0): start..start-1 is empty so
+          # the overlap test (end >= lo_ext AND start <= hi_ext) handles
+          # it correctly — start=99, end=98 won't overlap anything except
+          # by coincidence. Check both OLD (deletion side) and NEW (add
+          # side) so pure-deletion hunks aren't missed.
+          local _old_hit=0 _new_hit=0
+          if [ "$_ho_start" -gt 0 ] && [ "$_ho_end" -ge "$_lo_ext" ] \
+             && [ "$_ho_start" -le "$_hi_ext" ]; then
+            _old_hit=1
+          fi
+          if [ "$_hn_start" -gt 0 ] && [ "$_hn_end" -ge "$_lo_ext" ] \
+             && [ "$_hn_start" -le "$_hi_ext" ]; then
+            _new_hit=1
+          fi
+          if [ "$_old_hit" = "1" ] || [ "$_new_hit" = "1" ]; then
             printf '%s|line_proximity' "$_commit" > "$_flag"
             _proximity_hit=1
             break

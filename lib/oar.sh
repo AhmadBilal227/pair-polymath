@@ -792,3 +792,299 @@ EOF
   printf 'line:1-%s|jaccard:%s' "$_line_n" "$_jaccard"
   return 0
 }
+
+# pp_oar_label_pending
+# Driver: reads oar-pending.jsonl, picks up to PP_OAR_LABEL_PER_CYCLE_CAP rows
+# whose scan_at_epoch < now (FIFO by scan_at_epoch ASC), classifies each into
+# one of {pushed-back, acted, referenced, ignored}, appends a labeled row to
+# oar-labeled.jsonl, and removes processed rows from pending. Rows not yet
+# due are preserved; rows past cap are preserved.
+#
+# Order of outcome detection per spec §B (first hit wins):
+#   1. pushed_back  (pp_oar_pushed_back)
+#   2. acted        (pp_oar_acted_for_path per cited path, after containment)
+#   3. referenced   (pp_oar_referenced)
+#   4. ignored      (default)
+#
+# Idempotency: stable identity = sha256(sid|lens|hash|inject_ts). The set of
+# already-labeled identities is read from oar-labeled.jsonl on entry; a row
+# whose identity is in that set is dropped from pending without re-labeling.
+#
+# Containment: cited paths are passed through pp_contain_path BEFORE being
+# handed to pp_oar_acted_for_path. Rows whose only cited paths fail
+# containment fall through to the next detector (referenced) or land on
+# "ignored". Symbols are still considered against contained paths.
+#
+# scan_at clamp: detectors receive UPPER_EPOCH = min(now, scan_at_epoch)
+# so a slightly-future scan_at doesn't let detectors see future evidence.
+#
+# Attempts / quarantine: per-row work is wrapped in pp_oar_with_row_timeout
+# (default 3s). On a "transient error" rc=2 from any detector AND the row
+# wouldn't otherwise be labeled, .attempts is bumped; on reaching
+# PP_OAR_LABEL_MAX_ATTEMPTS (default 3) the row is moved to oar-stuck.jsonl.
+#
+# Atomic pending rewrite: kept rows go to a sibling mktemp file, then
+# mv-replaces pending. No in-place edit; bash 3.2 portable.
+pp_oar_label_pending() {
+  local _cache_dir="${PP_CACHE_DIR:-$HOME/.claude/cache}"
+  local _pending="${_cache_dir}/oar-pending.jsonl"
+  local _labeled="${_cache_dir}/oar-labeled.jsonl"
+  local _stuck="${_cache_dir}/oar-stuck.jsonl"
+  local _cap="${PP_OAR_LABEL_PER_CYCLE_CAP:-5}"
+  local _max_att="${PP_OAR_LABEL_MAX_ATTEMPTS:-3}"
+  case "$_cap" in ''|*[!0-9]*) _cap=5 ;; esac
+  case "$_max_att" in ''|*[!0-9]*) _max_att=3 ;; esac
+  [ -f "$_pending" ] || return 0
+  mkdir -p "$_cache_dir" 2>/dev/null || true
+
+  local _now
+  _now=$(date +%s 2>/dev/null) || _now=0
+  case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+
+  # Working temp files. Trap-cleanup with explicit `trap - RETURN` to avoid
+  # the shell-wide leak (Task 7 GPT-review #1).
+  local _seen _snapshot _kept
+  _seen=$(mktemp "${_cache_dir}/.oar-seen.XXXXXX" 2>/dev/null) \
+    || _seen=$(mktemp -t pp-oar-seen 2>/dev/null) || return 0
+  _snapshot=$(mktemp "${_cache_dir}/.oar-snap.XXXXXX" 2>/dev/null) \
+    || _snapshot=$(mktemp -t pp-oar-snap 2>/dev/null) \
+    || { rm -f "$_seen"; return 0; }
+  _kept=$(mktemp "${_cache_dir}/.oar-kept.XXXXXX" 2>/dev/null) \
+    || _kept=$(mktemp -t pp-oar-kept 2>/dev/null) \
+    || { rm -f "$_seen" "$_snapshot"; return 0; }
+  # Cleanup discipline: this function calls multiple sub-functions
+  # (pp_oar_row_identity, pp_contain_path, the three detectors), each of
+  # which RETURNs and would fire a shell-wide `trap RETURN` mid-loop and
+  # rm our working files prematurely. Avoid `trap RETURN` entirely —
+  # perform explicit `rm -f` of `_seen`/`_snapshot`/`_kept` before the
+  # final `return 0`. This pattern is verbose but the only reliable one
+  # under bash 3.2 + bats `set -eET` + nested function calls.
+
+  # Build labeled-identity set (one sha per line, sorted for grep -F speed).
+  if [ -f "$_labeled" ]; then
+    jq -r 'select(.identity != null) | .identity' "$_labeled" 2>/dev/null \
+      > "$_seen"
+  fi
+
+  # FIFO snapshot of pending rows by scan_at_epoch ASC. jq -s reads the
+  # whole file as an array. -c emits one row per line.
+  jq -sc 'sort_by(.scan_at_epoch // 0) | .[]' "$_pending" 2>/dev/null \
+    > "$_snapshot"
+
+  local _processed=0
+  local _line _sid _lens _hash _inj_ts _scan _attempts _id
+  local _inj_epoch _upper
+  local _cited_paths _cited_symbols _body
+  local _outcome _evid_id _conf _err
+  local _cwd _p _contained
+  local _rc _acted_out _ref_out _rule
+
+  while IFS= read -r _line; do
+    [ -z "$_line" ] && continue
+
+    _sid=$(printf '%s' "$_line" | jq -r '.session_id // ""' 2>/dev/null)
+    _lens=$(printf '%s' "$_line" | jq -r '.lens // ""' 2>/dev/null)
+    _hash=$(printf '%s' "$_line" | jq -r '.hash // ""' 2>/dev/null)
+    _inj_ts=$(printf '%s' "$_line" | jq -r '.inject_ts // ""' 2>/dev/null)
+    _scan=$(printf '%s' "$_line" | jq -r '.scan_at_epoch // 0' 2>/dev/null)
+    _attempts=$(printf '%s' "$_line" | jq -r '.attempts // 0' 2>/dev/null)
+    case "$_scan" in ''|*[!0-9]*) _scan=0 ;; esac
+    case "$_attempts" in ''|*[!0-9]*) _attempts=0 ;; esac
+
+    # Not yet due → keep verbatim in pending.
+    if [ "$_scan" -gt "$_now" ]; then
+      printf '%s\n' "$_line" >> "$_kept"
+      continue
+    fi
+
+    # Already labeled? Drop (do NOT re-append to pending).
+    _id=""
+    _id=$(pp_oar_row_identity "$_sid" "$_lens" "$_hash" "$_inj_ts" 2>/dev/null) \
+      || _id=""
+    if [ -n "$_id" ] && [ -s "$_seen" ] \
+       && LC_ALL=C grep -qxF -- "$_id" "$_seen" 2>/dev/null; then
+      continue
+    fi
+
+    # At cap → preserve the remainder in pending for the next cycle.
+    if [ "$_processed" -ge "$_cap" ]; then
+      printf '%s\n' "$_line" >> "$_kept"
+      continue
+    fi
+    _processed=$(( _processed + 1 ))
+
+    # Parse inject_ts → epoch. macOS BSD `date -j -f` and GNU `date -d` both
+    # honored; fall back to 0 silently (detectors will reject non-numeric).
+    _inj_epoch=$(date -u -d "$_inj_ts" +%s 2>/dev/null \
+                 || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_inj_ts" +%s 2>/dev/null \
+                 || printf '0')
+    case "$_inj_epoch" in ''|*[!0-9]*) _inj_epoch=0 ;; esac
+
+    # Window upper bound: min(now, scan_at_epoch). Applies to both
+    # pushed_back and referenced (spec §B clamp).
+    _upper="$_scan"
+    [ "$_now" -lt "$_upper" ] && _upper="$_now"
+
+    # Body + citation arrays (C2 fix path A — present in the pending row).
+    _body=$(printf '%s' "$_line" | jq -r '.body // ""' 2>/dev/null)
+    _cited_paths=$(printf '%s' "$_line" \
+                    | jq -r '.cited_paths // [] | .[]?' 2>/dev/null)
+    _cited_symbols=$(printf '%s' "$_line" \
+                    | jq -r '.cited_symbols // [] | .[]?' 2>/dev/null)
+
+    _outcome="ignored"
+    _evid_id="null"
+    _conf="no_signal_in_window"
+    _err=0
+
+    # ----- Step 1: pushed_back? -----
+    # Order per spec §B + user-task brief: pushed_back checked first because
+    # an explicit ack is the strongest signal of operator intent regardless
+    # of what subsequent code activity looks like.
+    # bash 3.2 + bats `set -eE` interaction: an assignment from $(failing)
+    # propagates the inner exit and aborts the function under errexit.
+    # The detectors LEGITIMATELY return 1 (== "no signal") for the common
+    # case; the labeler must treat that as data, not failure. The `|| true`
+    # tail makes the assignment unconditionally rc=0, so we can inspect
+    # $_rule for content separately. _rc is captured BEFORE the `|| true`
+    # via PIPESTATUS-style; but bash 3.2 lacks pipefail introspection on
+    # command substitutions. Workaround: run the helper in a separate
+    # step, capture rc, then capture output.
+    _rule=""
+    _rc=0
+    _rule=$(pp_oar_with_row_timeout "${PP_OAR_ROW_TIMEOUT_S:-3}" \
+              pp_oar_pushed_back "$_hash" "$_inj_epoch" "$_upper" 2>/dev/null) \
+              || _rc=$?
+    if [ "$_rc" -eq 0 ] && [ -n "$_rule" ]; then
+      _outcome="pushed-back"
+      _evid_id="$_rule"
+      _conf="exact"
+    elif [ "$_rc" -eq 2 ]; then
+      _err=1
+    fi
+
+    # ----- Step 2: acted? (only if not pushed-back) -----
+    _cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
+    if [ "$_outcome" = "ignored" ]; then
+      # Per-cited-path loop. Containment ahead of pp_oar_acted_for_path.
+      # _cited_paths is newline-separated; iterate via heredoc to avoid
+      # pipeline-subshell variable loss under bash 3.2.
+      while IFS= read -r _p; do
+        [ -z "$_p" ] && continue
+        # Containment first (P1 invariant). pp_contain_path echoes the
+        # resolved real path on success; we discard stdout but use rc.
+        _contained=$(pp_contain_path "$_cwd" "$_p" 2>/dev/null) || continue
+        # Pass the contained real path (not the raw cite) so the git
+        # invocation sees the in-cwd path. pp_oar_acted_for_path performs
+        # its own pp_safe_git_pathspec check.
+        # SYMBOL arg is space-separated; pass all cited_symbols as one
+        # whitespace-joined string (the helper tokenizes internally).
+        local _sym_joined
+        _sym_joined=$(printf '%s' "$_cited_symbols" \
+                       | LC_ALL=C tr '\n' ' ' \
+                       | LC_ALL=C sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//')
+        # Relative path for git: strip the cwd prefix from the resolved
+        # real path so git log sees the in-repo path.
+        local _cwd_real _rel
+        _cwd_real=""
+        _cwd_real=$(cd "$_cwd" 2>/dev/null && pwd -P) || _cwd_real="$_cwd"
+        _rel="${_contained#"$_cwd_real"/}"
+        # If strip didn't change the string (candidate == base) skip — a
+        # base-itself cite has nothing to log.
+        [ "$_rel" = "$_contained" ] && continue
+        _rc=0
+        _acted_out=$(pp_oar_with_row_timeout "${PP_OAR_ROW_TIMEOUT_S:-3}" \
+                       pp_oar_acted_for_path "$_cwd" "$_rel" "$_sym_joined" "" \
+                       "$_inj_epoch" "$_upper" 2>/dev/null) || _rc=$?
+        if [ "$_rc" -eq 0 ] && [ -n "$_acted_out" ]; then
+          _outcome="acted"
+          _evid_id="${_acted_out%%|*}"
+          _conf="${_acted_out#*|}"
+          break
+        elif [ "$_rc" -eq 2 ]; then
+          _err=1
+        fi
+      done <<EOF
+$_cited_paths
+EOF
+    fi
+
+    # ----- Step 3: referenced? (only if still ignored) -----
+    if [ "$_outcome" = "ignored" ]; then
+      local _tail="${_cache_dir}/transcript-tail-${_sid}.txt"
+      if [ -f "$_tail" ]; then
+        # Pass SYMBOLS only (per pp_oar_referenced M1 contract). The
+        # symbols string is newline-separated already.
+        _rc=0
+        _ref_out=$(pp_oar_with_row_timeout "${PP_OAR_ROW_TIMEOUT_S:-3}" \
+                     pp_oar_referenced "$_sid" "$_inj_epoch" "$_upper" \
+                     "$_body" "$_cited_symbols" 2>/dev/null) || _rc=$?
+        if [ "$_rc" -eq 0 ] && [ -n "$_ref_out" ]; then
+          _outcome="referenced"
+          _evid_id="${_ref_out%%|*}"
+          _conf="${_ref_out#*|}"
+        elif [ "$_rc" -eq 2 ]; then
+          _err=1
+        fi
+      fi
+    fi
+
+    # ----- Quarantine path: only if outcome stayed 'ignored' AND a
+    # detector flagged a transient error. attempts++ until max; on max,
+    # move to oar-stuck.jsonl; otherwise put back in pending with bumped
+    # attempts so the next cycle retries.
+    if [ "$_outcome" = "ignored" ] && [ "$_err" = "1" ]; then
+      _attempts=$(( _attempts + 1 ))
+      if [ "$_attempts" -ge "$_max_att" ]; then
+        jq -nc \
+          --arg sid "$_sid" --arg lens "$_lens" --arg h "$_hash" \
+          --arg ts "$_inj_ts" --argjson att "$_attempts" \
+          --arg err "labeling failed after $_attempts attempts" \
+          '{session_id:$sid,lens:$lens,hash:$h,inject_ts:$ts,
+            attempts:$att,last_error:$err}' \
+          >> "$_stuck" 2>/dev/null || true
+        continue
+      fi
+      printf '%s\n' "$_line" \
+        | jq -c --argjson att "$_attempts" '. + {attempts:$att}' \
+            >> "$_kept" 2>/dev/null || printf '%s\n' "$_line" >> "$_kept"
+      continue
+    fi
+
+    # ----- Write labeled row + record identity.
+    local _label_blob _labeled_at
+    _labeled_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                  || printf '1970-01-01T00:00:00Z')
+    _label_blob=""
+    _label_blob=$(jq -nc \
+      --arg sid "$_sid" --arg lens "$_lens" --arg h "$_hash" \
+      --arg ts "$_inj_ts" --arg labeled_at "$_labeled_at" \
+      --arg outcome "$_outcome" --arg evid "$_evid_id" \
+      --arg conf "$_conf" --arg identity "${_id:-}" \
+      --arg body "$_body" \
+      '{session_id:$sid,lens:$lens,hash:$h,inject_ts:$ts,
+        labeled_at:$labeled_at,outcome:$outcome,
+        evidence_id:(if $evid=="null" or $evid=="" then null else $evid end),
+        confidence:$conf,
+        identity:(if $identity=="" then null else $identity end),
+        evidence:(if $body=="" then null else $body end)}' \
+      2>/dev/null) || _label_blob=""
+    if [ -n "$_label_blob" ]; then
+      printf '%s\n' "$_label_blob" >> "$_labeled" 2>/dev/null || true
+      [ -n "$_id" ] && printf '%s\n' "$_id" >> "$_seen" 2>/dev/null
+    fi
+  done < "$_snapshot"
+
+  # Atomic pending replace: mv kept → pending. The mv is rename-within-dir
+  # so atomic on POSIX filesystems (kept was mktemp'd in the same dir).
+  # On failure (e.g. mv fails), leave pending unchanged — the labeled rows
+  # are already persisted; next cycle will re-process the survivors and the
+  # idempotency check prevents double-labeling.
+  if [ -f "$_pending" ]; then
+    mv -f "$_kept" "$_pending" 2>/dev/null && _kept=""
+  fi
+  # Explicit cleanup (we don't use trap RETURN — sub-functions fire it).
+  rm -f "$_seen" "$_snapshot" 2>/dev/null
+  [ -n "$_kept" ] && rm -f "$_kept" 2>/dev/null
+  return 0
+}

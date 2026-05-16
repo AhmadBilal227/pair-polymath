@@ -768,3 +768,332 @@ _pp_oar_set_mtime() {
   # Accept either 0.NN (sub-unity) or 1.0000 (perfect overlap) jaccard.
   printf '%s' "$_out" | grep -qE '^line:[0-9]+-[0-9]+\|jaccard:[01]\.[0-9]+$'
 }
+
+# ----------------------------------------------------------------------------
+# Task 8 — pp_oar_label_pending (full 4-outcome classifier driver).
+#
+# Order of outcome detection per spec §B (first hit wins):
+#   pushed_back → acted → referenced → ignored
+#
+# Notes on the test harness:
+#   - `command -v git >/dev/null 2>&1 || skip` guards git fixtures.
+#   - Rows are appended directly to oar-pending.jsonl with deterministic
+#     scan_at_epoch values so we can use a fixed `now` via PP_OAR_NOW_OVERRIDE
+#     (Task-8 implementation honours that env knob for testability). If the
+#     implementation chooses a different injection style, the in-window
+#     epochs (≤ Sun, 2026-05-15) ensure scan_at < `date +%s` at runtime
+#     regardless.
+#
+# Inject_ts choice for line-window tests: 2026-05-14T00:00:00Z (epoch
+# 1778716800) so the actual `date +%s` at runtime (well past mid-2026) is the
+# window upper bound, matching scan_at when scan_at_epoch is in the past.
+# ----------------------------------------------------------------------------
+
+@test "label_pending: end-to-end synthesizes acted outcome for a real diff" {
+  command -v git >/dev/null 2>&1 || skip "git not installed"
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  printf 'longSymbolName();\n' > "$_repo/x.ts"
+  ( cd "$_repo" && git add x.ts \
+    && GIT_AUTHOR_DATE="2026-05-15T00:30:00Z" \
+       GIT_COMMITTER_DATE="2026-05-15T00:30:00Z" \
+       git -c commit.gpgsign=false commit -q -m c )
+  # scan_at_epoch is in the past so the row is "due".
+  jq -nc '{session_id:"s1",lens:"ENGINEERING",hash:"h-1",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778889600,
+          attempts:0,status:"pending",
+          body:"refactor longSymbolName per x.ts",
+          cited_paths:["x.ts"],cited_symbols:["longSymbolName"]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" PP_OAR_LABEL_PER_CYCLE_CAP=5 \
+    pp_oar_label_pending
+  [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  jq -e '.outcome == "acted" and .confidence == "symbol_exact"' \
+    "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+  rm -rf "$_repo"
+}
+
+@test "label_pending: ignored outcome when window elapsed with no signal" {
+  command -v git >/dev/null 2>&1 || skip "git not installed"
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  # No matching commit, no transcript, no dismiss rule.
+  jq -nc '{session_id:"s2",lens:"SECURITY",hash:"h-2",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778889600,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" pp_oar_label_pending
+  [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  jq -e '.outcome == "ignored" and .confidence == "no_signal_in_window"' \
+    "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+  rm -rf "$_repo"
+}
+
+@test "label_pending: idempotency — running twice does not double-label" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  jq -nc '{session_id:"s3",lens:"UX_DESIGN",hash:"h-3",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778889600,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" pp_oar_label_pending
+  # Second run with the SAME identity should be a no-op. We seed the pending
+  # file again to prove the labeler refuses to re-label by identity-set
+  # membership.
+  jq -nc '{session_id:"s3",lens:"UX_DESIGN",hash:"h-3",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778889600,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" pp_oar_label_pending
+  local _n
+  _n=$(wc -l < "$PP_CACHE_DIR/oar-labeled.jsonl" | tr -d ' ')
+  [ "$_n" -eq 1 ]
+  rm -rf "$_repo"
+}
+
+@test "label_pending: per-cycle cap of 5 caps rows labeled" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  : > "$PP_CACHE_DIR/oar-pending.jsonl"
+  local _i
+  for _i in 1 2 3 4 5 6 7; do
+    jq -nc --arg sid "s-cap-$_i" --argjson scan $(( 1778889600 + _i )) '
+      {session_id:$sid,lens:"ENGINEERING",hash:("h-" + $sid),
+       inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:$scan,
+       attempts:0,status:"pending",body:"",
+       cited_paths:[],cited_symbols:[]}' \
+      >> "$PP_CACHE_DIR/oar-pending.jsonl"
+  done
+  CLAUDE_PROJECT_DIR="$_repo" PP_OAR_LABEL_PER_CYCLE_CAP=5 pp_oar_label_pending
+  local _labeled _pending
+  _labeled=$(wc -l < "$PP_CACHE_DIR/oar-labeled.jsonl" | tr -d ' ')
+  _pending=$(wc -l < "$PP_CACHE_DIR/oar-pending.jsonl" | tr -d ' ')
+  [ "$_labeled" -eq 5 ]
+  [ "$_pending" -eq 2 ]
+  rm -rf "$_repo"
+}
+
+@test "label_pending: FIFO by scan_at_epoch ASC" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  : > "$PP_CACHE_DIR/oar-pending.jsonl"
+  # Row B is younger (later scan_at), Row A is older.
+  jq -nc '{session_id:"sB",lens:"ENGINEERING",hash:"hB",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778900000,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    >> "$PP_CACHE_DIR/oar-pending.jsonl"
+  jq -nc '{session_id:"sA",lens:"ENGINEERING",hash:"hA",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778889700,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    >> "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" PP_OAR_LABEL_PER_CYCLE_CAP=1 pp_oar_label_pending
+  # Older (A) should be labeled first.
+  jq -e '.session_id == "sA"' "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+  rm -rf "$_repo"
+}
+
+@test "label_pending: containment rejects rows citing paths outside cwd" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  # Path traversal — outside the repo.
+  jq -nc '{session_id:"s-esc",lens:"ENGINEERING",hash:"h-esc",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778889600,
+          attempts:0,status:"pending",body:"",
+          cited_paths:["../../etc/passwd"],cited_symbols:["bad"]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" pp_oar_label_pending
+  # Should label as ignored (containment failed → no acted path checked).
+  jq -e '.outcome == "ignored"' "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+  rm -rf "$_repo"
+}
+
+@test "label_pending: attempts++ → quarantine to oar-stuck.jsonl after 3 fails" {
+  . "$PP_ROOT/lib/oar.sh"
+  # Force failure: point CLAUDE_PROJECT_DIR at a non-git dir but cite a path
+  # inside it (so containment passes). The labeler stub forces a synthetic
+  # error from the acted detector to simulate a transient failure path.
+  local _noindex
+  _noindex=$(mktemp -d)
+  : > "$_noindex/foo.ts"
+  jq -nc '{session_id:"s-stuck",lens:"ENGINEERING",hash:"h-stuck",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778889600,
+          attempts:2,status:"pending",body:"",
+          cited_paths:["foo.ts"],cited_symbols:["someThing"]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  # Monkey-patch pp_oar_acted_for_path to always return 2 (synthetic
+  # transient error). The labeler must increment attempts → quarantine.
+  pp_oar_acted_for_path() { return 2; }
+  CLAUDE_PROJECT_DIR="$_noindex" pp_oar_label_pending
+  [ -f "$PP_CACHE_DIR/oar-stuck.jsonl" ]
+  jq -e '.session_id == "s-stuck" and .attempts == 3' \
+    "$PP_CACHE_DIR/oar-stuck.jsonl" >/dev/null
+  rm -rf "$_noindex"
+}
+
+@test "label_pending: not-yet-due rows stay in pending (no label)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  # scan_at_epoch far in the future → NOT due.
+  jq -nc '{session_id:"s-future",lens:"ENGINEERING",hash:"h-fut",
+          inject_ts:"2026-05-14T00:00:00Z",
+          scan_at_epoch:9999999999,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" pp_oar_label_pending
+  # Pending row preserved; labeled file either absent or empty.
+  [ "$(wc -l < "$PP_CACHE_DIR/oar-pending.jsonl" | tr -d ' ')" = "1" ]
+  if [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]; then
+    [ "$(wc -l < "$PP_CACHE_DIR/oar-labeled.jsonl" | tr -d ' ')" = "0" ]
+  fi
+  rm -rf "$_repo"
+}
+
+@test "label_pending: pushed-back outcome via dismiss-ack rule" {
+  . "$PP_ROOT/lib/oar.sh"
+  # Set up a dismiss-ack rule that matches the row's hash within window.
+  # shellcheck source=../lib/memory/schema.sh
+  . "$PP_ROOT/lib/memory/schema.sh"
+  # shellcheck source=../lib/dismiss.sh
+  . "$PP_ROOT/lib/dismiss.sh"
+  mkdir -p "$PP_STATE_DIR/dismiss"
+  local _f
+  _f=$(pp_dismiss_file_path)
+  # inject_ts = 2026-05-14T00:00:00Z (epoch 1778716800)
+  # scan_at   = 2026-05-15T00:00:00Z (epoch 1778803200)
+  # ack ts    = 2026-05-14T12:00:00Z (epoch 1778760000) → in window
+  jq -nc \
+    '{id:"a-pb",ts:"2026-05-14T12:00:00Z",
+      reason_summary:"acked",scope:"project",lens_id:null,
+      hash:"feedba",deleted:false,deleted_reason:null,
+      ttl_days:null,source:"ack"}' >> "$_f"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git config user.email t@t && git config user.name t \
+    && git -c commit.gpgsign=false commit -q --allow-empty -m base ) \
+    || { rm -rf "$_repo"; skip "git fixture failed"; }
+  jq -nc '{session_id:"s-pb",lens:"ENGINEERING",hash:"feedbabe",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1778803200,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" pp_oar_label_pending
+  jq -e '.outcome == "pushed-back" and .evidence_id == "a-pb"' \
+    "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+  rm -rf "$_repo"
+}
+
+# PM1 — Mandatory E2E test. Real SessionEnd hook → real labeler.
+#
+# Containment matters here: pp_oar_acted_for_path resolves cited paths
+# relative to CLAUDE_PROJECT_DIR (or $PWD as fallback). If we leave it
+# unset, bats runs from the actual pair-polymath checkout and the real
+# git history at lib/oar.sh would fire `acted` (correctly!), masking the
+# `referenced` signal we want to assert. Point CLAUDE_PROJECT_DIR at an
+# isolated tmpdir without git, so acted+pushed-back can't fire and only
+# referenced (which depends on the transcript file, not git) is left to
+# detect.
+@test "v0.5.2 E2E: SessionEnd → labeler produces non-empty referenced detection" {
+  command -v git >/dev/null 2>&1 || skip "git not installed"
+  export PP_OAR_ENABLE=1
+  mkdir -p "$PP_CACHE_DIR"
+  # Isolated, no-git project root. lib/oar.sh resolution falls through
+  # the .git/ check in pp_oar_acted_for_path → no acted detection.
+  local _isolated
+  _isolated=$(mktemp -d)
+  mkdir -p "$_isolated/lib"
+  : > "$_isolated/lib/oar.sh"
+  export CLAUDE_PROJECT_DIR="$_isolated"
+
+  local _hash="abc123def456"
+  # Observation has citable SYMBOL pp_oar_label_pending plus path lib/oar.sh.
+  # Body must produce strong bigram overlap with the transcript and contain
+  # the symbol as a whole word.
+  local _obs_file="$PP_CACHE_DIR/cc-monitor-sess-e2e-ENGINEERING.txt"
+  printf 'ENG: refactor|||The pp_oar_label_pending function in lib/oar.sh needs hardening pp_oar_label_pending function lib/oar.sh hardening pp_oar_label_pending\n' \
+    > "$_obs_file"
+  local _hash_file="$PP_CACHE_DIR/cc-monitor-injected-hash-sess-e2e-ENGINEERING.txt"
+  printf '%s\n' "$_hash" > "$_hash_file"
+  # Stamp hash file mtime to ~25h before runtime-now so SessionEnd places
+  # scan_at < now (ENG window is 24h). Compute via portable date.
+  local _now _ago _ymdhm
+  _now=$(date +%s)
+  _ago=$(( _now - 90000 ))
+  _ymdhm=$(date -r "$_ago" '+%Y%m%d%H%M.%S' 2>/dev/null \
+           || date -d "@$_ago" '+%Y%m%d%H%M.%S' 2>/dev/null) \
+           || skip "portable date unavailable"
+  touch -t "$_ymdhm" "$_hash_file" 2>/dev/null || skip "touch -t failed"
+
+  # Transcript that references the observation — must contain the symbol
+  # as a whole word AND share enough bigrams to clear τ=0.5.
+  local _tail="$PP_CACHE_DIR/transcript-tail-sess-e2e.txt"
+  printf 'User: please harden pp_oar_label_pending function in lib/oar.sh; the pp_oar_label_pending function in lib/oar.sh needs hardening pp_oar_label_pending\n' \
+    > "$_tail"
+  # Stamp transcript mtime to ~12h ago — INSIDE [inject (-25h), scan_at
+  # (-1h)] window. Touching with no -t would set mtime to "now" which is
+  # PAST scan_at and trip pp_oar_referenced's late-reference guard.
+  local _mid _mid_ymdhm
+  _mid=$(( _now - 43200 ))
+  _mid_ymdhm=$(date -r "$_mid" '+%Y%m%d%H%M.%S' 2>/dev/null \
+               || date -d "@$_mid" '+%Y%m%d%H%M.%S' 2>/dev/null) \
+               || skip "portable date unavailable"
+  touch -t "$_mid_ymdhm" "$_tail" 2>/dev/null || skip "touch -t failed"
+
+  # Run SessionEnd hook → should write a pending row.
+  printf '{"session_id":"sess-e2e"}' | bash "$PP_ROOT/hooks/session-end.sh"
+  [ -f "$PP_CACHE_DIR/oar-pending.jsonl" ]
+  # Sanity: pending row has body + cites populated (path A confirmation).
+  jq -e 'has("body") and has("cited_paths") and has("cited_symbols")' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+
+  # Run labeler — the moment of truth.
+  . "$PP_ROOT/lib/oar.sh"
+  pp_oar_label_pending
+
+  # Assert referenced detection actually fired.
+  [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  run jq -r '.outcome' "$PP_CACHE_DIR/oar-labeled.jsonl"
+  [ "$output" = "referenced" ]
+  rm -rf "$_isolated"
+}

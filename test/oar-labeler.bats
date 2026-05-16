@@ -12,9 +12,24 @@ setup() {
   PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export PP_ROOT
 }
+
+# GPT review #6: skip identity tests when no hash tool is available
+# anywhere on PATH. The fallback chain ends in a PP_OAR_NO_HASH_TOOL_*
+# sentinel which is 64 chars but is NOT a sha256 — tests asserting
+# determinism still pass on the sentinel, but the spec's "sha256" claim
+# isn't being exercised. Surface this as a skip so CI doesn't lie.
+_pp_have_hash_tool() {
+  command -v shasum >/dev/null 2>&1 \
+    || command -v sha256sum >/dev/null 2>&1 \
+    || command -v sha256 >/dev/null 2>&1 \
+    || command -v openssl >/dev/null 2>&1 \
+    || command -v md5sum >/dev/null 2>&1 \
+    || command -v md5 >/dev/null 2>&1
+}
 teardown() { rm -rf "$HOME"; }
 
 @test "row_identity: sha256 of sid|lens|hash|inject_ts is deterministic" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
   . "$PP_ROOT/lib/oar.sh"
   local id1 id2
   id1=$(pp_oar_row_identity "sess-A" "ENGINEERING" "h1" "2026-05-15T00:00:00Z")
@@ -25,6 +40,7 @@ teardown() { rm -rf "$HOME"; }
 }
 
 @test "row_identity: inject_ts is part of the key (replay-at-different-time differs)" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
   . "$PP_ROOT/lib/oar.sh"
   local id1 id2
   id1=$(pp_oar_row_identity "sess-A" "ENGINEERING" "h1" "2026-05-15T00:00:00Z")
@@ -33,6 +49,7 @@ teardown() { rm -rf "$HOME"; }
 }
 
 @test "row_identity: differs when any of the 4 fields changes" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
   . "$PP_ROOT/lib/oar.sh"
   local base id_lens id_hash id_sid
   base=$(pp_oar_row_identity   "S" "L" "H" "T")

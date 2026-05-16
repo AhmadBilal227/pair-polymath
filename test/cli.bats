@@ -596,6 +596,11 @@ SH
   clone_dir=$(mktemp -d)
   git -C "$remote_dir" init --quiet
   git -C "$remote_dir" symbolic-ref HEAD refs/heads/main
+  # Task #60 completion — same gc.auto race the F4/R4-1a/R4-1b tests hit.
+  # F9 wasn't in the original fix scope; observed flaking in v0.5.2 Task 3
+  # CI runs. See _pp_r5_build_remote_and_clone below for full rationale.
+  git -C "$remote_dir" config gc.auto 0
+  git -C "$remote_dir" config maintenance.auto false
   mkdir -p "$remote_dir/bin" "$remote_dir/lib" "$remote_dir/lenses" "$remote_dir/prompts"
   echo "0.0.0" > "$remote_dir/VERSION"
   cp "$PP_ROOT/bin/polymath" "$remote_dir/bin/polymath"
@@ -613,6 +618,11 @@ SH
   git -C "$remote_dir" config user.email "t@t" && git -C "$remote_dir" config user.name t
   git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "init"
   git clone --quiet "$remote_dir" "$clone_dir"
+  # Task #60: same gc.auto/maintenance.auto disable on the clone — the
+  # `polymath update` invocation below runs `git pull` here, which is
+  # what spawns the detached gc child.
+  git -C "$clone_dir" config gc.auto 0
+  git -C "$clone_dir" config maintenance.auto false
   echo "1" >> "$remote_dir/VERSION"
   git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "bump"
 

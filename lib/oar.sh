@@ -15,13 +15,27 @@
 #   4. Labeler runs INLINE in statusline.sh in a `& wait`-bounded subshell.
 #      Telemetry must never block the cycle.
 
-# Bash 3.2 portable. Forces LC_ALL=C for the awk/sort/grep numerics in this
-# file only; the rest of the project respects the caller's locale.
+# Bash 3.2 portable. Forces LC_ALL=C for the awk/sort/grep numerics this
+# file invokes. The export is intentional — it matches the project-wide
+# pattern at bin/statusline.sh:12 and statusline sources this lib, so the
+# locale is already C in that path. Sourcing this from a non-statusline
+# context (tests, future bin/polymath subcommands) sets the locale for the
+# duration of the script, which is the desired behavior for deterministic
+# numeric parsing.
 LC_ALL=C
 export LC_ALL
 
 # Idempotent source guard (sourced by bin/statusline.sh, bin/polymath, tests).
-if [ -n "${_PP_OAR_SOURCED:-}" ]; then return 0; fi
+# Guard against the file being EXECUTED rather than sourced — `return` at
+# top level errors out if BASH_SOURCE[0] == $0 (i.e. running this file as a
+# script). Cheap defensive check.
+if [ -n "${_PP_OAR_SOURCED:-}" ]; then
+  if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
+    return 0
+  else
+    exit 0
+  fi
+fi
 _PP_OAR_SOURCED=1
 
 # Defaults — match spec §E.
@@ -31,25 +45,56 @@ _PP_OAR_SOURCED=1
 : "${PP_OAR_ROW_TIMEOUT_S:=3}"
 
 # pp_oar_row_identity SID LENS HASH INJECT_TS
-# Stdout: 64-hex sha256 of the 4 fields joined by '|'.
+# Stdout: 64-hex sha256 of the 4 fields joined by ASCII US (0x1F).
 # Used to dedupe labeled rows + look up "already labeled?" membership.
+#
+# Separator choice: ASCII 0x1F (US, "Unit Separator") — invisible control
+# character that never appears in any of the four field domains (session
+# id is ksuid-shaped, lens is uppercase identifier, hash is hex, inject_ts
+# is ISO-8601). A bare `|` separator would have been ambiguous if any
+# field ever contained `|`. Caught by Task 3 review S1 + GPT #3.
 pp_oar_row_identity() {
   local _sid="${1:-}" _lens="${2:-}" _hash="${3:-}" _ts="${4:-}"
   local _body
-  _body=$(printf '%s|%s|%s|%s' "$_sid" "$_lens" "$_hash" "$_ts")
-  # Same sha tool chain as pp_project_key in lib/grounding.sh (G5/G6).
+  # printf '\037' emits the single US byte. Bash 3.2 supports this.
+  _body=$(printf '%s\037%s\037%s\037%s' "$_sid" "$_lens" "$_hash" "$_ts")
+  # Same sha tool chain as pp_project_key in lib/grounding.sh, extended
+  # with openssl between native sha256 and the md5 last-resort (caught by
+  # Task 3 GPT review #4 — openssl is more ubiquitous than the `sha256` BSD
+  # binary on Linux distros).
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$_body" | shasum -a 256 2>/dev/null | cut -c1-64
   elif command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$_body" | sha256sum 2>/dev/null | cut -c1-64
   elif command -v sha256 >/dev/null 2>&1; then
     printf '%s' "$_body" | sha256 -q 2>/dev/null | cut -c1-64
+  elif command -v openssl >/dev/null 2>&1; then
+    # openssl dgst -sha256 output format varies: BSD = "SHA256(stdin)= HEX",
+    # GNU = "(stdin)= HEX" or just "HEX  -". awk '{print $NF}' takes the
+    # last whitespace-separated field, which is always the hex digest.
+    printf '%s' "$_body" | openssl dgst -sha256 2>/dev/null \
+      | awk '{print $NF}' | cut -c1-64
   else
     # Last resort — md5 hex padded to 64 chars (deterministic, just not
     # cryptographically strong; identity is a dedupe key not a secret).
-    local _md5
-    _md5=$(printf '%s' "$_body" | md5sum 2>/dev/null | cut -c1-32 \
-        || printf '%s' "$_body" | md5 -q 2>/dev/null | cut -c1-32)
-    printf '%s%s' "$_md5" "$_md5"
+    # GPT #1 fix: use command -v branching, NOT `||` inside $() — the
+    # pipeline's exit status is `cut`'s (always 0), so the `||` never
+    # fired and _md5 silently became empty when md5sum was missing.
+    local _md5=""
+    if command -v md5sum >/dev/null 2>&1; then
+      _md5=$(printf '%s' "$_body" | md5sum 2>/dev/null | cut -c1-32)
+    elif command -v md5 >/dev/null 2>&1; then
+      _md5=$(printf '%s' "$_body" | md5 -q 2>/dev/null | cut -c1-32)
+    fi
+    if [ -n "$_md5" ]; then
+      printf '%s%s' "$_md5" "$_md5"
+    else
+      # No hash tool available anywhere on PATH. Emit a deterministic
+      # sentinel so callers can detect this case rather than silently
+      # using an empty identity (which would collapse all rows together).
+      # Pad to 64 chars to satisfy length-asserting tests; the literal
+      # "PP_OAR_NO_HASH_TOOL_*" prefix is searchable in logs.
+      printf 'PP_OAR_NO_HASH_TOOL_DETERMINISTIC_PLACEHOLDER_64_CHARS_FALLBK00'
+    fi
   fi
 }

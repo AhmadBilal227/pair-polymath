@@ -539,3 +539,225 @@ EOF
   rm -f "$_flag"
   return 1
 }
+
+# pp_oar_referenced SID INJECT_TS_EPOCH SCAN_AT_EPOCH BODY CITE_SYMBOLS_NEWLINE_SEP
+# Spec §B step 3: was the observation referenced in user-turn text between
+# inject_ts and min(now, scan_at_epoch)?
+#
+# Reads ${PP_CACHE_DIR}/transcript-tail-${SID}.txt (plain-text user-turn
+# blob — v0.5.2 transcript format has no embedded per-line timestamps, so
+# we use FILE mtime as the point-in-time bound). If mtime is outside the
+# [INJECT_TS_EPOCH, SCAN_AT_EPOCH] window → reject (BOTH bounds — no
+# late-reference leakage).
+#
+# On positive match:
+#   stdout: "line:1-<file_line_count>|jaccard:0.NN"  (best-effort range)
+#   rc: 0
+# On any rejection (missing file, outside window, no cite-symbol, low
+# Jaccard): rc 1, no stdout.
+#
+# Plan addendum applied:
+#   * I3 — comm -12 uses TWO mktemp files, NOT bash process substitution
+#          (/dev/fd is not on the project's portability floor).
+#   * M1 — cite-token-required is restricted to SYMBOLS only. Path-shaped
+#          tokens (with slashes/dots) rarely pass grep -wF word-boundary
+#          checks; requiring them as the cite-token gate causes false
+#          rejections. Caller must pass only symbol tokens via the last
+#          arg. The labeler driver (Task 8) will filter cited_paths out.
+#
+# CITE_SYMBOLS_NEWLINE_SEP: newline-separated list of symbol-shaped tokens
+# (identifier regex `[A-Za-z_][A-Za-z0-9_]{2,}`). Empty → reject (cite-token
+# required by spec §B step 3).
+#
+# Tokenization (both sides): identifier-shaped runs, lowercased,
+# length>=3, stopword-filtered via _PP_CITATION_STOPWORDS (reused from
+# lib/citations.sh — same stopword list the rest of v0.5.2 uses).
+#
+# Bigrams: consecutive-token pairs from the filtered stream, joined with
+# `_`. Order matters within the bigram; bigram SETS (sort -u) are compared.
+#
+# Jaccard = |A ∩ B| / |A ∪ B|. Empty union → reject.
+pp_oar_referenced() {
+  local _sid="${1:-}"
+  local _inj="${2:-0}"
+  local _scan="${3:-0}"
+  local _body="${4:-}"
+  local _cites="${5:-}"
+  local _tau="${PP_OAR_REF_TAU:-0.5}"
+
+  [ -z "$_sid" ] && return 1
+  [ -z "$_body" ] && return 1
+  # Defensive epoch validation — matches pp_oar_pushed_back / acted_for_path.
+  case "$_inj" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_scan" in ''|*[!0-9]*) return 1 ;; esac
+
+  local _cache_dir="${PP_CACHE_DIR:-$HOME/.claude/cache}"
+  local _tail="${_cache_dir}/transcript-tail-${_sid}.txt"
+  # Per spec contract: missing transcript → rc 1 (not an error, just "no
+  # evidence of reference"). The labeler driver is responsible for not
+  # treating rc 1 as a labeling failure.
+  [ -f "$_tail" ] || return 1
+  [ -s "$_tail" ] || return 1
+
+  # M1: cite-token-required gate. Caller passes ONLY symbols here. Empty
+  # → reject (spec §B step 3 "AND ≥1 cite-token").
+  if [ -z "$_cites" ]; then
+    return 1
+  fi
+
+  # Window check via FILE mtime. _PP_STAT_FLAVOR is set in bin/polymath /
+  # bin/statusline.sh; tests may not have it. Detect on first call.
+  if [ -z "${_PP_STAT_FLAVOR:-}" ]; then
+    if stat -c %Y /dev/null >/dev/null 2>&1; then
+      _PP_STAT_FLAVOR=gnu
+    elif stat -f %m /dev/null >/dev/null 2>&1; then
+      _PP_STAT_FLAVOR=bsd
+    else
+      _PP_STAT_FLAVOR=unknown
+    fi
+  fi
+  local _mtime=0
+  case "$_PP_STAT_FLAVOR" in
+    gnu) _mtime=$(stat -c %Y "$_tail" 2>/dev/null || echo 0) ;;
+    bsd) _mtime=$(stat -f %m "$_tail" 2>/dev/null || echo 0) ;;
+    *)   _mtime=0 ;;
+  esac
+  case "$_mtime" in ''|*[!0-9]*) _mtime=0 ;; esac
+  # BOTH bounds closed. If mtime is outside [inj, scan], reject.
+  # (No late-reference leakage: scan_at_epoch is the upper bound the
+  # labeler driver clamps to min(now, row.scan_at_epoch) before calling.)
+  if [ "$_mtime" -lt "$_inj" ] || [ "$_mtime" -gt "$_scan" ]; then
+    return 1
+  fi
+
+  # Cite-SYMBOL presence check (M1: symbols only). Iterate via heredoc to
+  # avoid pipeline-subshell variable-loss under bash 3.2.
+  local _cite_ok=0 _c
+  while IFS= read -r _c; do
+    [ -z "$_c" ] && continue
+    # Defensive: M1 says callers should pass only symbols, but if a path-
+    # shaped token slips through, grep -wF rarely matches it anyway. Skip
+    # tokens containing path separators or dot — they cannot be word-boundary
+    # whole-word matches and would only contribute noise to error paths.
+    case "$_c" in
+      */*|*.*) continue ;;
+    esac
+    if LC_ALL=C grep -wF -- "$_c" "$_tail" >/dev/null 2>&1; then
+      _cite_ok=1
+      break
+    fi
+  done <<EOF
+$_cites
+EOF
+  [ "$_cite_ok" = "1" ] || return 1
+
+  # Lazy-source citation stopwords (idempotent — same pattern as
+  # pp_oar_acted_for_path).
+  if [ -z "${_PP_CITATION_STOPWORDS:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}/lib/citations.sh" 2>/dev/null || true
+  fi
+
+  # Tokenize transcript + body into stopword-filtered, lowercased,
+  # identifier-shaped token streams. awk is bash-3.2 portable and
+  # locale-stable under LC_ALL=C (set file-wide above).
+  local _tail_tokens _body_tokens
+  _tail_tokens=$(LC_ALL=C awk -v stops="$_PP_CITATION_STOPWORDS" '
+    BEGIN {
+      n = split(stops, arr, " ")
+      for (i = 1; i <= n; i++) stop[arr[i]] = 1
+    }
+    {
+      gsub(/[^A-Za-z0-9_]+/, " ")
+      nf = split($0, w, " ")
+      for (i = 1; i <= nf; i++) {
+        t = tolower(w[i])
+        if (length(t) < 3) continue
+        if (t in stop) continue
+        print t
+      }
+    }
+  ' "$_tail")
+  _body_tokens=$(printf '%s' "$_body" | LC_ALL=C awk -v stops="$_PP_CITATION_STOPWORDS" '
+    BEGIN {
+      n = split(stops, arr, " ")
+      for (i = 1; i <= n; i++) stop[arr[i]] = 1
+    }
+    {
+      gsub(/[^A-Za-z0-9_]+/, " ")
+      nf = split($0, w, " ")
+      for (i = 1; i <= nf; i++) {
+        t = tolower(w[i])
+        if (length(t) < 3) continue
+        if (t in stop) continue
+        print t
+      }
+    }
+  ')
+
+  # Build bigram SETS (sorted, deduplicated) from each token stream.
+  local _tail_bigrams _body_bigrams
+  _tail_bigrams=$(printf '%s\n' "$_tail_tokens" \
+    | LC_ALL=C awk 'NR==1{prev=$0;next} {print prev "_" $0; prev=$0}' \
+    | LC_ALL=C grep -v '^$' \
+    | LC_ALL=C sort -u)
+  _body_bigrams=$(printf '%s\n' "$_body_tokens" \
+    | LC_ALL=C awk 'NR==1{prev=$0;next} {print prev "_" $0; prev=$0}' \
+    | LC_ALL=C grep -v '^$' \
+    | LC_ALL=C sort -u)
+
+  # Either side empty → no overlap possible.
+  if [ -z "$_tail_bigrams" ] || [ -z "$_body_bigrams" ]; then
+    return 1
+  fi
+
+  # Plan addendum I3: bash 3.2 portability — write both sets to temp files
+  # and use `comm -12 file1 file2`. NEVER `comm -12 <(...) <(...)` because
+  # process substitution requires /dev/fd which is not on this project's
+  # portability floor (BusyBox + macOS bash 3.2 both have /dev/fd in
+  # practice, but the project's CONTRIBUTING.md bars relying on it).
+  mkdir -p "$_cache_dir" 2>/dev/null || true
+  local _f_a _f_b
+  if [ -d "$_cache_dir" ] && [ -w "$_cache_dir" ]; then
+    _f_a=$(mktemp "${_cache_dir}/.oar-ref-a.XXXXXX" 2>/dev/null) \
+      || _f_a=$(mktemp -t pp-oar-ref-a 2>/dev/null) || return 1
+    _f_b=$(mktemp "${_cache_dir}/.oar-ref-b.XXXXXX" 2>/dev/null) \
+      || _f_b=$(mktemp -t pp-oar-ref-b 2>/dev/null) || { rm -f "$_f_a"; return 1; }
+  else
+    _f_a=$(mktemp -t pp-oar-ref-a 2>/dev/null) || return 1
+    _f_b=$(mktemp -t pp-oar-ref-b 2>/dev/null) || { rm -f "$_f_a"; return 1; }
+  fi
+  # Trap RETURN to guarantee temp-file cleanup even on signal-interrupted
+  # paths (same belt-and-suspenders pattern as pp_oar_acted_for_path).
+  # shellcheck disable=SC2064
+  trap "rm -f '$_f_a' '$_f_b'" RETURN
+
+  printf '%s\n' "$_tail_bigrams" > "$_f_a"
+  printf '%s\n' "$_body_bigrams" > "$_f_b"
+
+  local _inter _union
+  _inter=$(LC_ALL=C comm -12 "$_f_a" "$_f_b" 2>/dev/null | LC_ALL=C grep -cv '^$' 2>/dev/null)
+  _union=$(LC_ALL=C cat "$_f_a" "$_f_b" 2>/dev/null \
+            | LC_ALL=C sort -u | LC_ALL=C grep -cv '^$' 2>/dev/null)
+  case "$_inter" in ''|*[!0-9]*) _inter=0 ;; esac
+  case "$_union" in ''|*[!0-9]*) _union=0 ;; esac
+  [ "$_union" -eq 0 ] && return 1
+
+  # Compare Jaccard ≥ τ via awk (bash can't compare floats).
+  local _jaccard _passed
+  _jaccard=$(LC_ALL=C awk -v i="$_inter" -v u="$_union" \
+    'BEGIN { printf "%.4f", i / u }')
+  _passed=$(LC_ALL=C awk -v j="$_jaccard" -v t="$_tau" \
+    'BEGIN { if (j+0 >= t+0) print 1; else print 0 }')
+  [ "$_passed" = "1" ] || return 1
+
+  # Line range: file-relative line span at point-in-time scan. Best effort
+  # per spec §B (the file may be truncated/rotated later; this is recorded
+  # as evidence_id for downstream audit).
+  local _line_n
+  _line_n=$(LC_ALL=C wc -l < "$_tail" 2>/dev/null | tr -d ' ')
+  case "$_line_n" in ''|*[!0-9]*) _line_n=1 ;; esac
+  [ "$_line_n" -lt 1 ] && _line_n=1
+  printf 'line:1-%s|jaccard:%s' "$_line_n" "$_jaccard"
+  return 0
+}

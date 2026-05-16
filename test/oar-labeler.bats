@@ -611,3 +611,160 @@ _pp_pushed_back_setup_rules_file() {
   rm -rf "$_repo"
   [ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Task 7 — pp_oar_referenced (Jaccard bigram + cite-token-symbol detector).
+#
+# Signature: pp_oar_referenced SID INJECT_TS_EPOCH SCAN_AT_EPOCH BODY \
+#                              CITE_SYMBOLS_NEWLINE_SEP
+# Reads ~/.claude/cache/transcript-tail-${SID}.txt; uses file mtime as the
+# point-in-time bound (no per-line timestamps in v0.5.2 transcript format —
+# the PM1 fixture writes plain text). Returns 0 + "line:LO-HI|jaccard:0.NN"
+# on match. Otherwise rc=1.
+#
+# Plan addendum applied: I3 (temp-file comm -12, no <(...)) + M1 (cite-token
+# required is restricted to SYMBOLS — paths fail grep -wF and would over-reject).
+# ---------------------------------------------------------------------------
+
+# Helper: stamp a transcript file's mtime to a specific epoch so we can
+# exercise the [inject_ts, scan_at] window check deterministically.
+_pp_oar_set_mtime() {
+  local _file="$1" _epoch="$2"
+  # touch -t needs YYYYMMDDhhmm.ss
+  local _ymdhm
+  _ymdhm=$(date -r "$_epoch" '+%Y%m%d%H%M.%S' 2>/dev/null \
+           || date -d "@$_epoch" '+%Y%m%d%H%M.%S' 2>/dev/null)
+  [ -z "$_ymdhm" ] && return 1
+  touch -t "$_ymdhm" "$_file" 2>/dev/null
+}
+
+@test "referenced: high Jaccard + cite-symbol present → returns line:lo-hi|jaccard:0.NN" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r1"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  # Use a high-overlap fixture so the bigram intersection is large enough
+  # to clear τ=0.5 even AFTER stopword filtering. The cite-symbol
+  # `handleRetry` appears verbatim in both — satisfies M1's symbol gate.
+  printf 'refactoring handleRetry debounce stale events payload streaming queue retry handler\n' \
+    > "$_tail"
+  # Stamp mtime inside [inj, scan] window.
+  _pp_oar_set_mtime "$_tail" 1778893500 || skip "touch -t unsupported"
+  local _body='refactoring handleRetry debounce stale events payload streaming queue retry'
+  local _cites='handleRetry'
+  local _out
+  _out=$(pp_oar_referenced "$_sid" 1778893200 1778893800 "$_body" "$_cites")
+  printf '%s' "$_out" | grep -qE '^line:[0-9]+-[0-9]+\|jaccard:[01]\.[0-9]+$'
+}
+
+@test "referenced: high Jaccard but NO cite-symbol → rc != 0 (cite-token required)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r2"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  printf 'i am refactoring functions to debounce stale events properly\n' > "$_tail"
+  _pp_oar_set_mtime "$_tail" 1778893500 || skip "touch -t unsupported"
+  local _body='Consider debouncing functions to avoid stale events when network is slow'
+  # Cite symbol is something nowhere in the transcript.
+  local _cites='ZZZmysterySymbol'
+  run pp_oar_referenced "$_sid" 1778893200 1778893800 "$_body" "$_cites"
+  [ "$status" -ne 0 ]
+}
+
+@test "referenced: cite-symbol present but Jaccard below threshold rejects" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r3"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  printf 'i mentioned handleRetry once but everything else is totally different\n' \
+    > "$_tail"
+  _pp_oar_set_mtime "$_tail" 1778893500 || skip "touch -t unsupported"
+  # τ=0.5 default; the bodies share only a cite-token and a couple of
+  # incidental tokens, so bigram Jaccard falls well below 0.5.
+  local _body='Use exponential backoff with jitter on the handleRetry retry path'
+  local _cites='handleRetry'
+  run pp_oar_referenced "$_sid" 1778893200 1778893800 "$_body" "$_cites"
+  [ "$status" -ne 0 ]
+}
+
+@test "referenced: transcript file missing → rc = 1" {
+  . "$PP_ROOT/lib/oar.sh"
+  run pp_oar_referenced "sess-nonexistent-r4" 1778893200 1778893800 \
+                         "any body" "anySymbol"
+  [ "$status" -eq 1 ]
+}
+
+@test "referenced: transcript mtime BEFORE inject_ts → rc != 0 (outside window)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r5"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  printf 'i am refactoring the handleRetry function to debounce stale events\n' \
+    > "$_tail"
+  # mtime BEFORE the inject window — must be rejected even though content matches.
+  _pp_oar_set_mtime "$_tail" 1778890000 || skip "touch -t unsupported"
+  local _body='Consider debouncing handleRetry to avoid stale events when the network is slow'
+  local _cites='handleRetry'
+  run pp_oar_referenced "$_sid" 1778893200 1778893800 "$_body" "$_cites"
+  [ "$status" -ne 0 ]
+}
+
+@test "referenced: transcript mtime AFTER scan_at → rc != 0 (late-reference leak guard)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r6"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  printf 'i am refactoring the handleRetry function to debounce stale events\n' \
+    > "$_tail"
+  # mtime AFTER scan_at — must be rejected (no late-reference leakage).
+  _pp_oar_set_mtime "$_tail" 1778900000 || skip "touch -t unsupported"
+  local _body='Consider debouncing handleRetry to avoid stale events when the network is slow'
+  local _cites='handleRetry'
+  run pp_oar_referenced "$_sid" 1778893200 1778893800 "$_body" "$_cites"
+  [ "$status" -ne 0 ]
+}
+
+@test "referenced: only PATH cite-token (no symbol) → rc != 0 per M1" {
+  # Plan addendum M1: cite-token-required is restricted to SYMBOLS, never
+  # paths. Paths with slashes/dots rarely pass grep -wF word-boundary checks,
+  # so requiring them would produce false rejections. Even if the path
+  # appears verbatim in the transcript, requiring SYMBOL presence means a
+  # symbols-empty citation list rejects regardless of path overlap.
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r7"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  printf 'i am refactoring lib/oar.sh to debounce stale events\n' > "$_tail"
+  _pp_oar_set_mtime "$_tail" 1778893500 || skip "touch -t unsupported"
+  local _body='Consider debouncing the lib/oar.sh callsite to avoid stale events'
+  # CITES contains only a path-shaped token; no SYMBOL → reject.
+  local _cites='lib/oar.sh'
+  run pp_oar_referenced "$_sid" 1778893200 1778893800 "$_body" "$_cites"
+  [ "$status" -ne 0 ]
+}
+
+@test "referenced: empty CITES → rc != 0 (cite-token required)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r8"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  printf 'identical text identical text identical text\n' > "$_tail"
+  _pp_oar_set_mtime "$_tail" 1778893500 || skip "touch -t unsupported"
+  run pp_oar_referenced "$_sid" 1778893200 1778893800 \
+                         "identical text identical text" ""
+  [ "$status" -ne 0 ]
+}
+
+@test "referenced: stopwords are filtered before Jaccard (cite-symbol still required)" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _sid="sess-r9"
+  local _tail="$PP_CACHE_DIR/transcript-tail-${_sid}.txt"
+  # Heavy stopword + 3 content tokens including the cite-symbol. After
+  # filtering, transcript bigrams = {handleRetry_payload, payload_streaming}
+  # and body bigrams = {handleRetry_payload, payload_streaming}. Identical →
+  # Jaccard = 1.0 > τ. If stopwords were NOT filtered, the score would
+  # be similar (still high), but the assertion below is content-driven —
+  # filtering doesn't break the positive match.
+  printf 'the and for from import handleRetry payload streaming\n' > "$_tail"
+  _pp_oar_set_mtime "$_tail" 1778893500 || skip "touch -t unsupported"
+  local _body='the and for from import handleRetry payload streaming'
+  local _cites='handleRetry'
+  local _out
+  _out=$(pp_oar_referenced "$_sid" 1778893200 1778893800 "$_body" "$_cites")
+  [ -n "$_out" ]
+  # Accept either 0.NN (sub-unity) or 1.0000 (perfect overlap) jaccard.
+  printf '%s' "$_out" | grep -qE '^line:[0-9]+-[0-9]+\|jaccard:[01]\.[0-9]+$'
+}

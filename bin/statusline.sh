@@ -31,6 +31,54 @@ pp_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# _pp_sha8 — emit first 8 hex chars of sha256 of stdin. Single source so
+# every Stage A consumer (verdict stamping + drift invariant) uses the
+# same digest tool fallback chain. The fallback chain mirrors lib/oar.sh
+# (md5sum acceptable for bucketing — cryptographic strength irrelevant;
+# we only need stable hashing).
+_pp_sha8() {
+  local _h=""
+  if command -v shasum >/dev/null 2>&1; then
+    _h=$(shasum -a 256 2>/dev/null | cut -c1-8)
+  elif command -v sha256sum >/dev/null 2>&1; then
+    _h=$(sha256sum 2>/dev/null | cut -c1-8)
+  elif command -v sha256 >/dev/null 2>&1; then
+    _h=$(sha256 -q 2>/dev/null | cut -c1-8)
+  elif command -v md5sum >/dev/null 2>&1; then
+    _h=$(md5sum 2>/dev/null | cut -c1-8)
+  elif command -v md5 >/dev/null 2>&1; then
+    _h=$(md5 -q 2>/dev/null | cut -c1-8)
+  fi
+  [ -z "$_h" ] && _h="00000000"
+  printf '%s' "$_h"
+}
+
+# _pp_write_verdict_v2 FILE BODY CANONICAL_SHA8 RENDERED_SHA8 SILENT_REASON
+# v0.5.1.1 Stage A spec task 3 — sole writer of the per-lens verdict
+# file. Format:
+#   # schema_version: 2
+#   <body, exactly as v1 emitted it: `lensN: PASS|DROP — reason`>
+#   # v2: canonical_allowlist_sha8=<8hex> rendered_prompt_sha8=<8hex> silent_reason=<reason|empty>
+# v1 parsers (grep -E '^lens[0-9]+:') ignore the `# `-prefixed comment
+# lines. The trailer field shape is stable: silent_reason= is emitted
+# even when empty so v2 readers can parse with a fixed regex.
+#
+# Atomic write via mktemp + mv (same FS as $verdict_file path) — see
+# CLAUDE.md invariant #5. mv-into-same-dir is atomic on POSIX.
+_pp_write_verdict_v2() {
+  local _file="$1" _body="$2" _can="$3" _rend="$4" _silent="${5:-}"
+  local _tmp
+  _tmp=$(mktemp "${_file}.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf '# schema_version: %s\n' "${PP_VERDICT_SCHEMA_VERSION:-2}"
+    printf '%s\n' "$_body"
+    printf '# v2: canonical_allowlist_sha8=%s rendered_prompt_sha8=%s silent_reason=%s\n' \
+      "$_can" "$_rend" "$_silent"
+  } > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+  mv "$_tmp" "$_file" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+  return 0
+}
+
 # Pair Polymath — load config + libs
 _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -1350,7 +1398,19 @@ EOF
               verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
               streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-streak.txt"
               if [ -n "$verdict" ]; then
-                echo "$verdict" > "$verdict_file"
+                # v0.5.1.1 Stage A spec task 3: per-invocation hash trailer.
+                # canonical_allowlist_sha8 = sha256 of the FILE-READ
+                # inventory the validator consumed this cycle. In Stage A,
+                # rendered_prompt_sha8 == canonical_allowlist_sha8 (the
+                # prompt block flips to top-N in Stage C; until then there's
+                # no truncation, so both hashes match by construction).
+                # silent_reason is always empty in Stage A — pre-critique
+                # SILENT recognition lands in Stage B.
+                _pp_can_sha8=$(printf '%s' "${_pp_valid_symbols:-}" | _pp_sha8)
+                _pp_rend_sha8="$_pp_can_sha8"
+                _pp_write_verdict_v2 \
+                  "$verdict_file" "$verdict" \
+                  "$_pp_can_sha8" "$_pp_rend_sha8" ""
                 # FIX (review I1): DROP must be checked first (more specific) + word-boundary match
                 if echo "$verdict" | grep -Eqi '\bDROP\b'; then
                   # Increment streak (drives escalation next cycle)

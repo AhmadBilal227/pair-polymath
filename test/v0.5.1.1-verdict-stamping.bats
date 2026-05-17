@@ -1,0 +1,88 @@
+#!/usr/bin/env bats
+# v0.5.1.1 Stage A — verdict file gains schema_version header + per-invocation
+# hash trailer. Spec task 3. v1 parsers must continue working (the `#`
+# lines are comments to grep -E '^lens[0-9]+:').
+
+setup() {
+  HOME="$(mktemp -d)"
+  export HOME
+  CLAUDE_DIR="$HOME/.claude"
+  PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export CLAUDE_DIR PP_CACHE_DIR
+  PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  export PP_ROOT
+}
+teardown() { rm -rf "$HOME"; }
+
+# Helper: synthesize the v2 verdict file the way the writer in
+# bin/statusline.sh's _pp_write_verdict_v2 does, without running the
+# whole statusline cycle.
+_write_v2_verdict() {
+  local _file="$1" _body="$2" _can="$3" _rend="$4" _silent="$5"
+  {
+    printf '# schema_version: 2\n'
+    printf '%s\n' "$_body"
+    printf '# v2: canonical_allowlist_sha8=%s rendered_prompt_sha8=%s silent_reason=%s\n' \
+      "$_can" "$_rend" "$_silent"
+  } > "$_file"
+}
+
+@test "verdict v2: file has schema_version header on line 1" {
+  local _f="$PP_CACHE_DIR/cc-monitor-test-ENGINEERING-verdict.txt"
+  _write_v2_verdict "$_f" "lens0: PASS — concrete" "abc12345" "def67890" ""
+  local _first
+  _first=$(head -1 "$_f")
+  [ "$_first" = "# schema_version: 2" ]
+}
+
+@test "verdict v2: v1 parser pattern still picks the lens line" {
+  local _f="$PP_CACHE_DIR/cc-monitor-test-SECURITY-verdict.txt"
+  _write_v2_verdict "$_f" "lens0: DROP — citation fails: lib/auth.ts not in allowlist" \
+    "11112222" "33334444" "no_eligible_surface"
+  # The today-parser at bin/statusline.sh:1349 uses
+  #   grep -E "^lens${ci}:" | head -1
+  # which must still find the lens line regardless of the surrounding
+  # `# schema_version:` and `# v2:` comment lines.
+  local _line
+  _line=$(grep -E '^lens0:' "$_f" | head -1)
+  [ "$_line" = "lens0: DROP — citation fails: lib/auth.ts not in allowlist" ]
+}
+
+@test "verdict v2: trailer contains both hashes as 8 hex chars each" {
+  local _f="$PP_CACHE_DIR/cc-monitor-test-UX-verdict.txt"
+  _write_v2_verdict "$_f" "lens0: PASS" "deadbeef" "cafef00d" ""
+  local _trailer
+  _trailer=$(grep -E '^# v2:' "$_f" | head -1)
+  printf '%s' "$_trailer" | grep -Eq 'canonical_allowlist_sha8=[0-9a-f]{8}\b'
+  printf '%s' "$_trailer" | grep -Eq 'rendered_prompt_sha8=[0-9a-f]{8}\b'
+}
+
+@test "verdict v2: silent_reason field present and parseable when populated" {
+  local _f="$PP_CACHE_DIR/cc-monitor-test-PRODUCT-verdict.txt"
+  _write_v2_verdict "$_f" "lens0: DROP — no observation" \
+    "00000001" "00000002" "no_ui_surface"
+  # Extract the silent_reason value with a portable shell expansion.
+  local _trailer _reason
+  _trailer=$(grep -E '^# v2:' "$_f" | head -1)
+  _reason=$(printf '%s\n' "$_trailer" \
+    | sed -n 's/.*silent_reason=\([^ ]*\).*/\1/p')
+  [ "$_reason" = "no_ui_surface" ]
+}
+
+@test "verdict v2: empty silent_reason parses as empty string (Stage A always-empty)" {
+  # Stage A never populates silent_reason (SILENT recognition lands in
+  # Stage B). The trailer must emit silent_reason= with an empty value,
+  # NOT omit the field — keeps the trailer shape stable for v2 readers.
+  local _f="$PP_CACHE_DIR/cc-monitor-test-PERF-verdict.txt"
+  _write_v2_verdict "$_f" "lens0: PASS" "aaaaaaaa" "bbbbbbbb" ""
+  local _trailer
+  _trailer=$(grep -E '^# v2:' "$_f" | head -1)
+  # Field name present even though value is empty.
+  printf '%s' "$_trailer" | grep -q 'silent_reason='
+  # Reason value extracted as empty (no trailing tokens past silent_reason=).
+  local _reason
+  _reason=$(printf '%s\n' "$_trailer" \
+    | sed -n 's/.*silent_reason=\([^ ]*\).*/\1/p')
+  [ -z "$_reason" ]
+}

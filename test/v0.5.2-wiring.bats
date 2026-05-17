@@ -229,8 +229,10 @@ teardown() { rm -rf "$HOME"; }
   # When PP_HALLUC_GATE_ACTIVE=1 ALSO set, the PASS → DROP transition
   # must write a verdict line tagged with the halluc_post_check reason
   # (so pp_retry_classify_reason can route it as citation_fail). Verify
-  # the literal flip-string lives in the source.
-  grep -q 'lens.*DROP (halluc_post_check)' "$PP_ROOT/bin/statusline.sh"
+  # the literal flip-string lives in the source and keeps the numeric
+  # lensN token that verdict/KPI parsers consume.
+  grep -q 'lens${ci}: DROP (halluc_post_check)' "$PP_ROOT/bin/statusline.sh"
+  ! grep -q 'lens${ci_id}: DROP (halluc_post_check)' "$PP_ROOT/bin/statusline.sh"
 }
 
 @test "T12 wiring: PP_HALLUC_GATE_ENABLE=0 → byte-identity holds (no post-check side effect)" {

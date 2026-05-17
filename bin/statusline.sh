@@ -1832,7 +1832,7 @@ EOF
                         # Task-12 review S1: use ci_id (lens registry ID), not ci
                         # (numeric loop index). Mixing them is the C3 footgun;
                         # downstream verdict consumers key on registry ID.
-                        echo "lens${ci_id}: DROP (halluc_post_check)" > "$verdict_file"
+                        echo "lens${ci}: DROP (halluc_post_check)" > "$verdict_file"
                         # GPT-review #1: also update the in-memory $verdict
                         # so downstream logic (drop streak, retry-router
                         # branch, KPI counters in this same cycle) sees

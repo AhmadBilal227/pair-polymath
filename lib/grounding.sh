@@ -24,6 +24,14 @@ pp_contain_path() {
   local cand_real
   cand_real=$(cd "$base" 2>/dev/null && realpath "$candidate" 2>/dev/null) || return 1
 
+  # GNU realpath (Ubuntu/CI) succeeds for non-existent paths by default;
+  # BSD realpath (macOS) fails. We don't use `realpath -e` because BSD
+  # realpath doesn't accept that flag. Enforce existence portably here so
+  # every caller (lib/oar.sh, lib/hallucination.sh, lib/memory/redact.sh,
+  # bin/statusline.sh planner) sees identical semantics: a contained path
+  # is one that BOTH (a) lives inside base and (b) exists on disk.
+  [ -e "$cand_real" ] || return 1
+
   # cand_real must be base_real itself or a descendant (prefix match with /)
   case "$cand_real" in
     "$base_real"|"$base_real"/*)

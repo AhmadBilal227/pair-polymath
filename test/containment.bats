@@ -52,6 +52,18 @@ teardown() {
   [ "$status" -ne 0 ]
 }
 
+@test "contain: rejects candidate file that does not exist (cross-platform realpath fix)" {
+  # GNU realpath (Ubuntu/CI) succeeds for non-existent paths by default;
+  # BSD realpath (macOS) fails. Without the explicit [ -e ] guard in
+  # pp_contain_path, Ubuntu CI gave false PASS to hallucinated cited paths
+  # while macOS rejected them — see v0.5.2 CI failure cluster
+  # (test/hallucination-gate.bats #329 etc.). This test pins the invariant
+  # at the helper boundary so a future regression here surfaces before it
+  # bleeds into all downstream OAR/hallucination tests.
+  run pp_contain_path "$PP_TEST_BASE" "definitely-does-not-exist.ts"
+  [ "$status" -ne 0 ]
+}
+
 @test "grep-safe: rejects empty pattern" {
   run pp_safe_grep_pattern ""
   [ "$status" -ne 0 ]

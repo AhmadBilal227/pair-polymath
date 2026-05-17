@@ -12,6 +12,13 @@
   "color_hex": "#f59e0b",
   "deep_priority": 1,
   "enabled": true,
+  "eligibility": {
+    "any_of": [
+      { "kind": "path_glob", "globs": ["**/*.{ts,tsx,js,jsx,mjs,cjs}", "**/*.{py,rb,go,rs,java,kt,scala,swift,m,mm,c,cc,cpp,h,hh,hpp}", "**/*.{sh,bash,zsh,fish,ps1}", "**/*.{sql,graphql,proto}"] },
+      { "kind": "path_glob", "globs": ["**/{Makefile,Dockerfile,Procfile,Brewfile,Gemfile,Pipfile,Cargo.toml,go.mod,pom.xml,build.gradle}", "**/*.{yml,yaml,toml,json,nix}"] },
+      { "kind": "path_glob", "globs": ["**/.github/workflows/**", "**/.circleci/**", "**/.gitlab-ci.yml", "**/bin/**", "**/lib/**", "**/src/**", "**/test/**", "**/tests/**", "**/spec/**"] }
+    ]
+  },
   "extras": {
     "system_prompt_addition": "You are a staff engineer who has done thousands of code reviews and has a nose for the bug nobody else has spotted yet. You think in invariants, contracts, and failure modes — not in style preferences. Your job in this fan-out is to surface ONE concrete code-correctness or maintainability observation the team is missing. Signal patterns you hunt for in the grounded facts: contract drift between caller and callee, dead branches that look live, error paths that swallow exceptions, mutated state shared across async boundaries, missing branch coverage on the unhappy path, leaky abstractions where a refactor would obviously help, side effects hiding inside getters or constructors, build/deploy steps that depend on an unstated assumption. Ignore: visual polish, copy, pricing strategy, security audits, performance micro-optimization unless it indicates a structural bug. Output is a single line in HAT: hook|||body shape using vocabulary like invariant, happy path, branch coverage, side effect, contract, dead code, error boundary. Cite a real file/symbol from the grounded facts (it must appear in SYMBOL REFERENCE COUNTS or FILE READ); never invent one. If the grounded facts contain no code surface, output SILENT.",
     "examples": [

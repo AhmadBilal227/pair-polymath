@@ -513,6 +513,91 @@ doctor_check_install_drift() {
   return 1
 }
 
+doctor_check_oar_quality() {
+  # v0.5.2 check #21 — OAR data-quality sentinel (PM3 in plan addendum).
+  #
+  # The pre-mortem scenario: pp_oar_referenced is silently broken
+  # (e.g. schema mismatch never wired end-to-end) so every labeled row lands
+  # on "ignored." Doctor check #20 (install drift) and stuck-row signals stay
+  # green because the labeler COMPLETES — it just always lands on the same
+  # degenerate outcome. This check is the sentinel for that pattern.
+  #
+  # Returns:
+  #   0 = green (disabled, no data, insufficient sample, or non-degenerate)
+  #   1 = yellow (>=20 rows AND 100% ignored — likely silent failure)
+  #
+  # Threshold rationale: 20 rows balances (a) catching the bug within 1-2
+  # sessions of real use with (b) tolerating a quiet warmup where the first
+  # handful of advisories legitimately happened to be ignored.
+  if [ "${PP_OAR_ENABLE:-0}" != "1" ]; then
+    _pp_doctor_green "OAR quality" "OAR disabled"
+    return 0
+  fi
+
+  local _labeled="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
+  if [ ! -f "$_labeled" ]; then
+    _pp_doctor_green "OAR quality" "no labeled data yet"
+    return 0
+  fi
+
+  # Cheap raw-line count first — skip the jq fork below threshold.
+  local _raw
+  _raw=$(wc -l < "$_labeled" 2>/dev/null | tr -d ' ')
+  case "$_raw" in ''|*[!0-9]*) _raw=0 ;; esac
+  if [ "$_raw" -lt 20 ]; then
+    _pp_doctor_green "OAR quality" "only ${_raw} labeled rows (need >=20 to evaluate)"
+    return 0
+  fi
+
+  # jq missing — surface explicitly. Reporting green here would defeat the
+  # entire purpose of the check (silent-failure sentinel that itself fails
+  # silently).
+  if ! command -v jq >/dev/null 2>&1; then
+    _pp_doctor_yellow "OAR quality" "jq not installed — cannot evaluate OAR data"
+    return 1
+  fi
+
+  # Count VALID rows (well-formed objects with .outcome field) and the
+  # ignored subset in one pass. Blank/malformed lines are excluded from
+  # both numerator and denominator — otherwise an ignored+malformed mix
+  # could mask the degenerate pattern PM3 was designed to detect.
+  local _counts _jq_rc
+  _counts=$(jq -s -r '
+      [.[] | select(type=="object" and has("outcome"))] as $v
+      | "\($v | length)\t\($v | map(select(.outcome=="ignored")) | length)"
+    ' "$_labeled" 2>/dev/null)
+  _jq_rc=$?
+
+  # jq error → don't pretend healthy. Fix-the-file rather than silent green.
+  if [ "$_jq_rc" -ne 0 ] || [ -z "$_counts" ]; then
+    _pp_doctor_yellow "OAR quality" "cannot parse oar-labeled.jsonl (jq error) — check file integrity"
+    return 1
+  fi
+
+  local _valid _ignored
+  _valid=$(printf '%s' "$_counts" | cut -f1)
+  _ignored=$(printf '%s' "$_counts" | cut -f2)
+  case "$_valid"   in ''|*[!0-9]*) _valid=0   ;; esac
+  case "$_ignored" in ''|*[!0-9]*) _ignored=0 ;; esac
+
+  # Raw lines exist but too few parse as valid → file corruption signal.
+  if [ "$_valid" -lt 20 ]; then
+    _pp_doctor_yellow "OAR quality" "${_raw} raw lines but only ${_valid} parseable — check file integrity"
+    return 1
+  fi
+
+  # Red-flag condition: >=20 valid rows AND every single one is "ignored."
+  # Either (a) the codebase genuinely has zero advisory uptake (improbable;
+  # operator should still see this), or (b) pp_oar_referenced is silently
+  # broken — the pre-mortem scenario PM3 was authored to detect.
+  if [ "$_ignored" -eq "$_valid" ]; then
+    _pp_doctor_yellow "OAR quality" "ALL ${_valid} labeled rows are 'ignored' — referenced detection may be broken (see polymath history)"
+    return 1
+  fi
+  _pp_doctor_green "OAR quality" "${_valid} rows; ignored=${_ignored} (non-degenerate)"
+  return 0
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -578,7 +663,7 @@ pp_doctor_run() {
                 doctor_check_coreutils doctor_check_budget_pressure \
                 doctor_check_cache_permissions doctor_check_dismiss_libs \
                 doctor_check_retry_router_health doctor_check_install_drift \
-                doctor_check_statusline_smoke"
+                doctor_check_oar_quality doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

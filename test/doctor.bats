@@ -227,3 +227,166 @@ teardown() {
   [[ "$output" == *"install drift"* ]]
   [[ "$output" == *"no stale hooks"* ]]
 }
+
+# ========================================================
+# check #21 — OAR data quality sentinel (v0.5.2 PM3)
+# ========================================================
+#
+# Per the pre-mortem (PM3): the most likely silent-failure pattern is the
+# labeler completing successfully but every outcome landing on "ignored" —
+# meaning pp_oar_referenced is silently broken. doctor_check_oar_quality is
+# the sentinel that catches this WITHOUT a stuck-row signal.
+
+@test "doctor #21: oar quality green when PP_OAR_ENABLE=0 (default)" {
+  # Disabled OAR — no data is expected to exist; check should be green.
+  unset PP_OAR_ENABLE
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"OAR disabled"* ]]
+}
+
+_pp_doctor_oar_enable() {
+  # config/default.env sets PP_OAR_ENABLE=0 and lib/config.sh sources it
+  # unconditionally — env vars get clobbered. Write to user.env (which loads
+  # AFTER default.env) so the override survives into the doctor subprocess.
+  mkdir -p "$HOME/.claude/pair-polymath/config"
+  printf 'PP_OAR_ENABLE=1\n' > "$HOME/.claude/pair-polymath/config/user.env"
+}
+
+@test "doctor #21: oar quality green when enabled but no labeled file yet" {
+  # OAR enabled, but oar-labeled.jsonl doesn't exist — fresh install case.
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"no labeled data yet"* ]]
+}
+
+@test "doctor #21: oar quality green when fewer than 20 labeled rows" {
+  # Insufficient sample — can't yet evaluate degeneracy.
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i
+  for _i in 1 2 3 4 5; do
+    printf '{"session_id":"s%d","outcome":"ignored"}\n' "$_i" \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"only 5 labeled rows"* ]]
+  [[ "$output" == *"need"* ]]
+}
+
+@test "doctor #21: oar quality YELLOW when ALL 20+ labeled rows are 'ignored' (PM3 load-bearing)" {
+  # The pre-mortem scenario: labeler completes, but referenced detection
+  # silently always returns 0. Every row lands on "ignored". This is the
+  # exact alarm condition PM3 was added to detect.
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i
+  for _i in $(seq 1 20); do
+    printf '{"session_id":"s%d","outcome":"ignored"}\n' "$_i" \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"ALL 20 labeled rows are 'ignored'"* ]]
+  [[ "$output" == *"referenced detection may be broken"* ]]
+  [[ "$output" == *"polymath history"* ]]
+  # Summary's yellow count must be >= 1
+  echo "$output" | grep -qE 'Summary:.*[1-9][0-9]* yellow'
+}
+
+@test "doctor #21: oar quality GREEN when 20+ labeled rows with mixed outcomes" {
+  # Non-degenerate: at least one row is not "ignored" → measurement looks healthy.
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i
+  # 18 ignored
+  for _i in $(seq 1 18); do
+    printf '{"session_id":"s%d","outcome":"ignored"}\n' "$_i" \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  # 1 acted-on, 1 referenced — proves referenced detection is working
+  printf '{"session_id":"s19","outcome":"acted_on"}\n' \
+    >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"session_id":"s20","outcome":"referenced"}\n' \
+    >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"20 rows"* ]]
+  [[ "$output" == *"ignored=18"* ]]
+  [[ "$output" == *"non-degenerate"* ]]
+}
+
+# ----- post-review hardening (GPT-5 + spec-reviewer convergent findings) -----
+# The sentinel must not silently report "healthy" when the data pipeline
+# behind it is broken. These tests pin the two failure paths that would
+# otherwise mask PM3's load-bearing signal.
+
+@test "doctor #21: oar quality YELLOW when jq missing (sentinel must not silently pass)" {
+  # In-process test: source lib/doctor.sh, override `command` to lie about
+  # jq's absence, invoke the function directly. PATH-strip won't work
+  # because jq commonly lives in /usr/bin alongside dirname/wc/cut.
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i
+  for _i in $(seq 1 20); do
+    printf '{"session_id":"s%d","outcome":"ignored"}\n' "$_i" \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  # Override the `command` builtin to report jq as missing while preserving
+  # all other lookups. Defined inline so it only affects this test scope.
+  command() {
+    if [ "$1" = "-v" ] && [ "$2" = "jq" ]; then
+      return 1
+    fi
+    builtin command "$@"
+  }
+  # PP_CACHE_DIR is exported in setup; the doctor function reads it. The
+  # in-process invocation bypasses config.sh, so set PP_OAR_ENABLE directly.
+  PP_OAR_ENABLE=1 run doctor_check_oar_quality
+  unset -f command
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"jq not installed"* ]]
+  [[ "$output" == *"cannot evaluate"* ]]
+}
+
+@test "doctor #21: oar quality YELLOW when oar-labeled.jsonl is malformed (no false-green)" {
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  # 20 lines of garbage — wc -l ≥20 (passes threshold), jq -s fails.
+  local _i
+  for _i in $(seq 1 20); do
+    printf 'not-json-at-all-row-%d\n' "$_i" \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  # Either jq parse error OR low parseable-row count branch — both are yellow.
+  [[ "$output" == *"check file integrity"* ]]
+}
+
+@test "doctor #21: oar quality YELLOW when ignored+malformed mix masks degenerate pattern" {
+  # The PM-of-the-PM case: 19 valid 'ignored' + 1 'acted_on' WOULD be green,
+  # but if the 1 'acted_on' is actually a blank/malformed line, the older
+  # implementation incorrectly counted it as a non-ignored row. The fix
+  # filters denominator to valid objects only.
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i
+  for _i in $(seq 1 20); do
+    printf '{"session_id":"s%d","outcome":"ignored"}\n' "$_i" \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  # Append blank + malformed lines that older logic would have inflated _total with.
+  printf '\n' >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"session_id":"sX","outcome":\n' >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  # Two acceptable outcomes: (a) the degenerate-ignored alarm still fires
+  # because we filter to valid rows; (b) the parse-error branch fires. Both
+  # are yellow. The illegal outcome is a green "non-degenerate" claim.
+  [[ "$output" != *"non-degenerate"* ]]
+}

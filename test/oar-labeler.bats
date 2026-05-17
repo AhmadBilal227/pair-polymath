@@ -61,6 +61,12 @@ teardown() { rm -rf "$HOME"; }
   [ "$base" != "$id_hash" ]
 }
 
+@test "oar.sh: sourcing preserves caller LC_ALL" {
+  unset LC_ALL
+  LANG="C" . "$PP_ROOT/lib/oar.sh"
+  [ -z "${LC_ALL+x}" ]
+}
+
 @test "with_row_timeout: returns command exit code when under cap" {
   . "$PP_ROOT/lib/oar.sh"
   run pp_oar_with_row_timeout 2 true
@@ -1017,6 +1023,77 @@ _pp_oar_set_mtime() {
     [ "$(wc -l < "$PP_CACHE_DIR/oar-labeled.jsonl" | tr -d ' ')" = "0" ]
   fi
   rm -rf "$_repo"
+}
+
+@test "label_pending: malformed pending row is preserved and valid due row still labels" {
+  . "$PP_ROOT/lib/oar.sh"
+  printf '{bad json\n' > "$PP_CACHE_DIR/oar-pending.jsonl"
+  jq -nc '{session_id:"s-good",lens:"ENGINEERING",hash:"h-good",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    >> "$PP_CACHE_DIR/oar-pending.jsonl"
+  pp_oar_label_pending
+  [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  jq -e '.session_id == "s-good" and .outcome == "ignored"' \
+    "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+  grep -qF '{bad json' "$PP_CACHE_DIR/oar-pending.jsonl"
+}
+
+@test "label_pending: fresh lock is a no-op and preserves pending" {
+  . "$PP_ROOT/lib/oar.sh"
+  mkdir "$PP_CACHE_DIR/.oar-labeler.lock"
+  jq -nc '{session_id:"s-lock",lens:"ENGINEERING",hash:"h-lock",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  pp_oar_label_pending
+  [ ! -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  jq -e '.session_id == "s-lock"' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}
+
+@test "label_pending: stale lock is reclaimed" {
+  . "$PP_ROOT/lib/oar.sh"
+  mkdir "$PP_CACHE_DIR/.oar-labeler.lock"
+  touch -t 202001010000 "$PP_CACHE_DIR/.oar-labeler.lock" 2>/dev/null \
+    || skip "touch -t unavailable"
+  jq -nc '{session_id:"s-stale",lens:"ENGINEERING",hash:"h-stale",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  PP_OAR_LOCK_STALE_S=1 pp_oar_label_pending
+  [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  jq -e '.session_id == "s-stale"' "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+}
+
+@test "label_pending: dotted session ids are valid artifact names" {
+  . "$PP_ROOT/lib/oar.sh"
+  jq -nc '{session_id:"sess.foo-1",lens:"ENGINEERING",hash:"h-dot",
+          inject_ts:"2026-05-14T00:00:00Z",scan_at_epoch:1,
+          attempts:0,status:"pending",body:"",
+          cited_paths:[],cited_symbols:[]}' \
+    > "$PP_CACHE_DIR/oar-pending.jsonl"
+  pp_oar_label_pending
+  [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  jq -e '.session_id == "sess.foo-1" and .outcome == "ignored"' \
+    "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+}
+
+@test "referenced: temp bigram files are removed on success" {
+  . "$PP_ROOT/lib/oar.sh"
+  local _now _body
+  _now=$(date +%s)
+  _body="ExampleSymbol alpha beta gamma delta epsilon zeta eta theta iota"
+  printf 'User: ExampleSymbol alpha beta gamma delta epsilon zeta eta theta iota\n' \
+    > "$PP_CACHE_DIR/transcript-tail-s-ref.txt"
+  PP_OAR_REF_TAU=0.1 run pp_oar_referenced "s-ref" "$((_now - 60))" "$((_now + 60))" \
+    "$_body" "ExampleSymbol"
+  [ "$status" -eq 0 ]
+  local _left
+  _left=$(find "$PP_CACHE_DIR" -maxdepth 1 \( -name '.oar-ref-a.*' -o -name '.oar-ref-b.*' \) -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$_left" = "0" ]
 }
 
 @test "label_pending: pushed-back outcome via dismiss-ack rule" {

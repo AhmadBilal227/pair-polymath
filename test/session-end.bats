@@ -30,6 +30,28 @@ teardown() { rm -rf "$HOME"; }
   [ "$(wc -l < "$PP_CACHE_DIR/oar-pending.jsonl" | tr -d ' ')" -ge 2 ]
 }
 
+@test "session-end: reads PP_OAR_ENABLE from persistent user.env" {
+  mkdir -p "$PP_STATE_DIR/config"
+  printf 'PP_OAR_ENABLE=1\n' > "$PP_STATE_DIR/config/user.env"
+  unset PP_OAR_ENABLE
+  printf 'hash-persist' > "$PP_CACHE_DIR/cc-monitor-injected-hash-persist.1-ENGINEERING.txt"
+  run bash -c "printf '{\"session_id\":\"persist.1\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  [ -f "$PP_CACHE_DIR/oar-pending.jsonl" ]
+  jq -e '.session_id == "persist.1" and .lens == "ENGINEERING"' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}
+
+@test "session-end: hostile session_id is sanitized before file matching" {
+  export PP_OAR_ENABLE=1
+  printf 'hash-safe' > "$PP_CACHE_DIR/cc-monitor-injected-hash-....x-SECURITY.txt"
+  run bash -c "printf '{\"session_id\":\"../../x*\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  [ -f "$PP_CACHE_DIR/oar-pending.jsonl" ]
+  jq -e '.session_id == "....x" and .lens == "SECURITY"' \
+    "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}
+
 @test "session-end: latency under 50ms when disabled (p99)" {
   unset PP_OAR_ENABLE
   local _start _end

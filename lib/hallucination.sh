@@ -31,10 +31,9 @@
 #         field 1 = symbol). Gracefully degrades if tags is absent.
 #   4. Both checks pass → rc=0. Any miss → rc=1.
 
-# Bash 3.2 portable. Forces LC_ALL=C to keep grep/awk numeric + collation
-# deterministic — same pattern as lib/oar.sh.
-LC_ALL=C
-export LC_ALL
+# Bash 3.2 portable. Keep locale forcing scoped to individual grep/awk calls
+# below; statusline sources this lib and needs the caller locale for Unicode
+# rendering.
 
 # Idempotent source guard. Guard against being EXECUTED (not sourced): `return`
 # at top level errors out when this file is the entry point — fall back to exit.

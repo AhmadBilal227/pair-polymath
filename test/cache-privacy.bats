@@ -86,6 +86,20 @@ teardown() { rm -rf "$HOME"; }
   [ "$_bad" -eq 0 ]
 }
 
+@test "statusline: invalid cwd does not write shared all-zero tip cache" {
+  run bash -c "
+    printf '{\"session_id\":\"bats-missing-cwd\",\"model\":{\"display_name\":\"S\"},\"workspace\":{\"current_dir\":\"$HOME/does-not-exist\"},\"transcript_path\":\"/tmp/none\",\"cost\":{\"total_cost_usd\":0.0}}' \
+      | bash '$PP_ROOT/bin/statusline.sh'
+  "
+  [ "$status" -eq 0 ]
+  ! [ -f "$PP_CACHE_DIR/cc-tips-0000000000000000.txt" ]
+}
+
+@test "statusline: PR count cache lives under PP_CACHE_DIR, not /tmp" {
+  grep -qF 'cache_file="${PP_CACHE_DIR}/cc-pr-${cache_key}.cache"' "$PP_ROOT/bin/statusline.sh"
+  ! grep -qF 'cache_file="/tmp/cc-pr-' "$PP_ROOT/bin/statusline.sh"
+}
+
 @test "umask: statusline.sh declares 'umask 077' at the top" {
   # Locked-in invariant — every cache write inside statusline.sh inherits 600.
   grep -qE '^umask 077\s*$' "$PP_ROOT/bin/statusline.sh"
@@ -93,6 +107,10 @@ teardown() { rm -rf "$HOME"; }
 
 @test "umask: inject hook declares 'umask 077'" {
   grep -qE '^umask 077\s*$' "$PP_ROOT/hooks/inject-monitor-insight.sh"
+}
+
+@test "umask: cache-test-result hook declares 'umask 077'" {
+  grep -qE '^umask 077\s*$' "$PP_ROOT/hooks/cache-test-result.sh"
 }
 
 @test "umask: bin/polymath declares 'umask 077'" {
@@ -121,6 +139,25 @@ teardown() { rm -rf "$HOME"; }
   [ "$_mode" = "700" ]
 }
 
+@test "cache-test-result: writes owner-only cache via sanitized session id" {
+  chmod 755 "$PP_CACHE_DIR"
+  local _payload
+  _payload=$(jq -nc '{
+    session_id:"../../test*sid",
+    tool_name:"Bash",
+    tool_input:{command:"npm test"},
+    tool_response:{is_error:true,content:"failure tail"}
+  }')
+  run bash -c "printf '%s' '$_payload' | bash '$PP_ROOT/hooks/cache-test-result.sh'"
+  [ "$status" -eq 0 ]
+  [ -f "$PP_CACHE_DIR/cc-test-....testsid.cache" ]
+  local _mode _dir_mode
+  _mode=$(pp_file_mode "$PP_CACHE_DIR/cc-test-....testsid.cache")
+  _dir_mode=$(pp_file_mode "$PP_CACHE_DIR")
+  [ "$_mode" = "600" ]
+  [ "$_dir_mode" = "700" ]
+}
+
 # ============================================================
 # `polymath cache` CLI
 # ============================================================
@@ -133,17 +170,24 @@ teardown() { rm -rf "$HOME"; }
   printf '%s' "$output" | grep -qE 'mode != 600'
 }
 
+@test "cli: 'polymath cache list' counts the real pp-budget files as budget files" {
+  : > "$PP_CACHE_DIR/pp-budget-20260513.txt"
+  run bash "$PP_ROOT/bin/polymath" cache list
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE '0 tips, 0 lens/hook, 1 budget'
+}
+
 @test "cli: 'polymath cache clear' removes lens + tip caches, preserves budget files" {
   # Seed: one lens cache, one tip cache, one budget file.
   : > "$PP_CACHE_DIR/cc-monitor-fakesession-ENGINEERING.txt"
   : > "$PP_CACHE_DIR/cc-tips-deadbeef0000.txt"
-  : > "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt"
+  : > "$PP_CACHE_DIR/pp-budget-20260513.txt"
   run bash "$PP_ROOT/bin/polymath" cache clear
   [ "$status" -eq 0 ]
   ! [ -f "$PP_CACHE_DIR/cc-monitor-fakesession-ENGINEERING.txt" ]
   ! [ -f "$PP_CACHE_DIR/cc-tips-deadbeef0000.txt" ]
   # Budget file MUST survive — daily cap tracking can't be reset.
-  [ -f "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt" ]
+  [ -f "$PP_CACHE_DIR/pp-budget-20260513.txt" ]
 }
 
 @test "cli: 'polymath cache clear --tips' wipes ONLY tip caches" {

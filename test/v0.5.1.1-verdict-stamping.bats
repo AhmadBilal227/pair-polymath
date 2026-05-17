@@ -127,3 +127,11 @@ _pp_write_verdict_v2 '$_f' 'lens0: PASS — ok' 'feedface' 'feedface' 'deadbeef'
   grep -q '^# v2: canonical_allowlist_sha8_validator=feedface$' "$_f"
   grep -q '^# v2: rendered_prompt_sha8=deadbeef silent_reason=$' "$_f"
 }
+
+@test "verdict v2: retry-accepted path preserves v2 metadata writer" {
+  # Regression: accepted retries briefly overwrote verdict sidecars with a
+  # legacy single-line echo, dropping schema/hash trailers for OAR/KPI/drift
+  # consumers. Lock in that the retry marker is written through the v2 writer.
+  ! grep -qF 'echo "${verdict} (retry accepted)" > "$verdict_file"' "$PP_ROOT/bin/statusline.sh"
+  grep -qF '"${verdict} (retry accepted)"' "$PP_ROOT/bin/statusline.sh"
+}

@@ -15,15 +15,9 @@
 #   4. Labeler runs INLINE in statusline.sh in a `& wait`-bounded subshell.
 #      Telemetry must never block the cycle.
 
-# Bash 3.2 portable. Forces LC_ALL=C for the awk/sort/grep numerics this
-# file invokes. The export is intentional — it matches the project-wide
-# pattern at bin/statusline.sh:12 and statusline sources this lib, so the
-# locale is already C in that path. Sourcing this from a non-statusline
-# context (tests, future bin/polymath subcommands) sets the locale for the
-# duration of the script, which is the desired behavior for deterministic
-# numeric parsing.
-LC_ALL=C
-export LC_ALL
+# Bash 3.2 portable. Do not mutate the caller's locale at source time:
+# statusline intentionally keeps the process locale for Unicode rendering.
+# Byte-oriented commands below scope LC_ALL=C at the individual call site.
 
 # Idempotent source guard (sourced by bin/statusline.sh, bin/polymath, tests).
 # Guard against the file being EXECUTED rather than sourced — `return` at
@@ -56,6 +50,19 @@ fi
 : "${PP_OAR_LABEL_PER_CYCLE_CAP:=5}"
 : "${PP_OAR_LABEL_MAX_ATTEMPTS:=3}"
 : "${PP_OAR_ROW_TIMEOUT_S:=3}"
+: "${PP_OAR_LOCK_STALE_S:=120}"
+
+_pp_oar_mtime() {
+  local _path="${1:-}" _m=""
+  [ -e "$_path" ] || { printf '0'; return 0; }
+  _m=$(stat -c %Y "$_path" 2>/dev/null)
+  case "$_m" in ''|*[!0-9]*) _m="" ;; esac
+  if [ -z "$_m" ]; then
+    _m=$(stat -f %m "$_path" 2>/dev/null)
+  fi
+  case "$_m" in ''|*[!0-9]*) _m=0 ;; esac
+  printf '%s' "$_m"
+}
 
 # pp_oar_row_identity SID LENS HASH INJECT_TS
 # Stdout: 64-hex sha256 of the 4 fields joined by ASCII US (0x1F).
@@ -768,18 +775,6 @@ EOF
     _f_a=$(mktemp -t pp-oar-ref-a 2>/dev/null) || return 1
     _f_b=$(mktemp -t pp-oar-ref-b 2>/dev/null) || { rm -f "$_f_a"; return 1; }
   fi
-  # GPT-review #1: `trap … RETURN` inside a bash function is SHELL-WIDE,
-  # not function-scoped. After this function returns once, the trap
-  # definition persists and would fire on every subsequent function
-  # return in the same shell — rm'ing variables that no longer exist
-  # (noise) or worse, clobbering an outer function's RETURN trap.
-  # Fix: install the trap, run the critical section, then explicitly
-  # `trap - RETURN` to clear before EVERY return (and as the last
-  # statement on the success path). The `_cleanup_then_return` helper
-  # below centralizes this so we can't miss a path.
-  # shellcheck disable=SC2064
-  trap "rm -f '$_f_a' '$_f_b'; trap - RETURN" RETURN
-
   printf '%s\n' "$_tail_bigrams" > "$_f_a"
   printf '%s\n' "$_body_bigrams" > "$_f_b"
 
@@ -789,7 +784,7 @@ EOF
             | LC_ALL=C sort -u | LC_ALL=C grep -cv '^$' 2>/dev/null)
   case "$_inter" in ''|*[!0-9]*) _inter=0 ;; esac
   case "$_union" in ''|*[!0-9]*) _union=0 ;; esac
-  [ "$_union" -eq 0 ] && return 1
+  [ "$_union" -eq 0 ] && { rm -f "$_f_a" "$_f_b" 2>/dev/null; return 1; }
 
   # Compare Jaccard ≥ τ via awk (bash can't compare floats).
   local _jaccard _passed
@@ -797,7 +792,7 @@ EOF
     'BEGIN { printf "%.4f", i / u }')
   _passed=$(LC_ALL=C awk -v j="$_jaccard" -v t="$_tau" \
     'BEGIN { if (j+0 >= t+0) print 1; else print 0 }')
-  [ "$_passed" = "1" ] || return 1
+  [ "$_passed" = "1" ] || { rm -f "$_f_a" "$_f_b" 2>/dev/null; return 1; }
 
   # Line range: file-relative line span at point-in-time scan. Best effort
   # per spec §B (the file may be truncated/rotated later; this is recorded
@@ -807,6 +802,7 @@ EOF
   case "$_line_n" in ''|*[!0-9]*) _line_n=1 ;; esac
   [ "$_line_n" -lt 1 ] && _line_n=1
   printf 'line:1-%s|jaccard:%s' "$_line_n" "$_jaccard"
+  rm -f "$_f_a" "$_f_b" 2>/dev/null
   return 0
 }
 
@@ -854,6 +850,16 @@ pp_oar_label_pending() {
   [ -f "$_pending" ] || return 0
   mkdir -p "$_cache_dir" 2>/dev/null || true
 
+  local _now
+  _now=$(date +%s 2>/dev/null) || _now=0
+  case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+  # GPT-review: now=0 → all rows look "not yet due" (because scan_at_epoch
+  # is always > 0) → labeling stalls silently. If clock retrieval failed,
+  # exit cleanly so the next cycle retries with a working clock.
+  if [ "$_now" -eq 0 ]; then
+    return 0
+  fi
+
   # v0.5.1.1 Stage A: per-cycle reset for the unknown-outcome one-shot
   # warning (see the outcome-enum tolerance branch below).
   unset _PP_OAR_UNKNOWN_OUTCOME_WARNED
@@ -864,23 +870,25 @@ pp_oar_label_pending() {
   # wins; the first's surviving rows are lost. mkdir-lock the same way
   # lib/budget.sh::pp_budget_reserve guards the daily counter. If we can't
   # acquire the lock, this cycle is a no-op — next cycle picks up. No
-  # stale-lock detection here; the inner work is bounded by per-row 3s
-  # and per-cycle cap=5 → at most ~15s; a stale lock older than 60s is
-  # rare and a no-op next cycle is acceptable.
+  # stale-lock recovery is conservative: the inner work is bounded by
+  # per-row 3s and per-cycle cap=5 (default ~15s), so a 120s-old lock is
+  # almost certainly orphaned by a killed process.
   local _lock="${_cache_dir}/.oar-labeler.lock"
   if ! mkdir "$_lock" 2>/dev/null; then
-    return 0
-  fi
-
-  local _now
-  _now=$(date +%s 2>/dev/null) || _now=0
-  case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
-  # GPT-review: now=0 → all rows look "not yet due" (because scan_at_epoch
-  # is always > 0) → labeling stalls silently. If clock retrieval failed,
-  # exit cleanly so the next cycle retries with a working clock.
-  if [ "$_now" -eq 0 ]; then
-    rmdir "$_lock" 2>/dev/null
-    return 0
+    local _lock_mtime _lock_age _lock_ttl
+    _lock_ttl="${PP_OAR_LOCK_STALE_S:-120}"
+    case "$_lock_ttl" in ''|*[!0-9]*) _lock_ttl=120 ;; esac
+    _lock_mtime=$(_pp_oar_mtime "$_lock")
+    _lock_age=0
+    if [ "$_now" -gt 0 ] && [ "$_lock_mtime" -gt 0 ] 2>/dev/null; then
+      _lock_age=$(( _now - _lock_mtime ))
+    fi
+    if [ "$_lock_age" -gt "$_lock_ttl" ] 2>/dev/null; then
+      rmdir "$_lock" 2>/dev/null || return 0
+      mkdir "$_lock" 2>/dev/null || return 0
+    else
+      return 0
+    fi
   fi
 
   # Working temp files. Each mktemp MUST land in the same filesystem as
@@ -910,10 +918,24 @@ pp_oar_label_pending() {
       > "$_seen"
   fi
 
-  # FIFO snapshot of pending rows by scan_at_epoch ASC. jq -s reads the
-  # whole file as an array. -c emits one row per line.
-  jq -sc 'sort_by(.scan_at_epoch // 0) | .[]' "$_pending" 2>/dev/null \
-    > "$_snapshot"
+  # FIFO snapshot of pending rows by scan_at_epoch ASC. Read as raw lines
+  # first so one malformed JSONL row cannot make jq reject the whole file
+  # and rewrite pending to empty. Bad rows are sorted after valid rows and
+  # kept verbatim by the per-row guard below.
+  jq -Rrsc '
+    split("\n")
+    | map(select(length > 0)
+      | . as $raw
+      | (fromjson? // null) as $row
+      | {raw:$raw,
+         sort:(if $row == null then 9223372036854775807 else ($row.scan_at_epoch // 0) end)})
+    | sort_by(.sort)
+    | .[].raw
+  ' "$_pending" 2>/dev/null > "$_snapshot" || {
+    rm -f "$_seen" "$_snapshot" "$_kept" 2>/dev/null
+    rmdir "$_lock" 2>/dev/null
+    return 0
+  }
 
   local _processed=0
   local _line _sid _lens _hash _inj_ts _scan _attempts _id
@@ -946,9 +968,9 @@ pp_oar_label_pending() {
     # GPT-review: sanitize session_id to prevent path traversal via
     # transcript-tail-${_sid}.txt. session_id comes from SessionEnd's
     # JSON event but is operator-influenceable. Reject anything that's
-    # not a strictly safe-filename pattern: alphanumeric + `-` + `_`.
+    # not a strictly safe-filename pattern: alphanumeric + `.`, `-`, `_`.
     case "$_sid" in
-      *[!A-Za-z0-9_-]*|''|.|..)
+      *[!A-Za-z0-9._-]*|'')
         printf '%s\n' "$_line" >> "$_kept"
         continue
         ;;

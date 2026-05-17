@@ -359,8 +359,7 @@ limit_7d_reset="${F[14]:-0}"
 # inject newlines, or otherwise corrupt lock/cache filenames built from it.
 # Cap length so a hostile/long ID can't blow out filesystem limits.
 session_id="${session_id:-${SESSION_ID:-default}}"
-session_id=$(printf '%s' "$session_id" | tr -cd 'a-zA-Z0-9._-' | cut -c1-64)
-[ -z "$session_id" ] && session_id="default"
+session_id=$(pp_sanitize_session_id "$session_id")
 
 # --- Git branch + dirty marker ---
 branch=""
@@ -527,10 +526,16 @@ if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
     # Ubuntu ships sha1sum, not shasum. Without a fallback, this line
     # silently produced an empty cache_key on Linux → every repo on the
     # box shared one cache file at /tmp/cc-pr-.cache (Ralph round 2 BUG 2).
-    cache_key=$(echo "$repo_root" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -d' ' -f1)
-    cache_file="/tmp/cc-pr-${cache_key}.cache"
+    cache_key=$(printf '%s' "$repo_root" | _pp_sha8)
+    cache_file="${PP_CACHE_DIR}/cc-pr-${cache_key}.cache"
     if [ ! -f "$cache_file" ] || [ $(($(date +%s) - $(pp_mtime "$cache_file" || echo 0))) -gt 600 ]; then
-      ( cd "$repo_root" && gh pr list --json number 2>/dev/null | jq -r 'length' > "$cache_file" 2>/dev/null ) &
+      (
+        cd "$repo_root" || exit 0
+        _pp_pr_tmp=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null) || exit 0
+        gh pr list --json number 2>/dev/null | jq -r 'length' > "$_pp_pr_tmp" 2>/dev/null \
+          && mv "$_pp_pr_tmp" "$cache_file" 2>/dev/null
+        rm -f "$_pp_pr_tmp" 2>/dev/null || true
+      ) &
     fi
     if [ -f "$cache_file" ]; then
       pr_count=$(cat "$cache_file" 2>/dev/null)
@@ -584,6 +589,8 @@ fi
 # closes the leak; the lock follows the cache scope for the same Ralph-R2-
 # BUG-4 reason (lock scope must match write scope).
 _pp_proj_key=$(pp_project_key "$cwd")
+_pp_tip_cache_enabled=1
+[ "$_pp_proj_key" = "0000000000000000" ] && _pp_tip_cache_enabled=0
 # Review G3: respect $PP_CACHE_DIR / $CLAUDE_DIR so this stays consistent
 # with bin/polymath and lib/doctor.sh. Hardcoded $HOME/.claude/cache split
 # the cache location and left stale files undiscovered by `cache list`.
@@ -600,7 +607,8 @@ mkdir -p "$_pp_cache_root" 2>/dev/null
 chmod 700 "$_pp_cache_root" 2>/dev/null || true
 
 cache_age=$(($(date +%s) - $(pp_mtime "$TIP_CACHE" || echo 0)))
-if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
+if [ "$_pp_tip_cache_enabled" = "1" ] \
+    && { [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; }; then
   # Atomic lock primitive (Ralph R2 H3). The previous
   # `[ ! -f "$LOCK" ] && touch "$LOCK"` was a check-then-touch TOCTOU race —
   # two parallel statuslines could both see absent + both touch + both spawn
@@ -664,7 +672,7 @@ fi
 # Resolve tip — split topic and body for slot-based display
 tip_topic=""
 tip_body=""
-if [ -f "$TIP_CACHE" ] && [ -s "$TIP_CACHE" ]; then
+if [ "$_pp_tip_cache_enabled" = "1" ] && [ -f "$TIP_CACHE" ] && [ -s "$TIP_CACHE" ]; then
   count=$(wc -l < "$TIP_CACHE" | tr -d ' ')
   if [ "$count" -gt 0 ]; then
     # Rotate slowly (90s per tip) so user can read across multiple slot cycles
@@ -1695,6 +1703,7 @@ EOF
             _pp_canary_pct=$(printf '%s' "${PP_RETRY_ROUTER_CANARY_PCT:-0}" | tr -cd '0-9')
             case "$_pp_canary_pct" in '') _pp_canary_pct=0 ;; esac
             [ "$_pp_canary_pct" -gt 100 ] 2>/dev/null && _pp_canary_pct=100
+            _pp_cycle_retry_accepted=0
             for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
               ci_id="${PP_LENS_IDS[$ci]}"
               verdict=$(echo "$critique_output" | grep -E "^lens${ci}:" | head -1)
@@ -1842,7 +1851,10 @@ EOF
                     _pp_retry_cache="${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}.txt"
                     printf '%s\n' "$retry_result" > "${_pp_retry_cache}.tmp" 2>/dev/null \
                       && mv "${_pp_retry_cache}.tmp" "$_pp_retry_cache" 2>/dev/null
-                    echo "${verdict} (retry accepted)" > "$verdict_file"
+                    _pp_write_verdict_v2 \
+                      "$verdict_file" "${verdict} (retry accepted)" \
+                      "$_pp_prompt_sha8" "$_pp_validator_sha8" "$_pp_rend_sha8" ""
+                    _pp_cycle_retry_accepted=$(( _pp_cycle_retry_accepted + 1 ))
                   fi
                 elif echo "$verdict" | grep -Eqi '\bPASS\b'; then
                   # PASS → reset drop streak
@@ -1910,9 +1922,25 @@ EOF
           fi
         fi
 
-        # Bound history sizes after all writes finish
-        tail -50 "$HIST_FILE_SESSION" > "${HIST_FILE_SESSION}.tmp" 2>/dev/null && mv "${HIST_FILE_SESSION}.tmp" "$HIST_FILE_SESSION"
-        tail -100 "$HIST_FILE_PROJECT" > "${HIST_FILE_PROJECT}.tmp" 2>/dev/null && mv "${HIST_FILE_PROJECT}.tmp" "$HIST_FILE_PROJECT"
+        # Bound history sizes after all writes finish. Only create a temp
+        # file after the source exists so failed tail reads don't leave
+        # zero-byte .tmp clutter behind.
+        if [ -f "$HIST_FILE_SESSION" ]; then
+          _pp_hist_tmp=$(mktemp "${HIST_FILE_SESSION}.XXXXXX" 2>/dev/null) || _pp_hist_tmp=""
+          if [ -n "$_pp_hist_tmp" ]; then
+            tail -50 "$HIST_FILE_SESSION" > "$_pp_hist_tmp" 2>/dev/null \
+              && mv "$_pp_hist_tmp" "$HIST_FILE_SESSION" 2>/dev/null
+            rm -f "$_pp_hist_tmp" 2>/dev/null || true
+          fi
+        fi
+        if [ -f "$HIST_FILE_PROJECT" ]; then
+          _pp_hist_tmp=$(mktemp "${HIST_FILE_PROJECT}.XXXXXX" 2>/dev/null) || _pp_hist_tmp=""
+          if [ -n "$_pp_hist_tmp" ]; then
+            tail -100 "$HIST_FILE_PROJECT" > "$_pp_hist_tmp" 2>/dev/null \
+              && mv "$_pp_hist_tmp" "$HIST_FILE_PROJECT" 2>/dev/null
+            rm -f "$_pp_hist_tmp" 2>/dev/null || true
+          fi
+        fi
 
         # === v0.5.2: OAR labeler — inline, gated, bounded ===================
         # Wire pp_oar_label_pending into the cycle. The driver is FIFO + per-row
@@ -2257,12 +2285,13 @@ EOF
       case "$_pp_kpi_halluc_post_rate" in
         ''|*[!0-9.]*|*.*.*) _pp_kpi_halluc_post_rate=0 ;;
       esac
-      # retry_acceptance_rate: count "(retry accepted)" verdict files for this
-      # session vs total retries this cycle. Best-effort; 0 when no retries.
-      _pp_kpi_retry_accepted=$(grep -l 'retry accepted' \
-        "${PP_CACHE_DIR}/cc-monitor-${session_id}-"*-verdict.txt 2>/dev/null \
-        | wc -l | tr -d ' ' 2>/dev/null || printf '0')
+      # retry_acceptance_rate: current-cycle accepted retries vs current-cycle
+      # retry calls. Do not scan verdict sidecars here: they persist across
+      # cycles while the denominator is per-cycle.
+      _pp_kpi_retry_accepted="${_pp_cycle_retry_accepted:-0}"
       case "$_pp_kpi_retry_accepted" in ''|*[!0-9]*) _pp_kpi_retry_accepted=0 ;; esac
+      [ "$_pp_kpi_retry_accepted" -gt "$_pp_kpi_retry_count" ] 2>/dev/null \
+        && _pp_kpi_retry_accepted="$_pp_kpi_retry_count"
       _pp_kpi_accept_rate=$(LC_ALL=C awk -v a="$_pp_kpi_retry_accepted" -v t="$_pp_kpi_retry_count" \
         'BEGIN { if (t > 0) printf "%.4f", a / t; else printf "0" }' 2>/dev/null)
       case "$_pp_kpi_accept_rate" in ''|*[!0-9.]*) _pp_kpi_accept_rate=0 ;; esac

@@ -28,6 +28,12 @@ teardown() {
   rm -rf "$HOME"
 }
 
+@test "halluc: sourcing preserves caller LC_ALL" {
+  unset LC_ALL
+  . "$PP_ROOT/lib/hallucination.sh"
+  [ -z "${LC_ALL+x}" ]
+}
+
 @test "halluc: empty inputs (no citations) → rc=0 trivially" {
   . "$PP_ROOT/lib/hallucination.sh"
   local _repo

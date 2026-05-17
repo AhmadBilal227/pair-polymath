@@ -1436,6 +1436,29 @@ SHIM
   printf '%s' "$output" | jq -e '.pending == 2' >/dev/null
 }
 
+@test "polymath history: splits pending scan-window rows from due backlog" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc --arg ts "$_now_iso" '{session_id:"a",lens:"ENGINEERING",hash:"ha",
+       inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"e",
+       confidence:"symbol_exact",identity:"ia"}' \
+    > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc '{session_id:"future",lens:"ENGINEERING",hash:"hf",
+       inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:99999999999,
+       attempts:0,status:"pending"}' \
+    > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  jq -nc '{session_id:"due",lens:"ENGINEERING",hash:"hd",
+       inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:1,
+       attempts:0,status:"pending"}' \
+    >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  run bash "$PP_ROOT/bin/polymath" history --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" \
+    | jq -e '.pending == 2 and .pending_in_window == 1 and .pending_due == 1' >/dev/null
+}
+
 @test "polymath history: help flag prints usage and exits 0" {
   run bash "$PP_ROOT/bin/polymath" history --help
   [ "$status" -eq 0 ]

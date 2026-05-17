@@ -14,7 +14,12 @@
 set -u
 umask 077
 
-# Fast no-op path — keep this gate at the top to honor the <50ms latency budget.
+PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck disable=SC1091
+. "$PP_ROOT/lib/config.sh" 2>/dev/null || true
+
+# Fast no-op path after config load: persistent PP_OAR_ENABLE in user.env
+# must be visible to Claude's SessionEnd hook process.
 if [ "${PP_OAR_ENABLE:-0}" != "1" ]; then
   exit 0
 fi
@@ -23,10 +28,8 @@ fi
 _input=$(cat 2>/dev/null || printf '{}')
 _session_id=$(printf '%s' "$_input" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$_session_id" ] && exit 0
+_session_id=$(pp_sanitize_session_id "$_session_id")
 
-PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-# shellcheck disable=SC1091
-. "$PP_ROOT/lib/config.sh" 2>/dev/null || true
 # v0.5.2: pp_extract_citations_from_text — used to populate cited_paths +
 # cited_symbols in the pending row (C2 fix path A from plan addendum).
 # shellcheck disable=SC1091

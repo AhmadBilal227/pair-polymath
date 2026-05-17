@@ -19,6 +19,7 @@ session_id=$(echo "$input" | jq -r '.session_id // empty' 2>/dev/null)
 PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "${PP_ROOT}/lib/config.sh" 2>/dev/null || true
+session_id=$(pp_sanitize_session_id "$session_id")
 # shellcheck disable=SC1091
 . "${PP_ROOT}/lib/lens-loader.sh"
 pp_load_lenses

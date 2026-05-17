@@ -240,7 +240,9 @@ case "$cmd" in
         # Review G9: exclude budget files from the lens count; they're
         # date-stamped daily-cap accounting, not lens observations.
         _pp_cache_lens=$(find "$_pp_cache_dir" -maxdepth 1 -name 'cc-monitor-*' ! -name 'cc-monitor-budget-*' -type f 2>/dev/null | wc -l | tr -d ' ')
-        _pp_cache_budget=$(find "$_pp_cache_dir" -maxdepth 1 -name 'cc-monitor-budget-*' -type f 2>/dev/null | wc -l | tr -d ' ')
+        _pp_cache_budget=$(find "$_pp_cache_dir" -maxdepth 1 \
+          \( -name 'pp-budget-*' -o -name 'cc-monitor-budget-*' \) \
+          -type f 2>/dev/null | wc -l | tr -d ' ')
         _pp_cache_loose=$(find "$_pp_cache_dir" -maxdepth 1 -type f ! -perm 600 2>/dev/null | wc -l | tr -d ' ')
         printf '  Files:    %s total (%s tips, %s lens/hook, %s budget)\n' "$_pp_cache_total" "$_pp_cache_tips" "$_pp_cache_lens" "$_pp_cache_budget"
         if [ "$_pp_cache_loose" -gt 0 ]; then
@@ -305,7 +307,9 @@ case "$cmd" in
               \( -name 'cc-monitor-injected-hash-*' -o -name 'cc-monitor-injected-time-*' \) \
               -type f -exec rm -f {} \; 2>/dev/null
             # Chmod surviving budget files to the privacy invariant.
-            find "$_pp_cache_dir" -maxdepth 1 -name 'cc-monitor-budget-*' -type f -exec chmod 600 {} \; 2>/dev/null
+            find "$_pp_cache_dir" -maxdepth 1 \
+              \( -name 'pp-budget-*' -o -name 'cc-monitor-budget-*' \) \
+              -type f -exec chmod 600 {} \; 2>/dev/null
             chmod 700 "$_pp_cache_dir" 2>/dev/null || true
             printf 'polymath: cleared lens + tip + idempotency caches in %s (budget files preserved and locked to 600)\n' "$_pp_cache_dir"
             ;;
@@ -712,13 +716,26 @@ HELP
     [ -n "$_h_rows" ] || _h_rows='[]'
 
     _h_pending_count=0
+    _h_pending_in_window=0
+    _h_pending_due=0
     if [ -f "$_h_pending" ]; then
-      _h_pending_count=$(jq -R 'fromjson?' "$_h_pending" 2>/dev/null \
-                        | jq -s --arg lens "$_h_lens" '
+      _h_now=$(date +%s 2>/dev/null || printf '0')
+      case "$_h_now" in ''|*[!0-9]*) _h_now=0 ;; esac
+      _h_pending_stats=$(jq -R 'fromjson?' "$_h_pending" 2>/dev/null \
+                        | jq -s --arg lens "$_h_lens" --argjson now "$_h_now" '
                             map(select(.scan_at_epoch != null))
                             | (if $lens != "" then map(select(.lens == $lens)) else . end)
-                            | length' 2>/dev/null)
+                            | {total:length,
+                               in_window:(map(select((.scan_at_epoch // 0) > $now)) | length),
+                               due:(map(select((.scan_at_epoch // 0) <= $now)) | length)}
+                          ' 2>/dev/null)
+      [ -n "$_h_pending_stats" ] || _h_pending_stats='{"total":0,"in_window":0,"due":0}'
+      _h_pending_count=$(printf '%s' "$_h_pending_stats" | jq -r '.total // 0' 2>/dev/null)
+      _h_pending_in_window=$(printf '%s' "$_h_pending_stats" | jq -r '.in_window // 0' 2>/dev/null)
+      _h_pending_due=$(printf '%s' "$_h_pending_stats" | jq -r '.due // 0' 2>/dev/null)
       case "$_h_pending_count" in ''|*[!0-9]*) _h_pending_count=0 ;; esac
+      case "$_h_pending_in_window" in ''|*[!0-9]*) _h_pending_in_window=0 ;; esac
+      case "$_h_pending_due" in ''|*[!0-9]*) _h_pending_due=0 ;; esac
     fi
     _h_stuck_count=0
     if [ -f "$_h_stuck" ]; then
@@ -786,6 +803,8 @@ HELP
     _h_summary=$(printf '%s' "$_h_rows" | jq \
                   --argjson per_lens "$_h_per_lens_json" \
                   --argjson pending "$_h_pending_count" \
+                  --argjson pending_in_window "$_h_pending_in_window" \
+                  --argjson pending_due "$_h_pending_due" \
                   --argjson stuck "$_h_stuck_count" \
                   --argjson window "$_h_window" '
         (map(select(.outcome != "silent"))) as $eligible |
@@ -793,6 +812,8 @@ HELP
           total: length,
           eligible: ($eligible | length),
           pending: $pending,
+          pending_in_window: $pending_in_window,
+          pending_due: $pending_due,
           stuck: $stuck,
           window_days: $window,
           by_outcome: {
@@ -814,7 +835,7 @@ HELP
       printf '\nObservation outcomes (last %s days)\n\n' "$_h_window"
       printf '%s' "$_h_summary" | jq -r '
         "  Total observations:    \(.total)",
-        "  Eligible (non-silent): \(.eligible)      (\(.pending) still in scan window)",
+        "  Eligible (non-silent): \(.eligible)      (\(.pending_in_window) still in scan window, \(.pending_due) due)",
         "  Stuck (quarantined):   \(.stuck)      (see: polymath doctor)",
         "",
         "  By outcome:",

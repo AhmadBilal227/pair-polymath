@@ -433,3 +433,101 @@ pp_safe_git_pathspec() {
   [ -z "$p" ] && return 1
   printf ':(literal)%s' "$p"
 }
+
+# pp_grounding_symbol_inventory FACTS_FILE
+# v0.5.1.1 Stage A — single source of truth for the FILE-READ-derived
+# symbol allowlist. Used by:
+#   - bin/statusline.sh validator (VALID SYMBOLS block) — Stage A
+#   - bin/statusline.sh prompt (SYMBOL REFERENCE COUNTS, post-Stage C)
+# Splitting these two consumers across one helper eliminates the drift
+# class the v0.5.1.1 spec calls out as the root of ~70% of lens DROPs.
+#
+# Input: path to the facts file (the grounded blob; today written by
+#   bin/statusline.sh via `pp_write_privacy_log` into
+#   $PP_CACHE_DIR/last-cycle-payload.json, but for Stage A this helper
+#   accepts ANY file containing a `=== FILE READ: ...===` block — the
+#   caller is responsible for choosing the right artifact).
+# Output: stopword-filtered, sorted, unique identifiers from the FILE READ
+#   block, one per line. Empty stdout + rc=0 when block is missing or
+#   contains no identifiers. rc=1 when FACTS_FILE is unreadable.
+#
+# Identifier regex matches the same shape as citations.sh:
+#   [A-Za-z_][A-Za-z0-9_]{2,}     (>=3 chars)
+# Stopword set sourced from $_PP_CITATION_STOPWORDS in citations.sh — the
+# caller MUST source citations.sh before calling this helper. We do NOT
+# re-declare the stopword list here: if it drifts between the two callers
+# (this helper vs pp_extract_citations) the validator-side and lens-side
+# allowlists will silently disagree — exactly the bug Stage A is fixing.
+#
+# Bash 3.2 portable: no mapfile, no associative arrays. awk handles
+# section extraction (same pattern as lib/citations.sh::pp_extract_citations).
+pp_grounding_symbol_inventory() {
+  local _facts="${1:-}"
+  [ -z "$_facts" ] && return 1
+  [ -r "$_facts" ] || return 1
+
+  # === Section extraction ===
+  # Grab the body between `=== FILE READ: ...===` (or `=== FILE READ (...) ===`)
+  # and the next `=== ` header. The today-grounded blob uses the form
+  # `=== FILE READ (planner picked: <path>) ===` (bin/statusline.sh:852)
+  # so we match on the `FILE READ` substring per index(), same as
+  # pp_extract_citations at lib/citations.sh:109.
+  #
+  # The canonical "nothing read this cycle" sentinel from
+  # bin/statusline.sh:853 — `(no file read this round)` — is skipped
+  # explicitly so its own tokens (file/read/round) don't leak into the
+  # symbol allowlist. plan-task A2 (pp_grounding_inventory_is_empty)
+  # relies on this returning zero symbols for the sentinel input.
+  local _section
+  _section=$(LC_ALL=C awk '
+    /^=== / {
+      in_section = 0
+      if (index($0, "FILE READ") > 0) in_section = 1
+      next
+    }
+    in_section == 1 {
+      if ($0 == "(no file read this round)") next
+      print
+    }
+  ' "$_facts" 2>/dev/null)
+
+  [ -z "$_section" ] && return 0
+
+  # === Identifier extraction ===
+  # Identical regex to citations.sh:123 — keeps the two consumers byte-
+  # equivalent on the token-extraction step. The downstream stopword
+  # filter is also identical (citations.sh:134-144 reproduced below) so
+  # the test in step 1 ("drops stopwords") passes whichever way it's
+  # invoked.
+  local _raw
+  _raw=$(printf '%s\n' "$_section" \
+    | LC_ALL=C grep -oE '[A-Za-z_][A-Za-z0-9_]{2,}' 2>/dev/null \
+    || true)
+
+  [ -z "$_raw" ] && return 0
+
+  # === Stopword filter + sort + uniq ===
+  # _PP_CITATION_STOPWORDS comes from lib/citations.sh. If the caller
+  # didn't source it (defensive — every production caller does), the awk
+  # `stops` arg is empty, the BEGIN loop builds an empty set, and the
+  # `tok in stop` check is always false. That degrades to "no stopword
+  # filter" — broader allowlist, but not incorrect. We do NOT inline a
+  # fallback stopword list here: doing so would silently mask citations.sh
+  # being out of date or unsourced.
+  # shellcheck disable=SC2154
+  printf '%s\n' "$_raw" \
+    | LC_ALL=C awk -v stops="${_PP_CITATION_STOPWORDS:-}" '
+        BEGIN {
+          n = split(stops, arr, " ")
+          for (i = 1; i <= n; i++) stop[arr[i]] = 1
+        }
+        {
+          tok = $0
+          if (length(tok) < 3) next
+          if (tok in stop) next
+          print tok
+        }
+      ' \
+    | LC_ALL=C sort -u
+  return 0
+}

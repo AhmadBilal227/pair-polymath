@@ -86,3 +86,167 @@ setup() {
   unset TEST_TMP
   [ "$_rc" -eq 0 ]
 }
+
+# === v0.5.1.1 Stage A: pp_grounding_symbol_inventory ===
+# Spec task 1: single FILE-READ-derived canonical symbol set, used by both
+# the validator's VALID SYMBOLS block (Stage A) and the lens-side prompt
+# SYMBOL block (Stage C). Stopword-filtered for parity with citations.sh.
+
+@test "pp_grounding_symbol_inventory: extracts identifiers from a FILE READ block" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== GIT STATUS (uncommitted) ===
+M src/foo.ts
+
+=== FILE READ (planner picked: src/foo.ts) ===
+export function calculateSum(a, b) { return a + b; }
+const userAccount = makeAccount();
+class WidgetController { render() {} }
+
+=== SYMBOL REFERENCE COUNTS (grep across cwd) ===
+calculateSum: 4 refs
+EOF
+  local out
+  out=$(pp_grounding_symbol_inventory "$_tmp")
+  rm -f "$_tmp"
+  # All three identifiers appear, sorted, unique.
+  printf '%s\n' "$out" | grep -qx 'calculateSum'
+  printf '%s\n' "$out" | grep -qx 'userAccount'
+  printf '%s\n' "$out" | grep -qx 'WidgetController'
+}
+
+@test "pp_grounding_symbol_inventory: drops stopwords (export, function, class, const, return)" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== FILE READ (planner picked: x.ts) ===
+export function foo() { return 1; }
+const bar = true;
+class Baz {}
+EOF
+  local out
+  out=$(pp_grounding_symbol_inventory "$_tmp")
+  rm -f "$_tmp"
+  # The stopwords MUST NOT appear in the output.
+  ! printf '%s\n' "$out" | grep -qx 'export'
+  ! printf '%s\n' "$out" | grep -qx 'function'
+  ! printf '%s\n' "$out" | grep -qx 'class'
+  ! printf '%s\n' "$out" | grep -qx 'const'
+  ! printf '%s\n' "$out" | grep -qx 'return'
+  ! printf '%s\n' "$out" | grep -qx 'true'
+  # The actual identifiers DO appear.
+  printf '%s\n' "$out" | grep -qx 'foo'
+  printf '%s\n' "$out" | grep -qx 'bar'
+  printf '%s\n' "$out" | grep -qx 'Baz'
+}
+
+@test "pp_grounding_symbol_inventory: output is sorted + unique" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== FILE READ (planner picked: dup.ts) ===
+const zzz = 1;
+const aaa = 2;
+const zzz = 3;
+const mmm = aaa + zzz;
+EOF
+  local out
+  out=$(pp_grounding_symbol_inventory "$_tmp")
+  rm -f "$_tmp"
+  # Sorted ascending.
+  [ "$(printf '%s\n' "$out" | head -1)" = "aaa" ]
+  [ "$(printf '%s\n' "$out" | tail -1)" = "zzz" ]
+  # Unique (zzz appears once).
+  [ "$(printf '%s\n' "$out" | grep -c '^zzz$')" -eq 1 ]
+}
+
+@test "pp_grounding_symbol_inventory: empty FILE READ block returns empty stdout, rc=0" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== FILE READ (planner picked: empty.txt) ===
+(no file read this round)
+
+=== SYMBOL REFERENCE COUNTS (grep across cwd) ===
+(no symbols extracted from file read)
+EOF
+  run pp_grounding_symbol_inventory "$_tmp"
+  rm -f "$_tmp"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "pp_grounding_symbol_inventory: no FILE READ block at all returns empty, rc=0" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== GIT STATUS (uncommitted) ===
+M src/foo.ts
+
+=== RECENT COMMITS ===
+abc123 fix: bar
+EOF
+  run pp_grounding_symbol_inventory "$_tmp"
+  rm -f "$_tmp"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "pp_grounding_symbol_inventory: stops at next === header (does not bleed into GIT STATUS)" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== FILE READ (planner picked: a.ts) ===
+const insideRead = 1;
+
+=== GIT STATUS (uncommitted) ===
+M outsideShouldNotMatch.ts
+EOF
+  local out
+  out=$(pp_grounding_symbol_inventory "$_tmp")
+  rm -f "$_tmp"
+  printf '%s\n' "$out" | grep -qx 'insideRead'
+  ! printf '%s\n' "$out" | grep -qx 'outsideShouldNotMatch'
+}
+
+@test "pp_grounding_symbol_inventory: missing facts file returns rc=1, empty stdout" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  run pp_grounding_symbol_inventory "/no/such/file/exists.txt"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "pp_grounding_symbol_inventory: short tokens (<3 chars) filtered" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== FILE READ (planner picked: short.ts) ===
+let a = 1;
+let bb = 2;
+let ccc = 3;
+const aReallyLongIdentifier = 4;
+EOF
+  local out
+  out=$(pp_grounding_symbol_inventory "$_tmp")
+  rm -f "$_tmp"
+  ! printf '%s\n' "$out" | grep -qx 'a'
+  ! printf '%s\n' "$out" | grep -qx 'bb'
+  printf '%s\n' "$out" | grep -qx 'ccc'
+  printf '%s\n' "$out" | grep -qx 'aReallyLongIdentifier'
+}

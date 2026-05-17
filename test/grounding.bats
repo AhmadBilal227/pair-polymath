@@ -250,3 +250,62 @@ EOF
   printf '%s\n' "$out" | grep -qx 'ccc'
   printf '%s\n' "$out" | grep -qx 'aReallyLongIdentifier'
 }
+
+# === v0.5.1.1 Stage A: pp_grounding_inventory_is_empty ===
+# Spec task 6b: shared boolean used by both prompts/critique.md (Stage C)
+# and bin/statusline.sh's validator block (Stage A) for EMPTY-ALLOWLIST
+# parity.
+
+@test "pp_grounding_inventory_is_empty: empty FILE READ block returns 0 (true: is empty)" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== FILE READ (planner picked: NONE) ===
+(no file read this round)
+EOF
+  run pp_grounding_inventory_is_empty "$_tmp"
+  rm -f "$_tmp"
+  [ "$status" -eq 0 ]
+}
+
+@test "pp_grounding_inventory_is_empty: non-empty inventory returns 1 (false: not empty)" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== FILE READ (planner picked: real.ts) ===
+const realIdentifier = 1;
+EOF
+  run pp_grounding_inventory_is_empty "$_tmp"
+  rm -f "$_tmp"
+  [ "$status" -eq 1 ]
+}
+
+@test "pp_grounding_inventory_is_empty: no FILE READ block at all returns 0 (true)" {
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  local _tmp
+  _tmp=$(mktemp) || skip "mktemp failed"
+  cat > "$_tmp" <<'EOF'
+=== GIT STATUS (uncommitted) ===
+M src/foo.ts
+EOF
+  run pp_grounding_inventory_is_empty "$_tmp"
+  rm -f "$_tmp"
+  [ "$status" -eq 0 ]
+}
+
+@test "pp_grounding_inventory_is_empty: missing file returns 0 (defensive: treat as empty)" {
+  # If the facts file doesn't exist, there's no inventory to check
+  # against - the EMPTY-ALLOWLIST EXCEPTION semantically applies (no
+  # citation check enforceable). Returning 1 here would have the
+  # critique flag every observation as DROP-no-allowlist, which is the
+  # wrong default for a missing snapshot.
+  . "$PP_ROOT/lib/citations.sh"
+  . "$PP_ROOT/lib/grounding.sh"
+  run pp_grounding_inventory_is_empty "/no/such/file.txt"
+  [ "$status" -eq 0 ]
+}

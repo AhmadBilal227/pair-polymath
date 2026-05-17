@@ -531,3 +531,38 @@ pp_grounding_symbol_inventory() {
     | LC_ALL=C sort -u
   return 0
 }
+
+# pp_grounding_inventory_is_empty FACTS_FILE
+# v0.5.1.1 Stage A — boolean for the EMPTY-ALLOWLIST EXCEPTION (spec
+# task 6b). Returns 0 ("true: inventory is empty, the EXCEPTION fires")
+# when pp_grounding_symbol_inventory would produce zero lines; returns 1
+# ("false: inventory has entries") otherwise. Missing/unreadable
+# FACTS_FILE -> treated as empty (rc=0). Reasoning: an absent snapshot
+# means there's nothing for the validator to enforce citations against;
+# defaulting to "non-empty" would DROP every observation for citing
+# paths/symbols the validator can't check, which inverts the spec's
+# intent.
+#
+# Single source of truth: BOTH the lens prompt (Stage C, will render
+# "(no FILE-READ symbols extracted; cite by path only)" when this
+# returns 0) and the validator-side critique allowlist block (Stage A,
+# renders the EMPTY-ALLOWLIST EXCEPTION clause from prompts/critique.md
+# verbatim when this returns 0) call this helper. The bats fixture in
+# test/v0.5.1.1-empty-allowlist-mirror.bats pins that both render their
+# respective empty-state text driven by this same helper's output.
+pp_grounding_inventory_is_empty() {
+  local _facts="${1:-}"
+  [ -z "$_facts" ] && return 0
+  [ -r "$_facts" ] || return 0
+
+  # Reuse the same extractor + filter pipeline. If pp_grounding_symbol_inventory
+  # would print nothing, this returns 0 (empty == true). One source of
+  # truth: any future change to the extractor automatically flows through
+  # this boolean.
+  local _out
+  _out=$(pp_grounding_symbol_inventory "$_facts" 2>/dev/null)
+  if [ -z "$_out" ]; then
+    return 0
+  fi
+  return 1
+}

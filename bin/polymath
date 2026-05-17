@@ -524,6 +524,376 @@ USAGE
     esac
     ;;
 
+  history)
+    # v0.5.2 (Task 14) — OAR observation outcomes (spec §D).
+    #
+    # Reads oar-labeled.jsonl (+ rotated .1) AND oar-pending.jsonl (latter
+    # for "still in scan window" count). Computes per-lens acted% with
+    # Wilson 95% CI (TWO-SIDED z=1.96 via pp_kpi_wilson_lower_95 — addresses
+    # the spec §D example floor of 6.4% which used one-sided z=1.645; the
+    # implementation displays 8.2% for 2/7 because two-sided is the right
+    # interpretation for downstream gating, per Task 10).
+    #
+    # Addendum M3: per-lens JSON is built via jq -n --arg/--argjson rather
+    # than printf string-concat, so lens names with unusual characters
+    # cannot break the JSON output.
+    shift
+    _h_window=7
+    _h_lens=""
+    _h_outcome=""
+    _h_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --window)
+          [ -n "${2:-}" ] || { printf 'polymath history: --window requires a value (e.g. 7d)\n' >&2; exit 2; }
+          _h_window="${2%d}"
+          case "$_h_window" in
+            ''|*[!0-9]*|0)
+              printf 'polymath history: --window must be a positive integer number of days (e.g. 7 or 7d)\n' >&2
+              exit 2
+              ;;
+          esac
+          shift 2
+          ;;
+        --lens)
+          [ -n "${2:-}" ] || { printf 'polymath history: --lens requires a value\n' >&2; exit 2; }
+          _h_lens="$2"; shift 2 ;;
+        --outcome)
+          [ -n "${2:-}" ] || { printf 'polymath history: --outcome requires a value\n' >&2; exit 2; }
+          case "$2" in
+            acted|referenced|pushed-back|ignored|all) _h_outcome="$2"; shift 2 ;;
+            *) printf 'polymath history: invalid --outcome %s (acted|referenced|pushed-back|ignored|all)\n' "$2" >&2; exit 2 ;;
+          esac
+          ;;
+        --json) _h_json=1; shift ;;
+        -h|--help)
+          cat <<HELP
+polymath history — Observation outcomes (OAR labeler results)
+
+Usage:
+  polymath history                       7-day rollup, all lenses, all outcomes
+  polymath history --window 30d          Custom rolling window (positive int days)
+  polymath history --lens SECURITY       Filter to one lens
+  polymath history --outcome acted       Filter to one outcome class
+                                          (acted|referenced|pushed-back|ignored|all)
+  polymath history --json                Machine-readable JSON
+
+Filters compose: --lens narrows the rows BEFORE per-lens grouping;
+--outcome narrows AFTER --lens. Wilson 95% CI lower bound (two-sided z)
+shown per lens via pp_kpi_wilson_lower_95.
+
+Empty-state hint: enable with PP_OAR_ENABLE=1 in user.env and run
+sessions for at least one scan-window (24h ENG/SEC/PERF, 48h UX, 7d
+Product/Founder). Manual catchup: polymath oar-label --all-due
+HELP
+          exit 0
+          ;;
+        *) printf 'polymath history: unknown flag %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+
+    _h_cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+    _h_labeled="${_h_cache_dir}/oar-labeled.jsonl"
+    _h_pending="${_h_cache_dir}/oar-pending.jsonl"
+    _h_stuck="${_h_cache_dir}/oar-stuck.jsonl"
+    if [ ! -f "$_h_labeled" ] && [ ! -f "${_h_labeled}.1" ]; then
+      printf 'No labeled observations yet. Enable with: PP_OAR_ENABLE=1 in user.env,\n'
+      printf 'then run sessions for >= scan-window hours (24h-7d depending on lens).\n'
+      printf 'Manual catchup: polymath oar-label --all-due\n'
+      exit 0
+    fi
+
+    # Portable BSD/GNU date for the cutoff epoch.
+    _h_cutoff=$(date -u -v "-${_h_window}d" +%s 2>/dev/null \
+              || date -u -d "${_h_window} days ago" +%s 2>/dev/null \
+              || printf '0')
+
+    # shellcheck source=lib/metrics.sh disable=SC1091
+    . "$PP_ROOT/lib/metrics.sh"
+
+    # Read labeled rows (current + rotated). Filter by window + optional
+    # --lens + --outcome. The cat-of-missing-file emits stderr — silence
+    # only stderr so a real jq error still surfaces.
+    #
+    # GPT-review #5: build TWO row sets — one with --outcome filter for
+    # totals/per-outcome stats, one WITHOUT --outcome for per-lens stats
+    # (top lenses by acted%). Without this split, --outcome=acted makes
+    # every lens display 100% acted (because the filter pre-removed
+    # every non-acted row). --lens filter applies to both (the report's
+    # scope IS that lens regardless of outcome breakdown).
+    _h_rows_unfiltered=$( { cat "${_h_labeled}.1" "$_h_labeled" 2>/dev/null; } \
+              | jq -R 'fromjson?' 2>/dev/null \
+              | jq -s --argjson cut "$_h_cutoff" --arg lens "$_h_lens" '
+                  map(select((.labeled_at | fromdateiso8601? // 0) >= $cut))
+                  | (if $lens != "" then map(select(.lens == $lens)) else . end)
+                ' 2>/dev/null)
+    [ -n "$_h_rows_unfiltered" ] || _h_rows_unfiltered='[]'
+    # _h_rows applies the additional --outcome filter on top.
+    _h_rows=$(printf '%s' "$_h_rows_unfiltered" \
+              | jq --arg out "$_h_outcome" '
+                  if $out != "" and $out != "all" then map(select(.outcome == $out)) else . end
+                ' 2>/dev/null)
+    [ -n "$_h_rows" ] || _h_rows='[]'
+
+    _h_pending_count=0
+    if [ -f "$_h_pending" ]; then
+      _h_pending_count=$(jq -R 'fromjson?' "$_h_pending" 2>/dev/null \
+                        | jq -s --arg lens "$_h_lens" '
+                            map(select(.scan_at_epoch != null))
+                            | (if $lens != "" then map(select(.lens == $lens)) else . end)
+                            | length' 2>/dev/null)
+      case "$_h_pending_count" in ''|*[!0-9]*) _h_pending_count=0 ;; esac
+    fi
+    _h_stuck_count=0
+    if [ -f "$_h_stuck" ]; then
+      _h_stuck_count=$(wc -l < "$_h_stuck" 2>/dev/null | tr -d ' ')
+      case "$_h_stuck_count" in ''|*[!0-9]*) _h_stuck_count=0 ;; esac
+    fi
+
+    # Per-lens grouping: emit "lens\tn\tacted" rows for the bash loop.
+    # Build per-lens JSON via jq -n --arg/--argjson (addendum M3) so a
+    # lens name like ' "quote" ' or ' \backslash ' cannot break the JSON.
+    #
+    # GPT-review #1: sort_by(.lens) BEFORE group_by. Without the sort,
+    # non-contiguous rows for the same lens get split into separate
+    # groups → wrong n/acted counts. Project-canonical fix (matches
+    # lib/dismiss.sh:108 and the shadow-summary fix from v0.5.1).
+    #
+    # GPT-review #5: --outcome filter applied upstream to _h_rows would
+    # make "Top lenses by acted%" meaningless (e.g., --outcome acted
+    # makes every lens show 100% acted). Per-lens stats must be
+    # computed from the UNFILTERED window — use _h_rows_for_lens which
+    # is built without the outcome filter when outcome != all.
+    _h_lens_src="$_h_rows"
+    if [ -n "${_h_rows_unfiltered:-}" ]; then
+      _h_lens_src="$_h_rows_unfiltered"
+    fi
+    _h_per_lens_tsv=$(printf '%s' "$_h_lens_src" | jq -r '
+      sort_by(.lens) | group_by(.lens)
+      | .[]
+      | "\(.[0].lens)\t\(length)\t\(map(select(.outcome == "acted")) | length)"
+    ' 2>/dev/null)
+    _h_per_lens_json='[]'
+    if [ -n "$_h_per_lens_tsv" ]; then
+      _h_tab=$(printf '\t')
+      _h_per_lens_json=$(
+        printf '%s\n' "$_h_per_lens_tsv" | while IFS="$_h_tab" read -r _h_lname _h_n _h_acted; do
+          [ -n "$_h_lname" ] || continue
+          # Defensive int-coerce: an empty / non-numeric field becomes 0.
+          # `expr "$x" + 0` is portable to bash 3.2 and avoids the
+          # `case ... esac` parser-quirk inside $(...) on macOS bash 3.2.
+          _h_n=$(expr "$_h_n" + 0 2>/dev/null || printf 0)
+          _h_acted=$(expr "$_h_acted" + 0 2>/dev/null || printf 0)
+          _h_lo=$(pp_kpi_wilson_lower_95 "$_h_acted" "$_h_n")
+          _h_pct=$(LC_ALL=C awk -v a="$_h_acted" -v n="$_h_n" \
+                     'BEGIN { if (n+0==0) print 0; else printf "%.4f", a/n }')
+          jq -nc \
+            --arg lens "$_h_lname" \
+            --argjson n "$_h_n" \
+            --argjson acted "$_h_acted" \
+            --argjson acted_pct "$_h_pct" \
+            --argjson wilson "$_h_lo" \
+            '{lens:$lens, n:$n, acted:$acted, acted_pct:$acted_pct, wilson_lower_95:$wilson}'
+        done | jq -s '.'
+      )
+      [ -n "$_h_per_lens_json" ] || _h_per_lens_json='[]'
+    fi
+
+    _h_summary=$(printf '%s' "$_h_rows" | jq \
+                  --argjson per_lens "$_h_per_lens_json" \
+                  --argjson pending "$_h_pending_count" \
+                  --argjson stuck "$_h_stuck_count" \
+                  --argjson window "$_h_window" '
+        {
+          total: length,
+          eligible: length,
+          pending: $pending,
+          stuck: $stuck,
+          window_days: $window,
+          by_outcome: {
+            acted:       (map(select(.outcome == "acted"))       | length),
+            referenced:  (map(select(.outcome == "referenced"))  | length),
+            "pushed-back": (map(select(.outcome == "pushed-back")) | length),
+            ignored:     (map(select(.outcome == "ignored"))     | length)
+          },
+          acted_pct:      (if length == 0 then 0 else ((map(select(.outcome == "acted"))       | length) / length) end),
+          referenced_pct: (if length == 0 then 0 else ((map(select(.outcome == "referenced"))  | length) / length) end),
+          derived_a_plus_r: (if length == 0 then 0 else ((map(select(.outcome == "acted" or .outcome == "referenced")) | length) / length) end),
+          by_lens: $per_lens
+        }')
+
+    if [ "$_h_json" = "1" ]; then
+      printf '%s\n' "$_h_summary"
+    else
+      printf '\nObservation outcomes (last %s days)\n\n' "$_h_window"
+      printf '%s' "$_h_summary" | jq -r '
+        "  Total observations:    \(.total)",
+        "  Eligible (labeled):    \(.eligible)      (\(.pending) still in scan window)",
+        "  Stuck (quarantined):   \(.stuck)      (see: polymath doctor)",
+        "",
+        "  By outcome:",
+        "    acted:               \(.by_outcome.acted)      (\((.acted_pct * 1000 | floor) / 10)%)  ← code change touched a citation",
+        "    referenced:          \(.by_outcome.referenced)      (\((.referenced_pct * 1000 | floor) / 10)%)  ← transcript mention",
+        "    pushed-back:         \(.by_outcome."pushed-back")      (operator dismiss ack)",
+        "    ignored:             \(.by_outcome.ignored)      (no signal within window)",
+        "",
+        "  Derived: A+R = \((.derived_a_plus_r * 1000 | floor) / 10)%",
+        "  (Note: A and R measure DIFFERENT things — A = behavior change, R = attention.",
+        "   Report them separately when making decisions.)"
+      '
+      if [ -n "$_h_per_lens_tsv" ]; then
+        printf '\n  Top lenses by acted%%:\n'
+        printf '%s' "$_h_summary" | jq -r '
+          .by_lens
+          | sort_by(-.acted_pct)
+          | .[]
+          | "    \(.lens):   \((.acted_pct * 1000 | floor) / 10)%  (\(.acted)/\(.n) acted; Wilson 95% CI lower: \((.wilson_lower_95 * 1000 | floor) / 10)%)"
+        '
+      fi
+      printf '\n  → For dismiss rules:   polymath dismiss list\n'
+      printf '  → Catch up labeling:  polymath oar-label --all-due\n\n'
+    fi
+    ;;
+
+  oar-label)
+    # v0.5.2 (Task 15) — manual catchup labeler (spec §B + §D).
+    #
+    # Bypasses the inline per-cycle cap (PP_OAR_LABEL_PER_CYCLE_CAP=5) so an
+    # operator can drain a backlog without waiting for natural cycles. The
+    # per-row 3s timeout (PP_OAR_ROW_TIMEOUT_S) still applies — bounded work
+    # per row, no global timeout.
+    #
+    # --limit N is an additional defensive ceiling (env override OF the
+    # per-cycle cap via argument; takes precedence over PP_OAR_LABEL_PER_CYCLE_CAP
+    # in the env because we re-export it inside this case).
+    shift
+    _ol_all_due=0
+    _ol_limit=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --all-due) _ol_all_due=1; shift ;;
+        --limit)
+          [ -n "${2:-}" ] || { printf 'polymath oar-label: --limit requires a value\n' >&2; exit 2; }
+          # Strip a leading + (positive sign) but reject 0, non-numeric,
+          # and any string with a `-` (so `-5` fails the numeric class).
+          case "$2" in
+            ''|*[!0-9]*|0)
+              printf 'polymath oar-label: --limit must be a positive integer\n' >&2
+              exit 2
+              ;;
+          esac
+          _ol_limit="$2"
+          shift 2
+          ;;
+        -h|--help)
+          cat <<HELP
+polymath oar-label — Manually label pending OAR rows
+
+Usage:
+  polymath oar-label --all-due           Process all due rows now
+                                         (bypasses PP_OAR_LABEL_PER_CYCLE_CAP=5)
+  polymath oar-label --all-due --limit N Cap manual run at N rows
+                                         (positive integer)
+
+Per-row 3s timeout still applies (PP_OAR_ROW_TIMEOUT_S).
+
+Use after enabling PP_OAR_ENABLE=1 to drain a backlog from a
+long-running session, or before running 'polymath history' to make
+sure recent observations are reflected in the rollup.
+HELP
+          exit 0
+          ;;
+        *)
+          printf 'polymath oar-label: unknown flag %s\n' "$1" >&2
+          exit 2
+          ;;
+      esac
+    done
+    if [ "$_ol_all_due" != "1" ]; then
+      printf 'polymath oar-label: --all-due is required\n' >&2
+      printf '  Try: polymath oar-label --all-due [--limit N]\n' >&2
+      exit 2
+    fi
+
+    _ol_cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+    _ol_pending="${_ol_cache_dir}/oar-pending.jsonl"
+    _ol_labeled="${_ol_cache_dir}/oar-labeled.jsonl"
+    _ol_stuck="${_ol_cache_dir}/oar-stuck.jsonl"
+    mkdir -p "$_ol_cache_dir" 2>/dev/null || true
+
+    # Empty-state: no pending file OR pending file is zero-byte. Exit 0
+    # with a friendly hint rather than calling the driver (which would
+    # also return 0 silently).
+    if [ ! -s "$_ol_pending" ]; then
+      printf 'oar-label: no pending observations to process.\n'
+      printf '  Enable with: PP_OAR_ENABLE=1 in user.env, then run sessions.\n'
+      printf '  See current state: polymath history\n'
+      exit 0
+    fi
+
+    # Pre-snapshot counts so the summary line can report deltas accurately.
+    _ol_labeled_before=0
+    if [ -f "$_ol_labeled" ]; then
+      _ol_labeled_before=$(wc -l < "$_ol_labeled" 2>/dev/null | tr -d ' ')
+      case "$_ol_labeled_before" in ''|*[!0-9]*) _ol_labeled_before=0 ;; esac
+    fi
+    _ol_stuck_before=0
+    if [ -f "$_ol_stuck" ]; then
+      _ol_stuck_before=$(wc -l < "$_ol_stuck" 2>/dev/null | tr -d ' ')
+      case "$_ol_stuck_before" in ''|*[!0-9]*) _ol_stuck_before=0 ;; esac
+    fi
+
+    # Cap selection: --limit takes precedence over any inherited env value.
+    # Without --limit we set a very large ceiling — still bounded in practice
+    # by pending file size and the per-row 3s timeout (at 3s/row, draining
+    # 999999 rows would take ~35 days, so "unbounded" is hyperbole, but the
+    # only realistic stop conditions are pending-empty or operator Ctrl-C).
+    if [ -n "$_ol_limit" ]; then
+      PP_OAR_LABEL_PER_CYCLE_CAP="$_ol_limit"
+    else
+      PP_OAR_LABEL_PER_CYCLE_CAP=999999
+    fi
+    export PP_OAR_LABEL_PER_CYCLE_CAP
+
+    # Export PP_CACHE_DIR so the labeler resolves the same paths we just
+    # measured (defends against CLAUDE_DIR vs PP_CACHE_DIR drift).
+    PP_CACHE_DIR="$_ol_cache_dir"
+    export PP_CACHE_DIR
+
+    # shellcheck source=lib/oar.sh disable=SC1091
+    . "$PP_ROOT/lib/oar.sh"
+
+    pp_oar_label_pending || true
+
+    # Post-snapshot counts.
+    _ol_labeled_after=0
+    if [ -f "$_ol_labeled" ]; then
+      _ol_labeled_after=$(wc -l < "$_ol_labeled" 2>/dev/null | tr -d ' ')
+      case "$_ol_labeled_after" in ''|*[!0-9]*) _ol_labeled_after=0 ;; esac
+    fi
+    _ol_stuck_after=0
+    if [ -f "$_ol_stuck" ]; then
+      _ol_stuck_after=$(wc -l < "$_ol_stuck" 2>/dev/null | tr -d ' ')
+      case "$_ol_stuck_after" in ''|*[!0-9]*) _ol_stuck_after=0 ;; esac
+    fi
+    _ol_pending_after=0
+    if [ -f "$_ol_pending" ]; then
+      _ol_pending_after=$(wc -l < "$_ol_pending" 2>/dev/null | tr -d ' ')
+      case "$_ol_pending_after" in ''|*[!0-9]*) _ol_pending_after=0 ;; esac
+    fi
+
+    _ol_labeled_delta=$(( _ol_labeled_after - _ol_labeled_before ))
+    _ol_stuck_delta=$(( _ol_stuck_after - _ol_stuck_before ))
+    # Defensive clamps: deltas should never be negative (labeled.jsonl is
+    # append-only), but a concurrent rotation could in principle reduce
+    # the count. Clamp to >=0 so the summary stays sensible.
+    [ "$_ol_labeled_delta" -lt 0 ] && _ol_labeled_delta=0
+    [ "$_ol_stuck_delta" -lt 0 ] && _ol_stuck_delta=0
+
+    printf 'Labeled %s rows; %s stuck; %s still pending.\n' \
+      "$_ol_labeled_delta" "$_ol_stuck_delta" "$_ol_pending_after"
+    ;;
+
   kpi)
     # v0.5.1 — rolling cost / retry / phase summary from kpi-cycle.jsonl.
     # Default window 7 days. --window Nd to override. --json for machine output.
@@ -1475,6 +1845,8 @@ Usage:
   polymath logs        Tail recent lens observations (-n, --lens, --follow)
   polymath cost        Show estimated USD spend (--since, --by-lens, --json)
   polymath kpi         Rolling cost / retry / phase summary (--window Nd, --json)
+  polymath history     OAR observation outcomes — per-lens acted% (--window, --lens, --outcome, --json)
+  polymath oar-label   Manual catchup labeler (--all-due [--limit N])
   polymath retry-router   v0.5.1 cost-router state (status / shadow-summary / clear-flag)
   polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
   polymath dismiss     Suppression rules (add / list / show / disable / enable / ack)

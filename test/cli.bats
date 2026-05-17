@@ -596,6 +596,11 @@ SH
   clone_dir=$(mktemp -d)
   git -C "$remote_dir" init --quiet
   git -C "$remote_dir" symbolic-ref HEAD refs/heads/main
+  # Task #60 completion — same gc.auto race the F4/R4-1a/R4-1b tests hit.
+  # F9 wasn't in the original fix scope; observed flaking in v0.5.2 Task 3
+  # CI runs. See _pp_r5_build_remote_and_clone below for full rationale.
+  git -C "$remote_dir" config gc.auto 0
+  git -C "$remote_dir" config maintenance.auto false
   mkdir -p "$remote_dir/bin" "$remote_dir/lib" "$remote_dir/lenses" "$remote_dir/prompts"
   echo "0.0.0" > "$remote_dir/VERSION"
   cp "$PP_ROOT/bin/polymath" "$remote_dir/bin/polymath"
@@ -613,6 +618,11 @@ SH
   git -C "$remote_dir" config user.email "t@t" && git -C "$remote_dir" config user.name t
   git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "init"
   git clone --quiet "$remote_dir" "$clone_dir"
+  # Task #60: same gc.auto/maintenance.auto disable on the clone — the
+  # `polymath update` invocation below runs `git pull` here, which is
+  # what spawns the detached gc child.
+  git -C "$clone_dir" config gc.auto 0
+  git -C "$clone_dir" config maintenance.auto false
   echo "1" >> "$remote_dir/VERSION"
   git -C "$remote_dir" add -A && git -C "$remote_dir" commit -q -m "bump"
 
@@ -1244,4 +1254,271 @@ SHIM
   local _out
   _out=$(PP_ESCALATION_STREAK_THRESHOLD=5 bash -c 'echo "${PP_ESCALATION_STREAK_THRESHOLD:-3}"')
   [ "$_out" = "5" ]
+}
+
+# === v0.5.2 Task 14: polymath history CLI =====================================
+
+@test "polymath history: empty-state hint when oar-labeled.jsonl missing" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  run bash "$PP_ROOT/bin/polymath" history
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -q "No labeled observations yet"
+}
+
+@test "polymath history: prints rolling 7d counts when data present" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc --arg ts "$_now_iso" '
+    {session_id:"s1",lens:"ENGINEERING",hash:"h1",inject_ts:$ts,
+     labeled_at:$ts,outcome:"acted",evidence_id:"abc",
+     confidence:"symbol_exact",identity:"id1"}' \
+    > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc --arg ts "$_now_iso" '
+    {session_id:"s2",lens:"ENGINEERING",hash:"h2",inject_ts:$ts,
+     labeled_at:$ts,outcome:"ignored",evidence_id:null,
+     confidence:"no_signal_in_window",identity:"id2"}' \
+    >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  run bash "$PP_ROOT/bin/polymath" history
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE "Total observations:"
+  printf '%s' "$output" | grep -qE "acted:"
+  printf '%s' "$output" | grep -qE "ignored:"
+}
+
+@test "polymath history --json: outputs parseable JSON with by_lens Wilson CI" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  : > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  local _i
+  for _i in 1 2 3 4 5 6 7; do
+    local _out
+    if [ "$_i" -lt 3 ]; then _out=acted; else _out=ignored; fi
+    jq -nc --arg ts "$_now_iso" --arg sid "s-$_i" --arg o "$_out" '
+      {session_id:$sid,lens:"SECURITY",hash:("h-" + $sid),inject_ts:$ts,
+       labeled_at:$ts,outcome:$o,
+       evidence_id:null,confidence:"no_signal_in_window",identity:$sid}' \
+      >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" history --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.by_lens[0].wilson_lower_95 != null' >/dev/null
+}
+
+@test "polymath history --lens SECURITY: filters output to one lens" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc --arg ts "$_now_iso" '{session_id:"sx",lens:"SECURITY",hash:"hs",
+       inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"a",
+       confidence:"symbol_exact",identity:"ix"}' \
+    > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc --arg ts "$_now_iso" '{session_id:"sy",lens:"UX_DESIGN",hash:"hu",
+       inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"a",
+       confidence:"symbol_exact",identity:"iy"}' \
+    >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  run bash "$PP_ROOT/bin/polymath" history --lens SECURITY --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.total == 1 and (.by_lens | length) == 1' >/dev/null
+}
+
+@test "polymath history --window: rejects non-positive integer" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  run bash "$PP_ROOT/bin/polymath" history --window garbage
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive integer"* ]]
+  run bash "$PP_ROOT/bin/polymath" history --window 0
+  [ "$status" -eq 2 ]
+}
+
+@test "polymath history --outcome: rejects invalid outcome" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  run bash "$PP_ROOT/bin/polymath" history --outcome nope
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid --outcome"* ]]
+}
+
+@test "polymath history --outcome acted: filters rows" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc --arg ts "$_now_iso" '{session_id:"a",lens:"ENGINEERING",hash:"ha",
+       inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"e",
+       confidence:"symbol_exact",identity:"ia"}' \
+    > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc --arg ts "$_now_iso" '{session_id:"b",lens:"ENGINEERING",hash:"hb",
+       inject_ts:$ts,labeled_at:$ts,outcome:"ignored",evidence_id:null,
+       confidence:"no_signal_in_window",identity:"ib"}' \
+    >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  run bash "$PP_ROOT/bin/polymath" history --outcome acted --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.total == 1 and .by_outcome.acted == 1 and .by_outcome.ignored == 0' >/dev/null
+}
+
+@test "polymath history: pending count surfaced from oar-pending.jsonl" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc --arg ts "$_now_iso" '{session_id:"a",lens:"ENGINEERING",hash:"ha",
+       inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"e",
+       confidence:"symbol_exact",identity:"ia"}' \
+    > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc '{session_id:"p1",lens:"ENGINEERING",hash:"hp",
+       inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:99999999999,
+       attempts:0,status:"pending"}' \
+    > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  jq -nc '{session_id:"p2",lens:"ENGINEERING",hash:"hp2",
+       inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:99999999999,
+       attempts:0,status:"pending"}' \
+    >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  run bash "$PP_ROOT/bin/polymath" history --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.pending == 2' >/dev/null
+}
+
+@test "polymath history: help flag prints usage and exits 0" {
+  run bash "$PP_ROOT/bin/polymath" history --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Observation outcomes"* ]]
+  [[ "$output" == *"--window"* ]]
+  [[ "$output" == *"--lens"* ]]
+  [[ "$output" == *"--outcome"* ]]
+  [[ "$output" == *"--json"* ]]
+}
+
+@test "polymath help: includes history row" {
+  run bash "$PP_ROOT/bin/polymath" help
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE 'polymath history'
+}
+
+# === v0.5.2 Task 15: polymath oar-label --all-due ============================
+# Manual catchup subcommand. Bypasses PP_OAR_LABEL_PER_CYCLE_CAP (5) but still
+# honors the per-row 3s timeout. Spec §B + §D.
+
+@test "polymath oar-label --all-due: empty-state when no pending file" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE 'no pending|0 pending|No pending'
+}
+
+@test "polymath oar-label --all-due: drains pending past per-cycle cap" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base )
+  : > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  local _i
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    jq -nc --arg sid "s-$_i" '{session_id:$sid,lens:"ENGINEERING",
+        hash:("h-" + $sid),inject_ts:"2026-05-15T00:00:00Z",
+        scan_at_epoch:1,attempts:0,status:"pending",
+        cited_paths:[],cited_symbols:[]}' \
+      >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  done
+  CLAUDE_PROJECT_DIR="$_repo" \
+    run bash "$PP_ROOT/bin/polymath" oar-label --all-due
+  [ "$status" -eq 0 ]
+  local _n
+  _n=$(wc -l < "$CLAUDE_DIR/cache/oar-labeled.jsonl" | tr -d ' ')
+  [ "$_n" -eq 10 ]
+  rm -rf "$_repo"
+}
+
+@test "polymath oar-label --all-due --limit 3: respects --limit" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base )
+  : > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  local _i
+  for _i in 1 2 3 4 5; do
+    jq -nc --arg sid "s-l$_i" '{session_id:$sid,lens:"ENG",
+        hash:("h-" + $sid),inject_ts:"2026-05-15T00:00:00Z",
+        scan_at_epoch:1,attempts:0,status:"pending",
+        cited_paths:[],cited_symbols:[]}' \
+      >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  done
+  CLAUDE_PROJECT_DIR="$_repo" \
+    run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit 3
+  [ "$status" -eq 0 ]
+  local _n
+  _n=$(wc -l < "$CLAUDE_DIR/cache/oar-labeled.jsonl" | tr -d ' ')
+  [ "$_n" -eq 3 ]
+  rm -rf "$_repo"
+}
+
+@test "polymath oar-label --all-due: prints summary with labeled/stuck/pending counts" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _repo
+  _repo=$(mktemp -d)
+  ( cd "$_repo" && git init -q \
+    && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base )
+  : > "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  jq -nc '{session_id:"summ1",lens:"ENGINEERING",hash:"hs1",
+       inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:1,
+       attempts:0,status:"pending",cited_paths:[],cited_symbols:[]}' \
+    >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
+  CLAUDE_PROJECT_DIR="$_repo" \
+    run bash "$PP_ROOT/bin/polymath" oar-label --all-due
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qE 'Labeled [0-9]+ row'
+  printf '%s' "$output" | grep -qE 'stuck'
+  printf '%s' "$output" | grep -qE 'pending'
+  rm -rf "$_repo"
+}
+
+@test "polymath oar-label --limit: rejects 0" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive integer"* ]]
+}
+
+@test "polymath oar-label --limit: rejects non-numeric" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit abc
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive integer"* ]]
+}
+
+@test "polymath oar-label --limit: rejects negative" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --all-due --limit -5
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive integer"* ]]
+}
+
+@test "polymath oar-label: --all-due is required" {
+  run bash "$PP_ROOT/bin/polymath" oar-label
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--all-due"* ]]
+}
+
+@test "polymath oar-label: unknown flag rejected" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --nope
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown flag"* ]]
+}
+
+@test "polymath oar-label: help flag prints usage and exits 0" {
+  run bash "$PP_ROOT/bin/polymath" oar-label --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Manually label pending OAR rows"* ]] \
+    || [[ "$output" == *"oar-label"* ]]
+  [[ "$output" == *"--all-due"* ]]
+  [[ "$output" == *"--limit"* ]]
 }

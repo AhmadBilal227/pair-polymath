@@ -150,3 +150,75 @@ pp_extract_citations() {
 
   return 0
 }
+
+# pp_extract_citations_from_text
+# Per-observation variant for v0.5.2 SessionEnd schema (C2 fix path A).
+#
+# Args:
+#   $1 — observation body text (no section markers; just a free-form sentence)
+# Side effect (globals):
+#   $_pp_valid_paths   — newline-separated path tokens found in the text
+#   $_pp_valid_symbols — newline-separated identifier tokens, stopword-filtered
+#
+# Same regex contract as pp_extract_citations (paths: file w/ ext OR dir w/
+# trailing slash; symbols: [A-Za-z_][A-Za-z0-9_]{2,} ≥3 chars + stopword-
+# filtered). Difference: NO section gating — every token in the input is
+# a candidate. Both lists capped at 200.
+#
+# Used by hooks/session-end.sh to populate cited_paths + cited_symbols in
+# the oar-pending row at SessionEnd time, so the v0.5.2 OAR labeler is a
+# pure function of the pending row (no filesystem coupling on rotated
+# observation files).
+#
+# MUTUALLY EXCLUSIVE WITH pp_extract_citations: both write the same
+# $_pp_valid_paths / $_pp_valid_symbols globals. If you need both call
+# results in the same process, save one before calling the other:
+#   pp_extract_citations "$grounded_blob"
+#   _saved_paths="$_pp_valid_paths"; _saved_syms="$_pp_valid_symbols"
+#   pp_extract_citations_from_text "$body"
+#   # now $_pp_valid_* are the per-text results
+# (Currently safe because the two callers — statusline.sh + session-end.sh —
+# run in different processes. Documented for future maintainers.)
+pp_extract_citations_from_text() {
+  _pp_valid_paths=""
+  _pp_valid_symbols=""
+
+  local _text="${1:-}"
+  [ -z "$_text" ] && return 0
+
+  # === Paths === (same regex as pp_extract_citations; no section filter)
+  local _raw_paths
+  _raw_paths=$(printf '%s\n' "$_text" \
+    | LC_ALL=C grep -oE '([a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}|[a-zA-Z0-9_/-]+/)' 2>/dev/null \
+    || true)
+  if [ -n "$_raw_paths" ]; then
+    _pp_valid_paths=$(printf '%s\n' "$_raw_paths" \
+      | LC_ALL=C sort -u \
+      | head -200)
+  fi
+
+  # === Symbols === (same regex + stopword filter as pp_extract_citations)
+  local _raw_symbols
+  _raw_symbols=$(printf '%s\n' "$_text" \
+    | LC_ALL=C grep -oE '[A-Za-z_][A-Za-z0-9_]{2,}' 2>/dev/null \
+    || true)
+  if [ -n "$_raw_symbols" ]; then
+    _pp_valid_symbols=$(printf '%s\n' "$_raw_symbols" \
+      | LC_ALL=C awk -v stops="$_PP_CITATION_STOPWORDS" '
+          BEGIN {
+            n = split(stops, arr, " ")
+            for (i = 1; i <= n; i++) stop[arr[i]] = 1
+          }
+          {
+            tok = $0
+            if (length(tok) < 3) next
+            if (tok in stop) next
+            print tok
+          }
+        ' \
+      | LC_ALL=C sort -u \
+      | head -200)
+  fi
+
+  return 0
+}

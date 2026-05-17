@@ -56,6 +56,15 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/metrics.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/citations.sh"
+# v0.5.2 — OAR labeler + hallucination shadow post-check. Both libs are
+# function-only at top level (no side effects beyond an _PP_*_SOURCED guard),
+# so unconditional sourcing preserves byte-identity when their gating flags
+# (PP_OAR_ENABLE, PP_HALLUC_GATE_ENABLE) are 0. The `|| true` is a defensive
+# guard for legacy installs where the file hasn't been bundled yet.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/oar.sh" 2>/dev/null || true
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/hallucination.sh" 2>/dev/null || true
 # v0.5 Phase 3: dismiss subsystem (project-constraints rendering for analyst
 # prompts). Sourced unconditionally — the render call short-circuits cheaply
 # when no rules exist (single stat + write of empty cache).
@@ -1048,6 +1057,12 @@ GROUND
         # exhausted / idle / no grounding / no llm) emit eligible:0 KPI rows
         # that must not dilute the rolling p95 or the min-samples gate.
         _pp_analyst_ran=1
+        # Task-12 GPT-review #7: per-cycle counter reset.
+        # _pp_halluc_post_drops is incremented in the critique loop's PASS
+        # branch when PP_HALLUC_GATE_ENABLE=1 + post-check fails. Must reset
+        # at cycle start, else the KPI row (Task 13) reports cumulative,
+        # not per-cycle. Same pattern as _pp_concurrent_drops below.
+        _pp_halluc_post_drops=0
         _pp_analyst_pids=()
         for lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           lens_group="${PP_LENS_IDS[$lens_idx]}"
@@ -1261,6 +1276,66 @@ $critique_input"
             _pp_concurrent_drops=$(printf '%s\n' "$critique_output" | grep -Ec '^lens[0-9]+:[[:space:]]*DROP\b' 2>/dev/null || true)
             case "$_pp_concurrent_drops" in ''|*[!0-9]*) _pp_concurrent_drops=0 ;; esac
 
+            # v0.5.2 (Task 13, addresses plan addendum I4):
+            # Two cycle-scoped counters feed the KPI emitter's hallucination
+            # split below. Both denominators are deliberately chosen so the
+            # `_rate` suffix in the emitted field is accurate (not a
+            # conditional proportion masquerading as a rate).
+            #
+            #   _pp_halluc_pre_drops   = critique DROPs classified as
+            #                            `citation_fail` by the retry-router
+            #                            (the "hallucination caught before
+            #                            display" class). Numerator for
+            #                            halluc_pre_drop_rate; denominator is
+            #                            _pp_concurrent_drops (total DROPs
+            #                            THIS cycle) — proportion of pre-drops
+            #                            that were hallucination-class.
+            #
+            #   _pp_halluc_post_passes_checked = critique PASSes this cycle
+            #                            — the SET that the hallucination
+            #                            post-check (Task 12) actually inspects.
+            #                            Denominator for halluc_post_would_drop_rate;
+            #                            numerator is _pp_halluc_post_drops
+            #                            (incremented in the PASS branch when
+            #                            the post-check returns rc=1).
+            #
+            # Why these denominators (not PP_LENS_COUNT, not session-wide):
+            #   - PP_LENS_COUNT counts ALL lenses incl. ones that returned
+            #     SILENT / failed critique-format / weren't even run. The
+            #     post-check only runs on critique-PASSes, so dividing by
+            #     PP_LENS_COUNT understates the rate whenever critique drops
+            #     happen — which is exactly when we care about the metric.
+            #   - Per-cycle (not per-session) keeps the rate comparable
+            #     across cycles regardless of how many cycles have elapsed.
+            _pp_halluc_pre_drops=0
+            # GPT-review #1: pin LC_ALL=C consistently with the DROP-scan
+            # below. Without this, `[[:space:]]` / `\b` boundary semantics
+            # can disagree across locales — denominator and numerator
+            # must use the same locale or rates skew.
+            _pp_halluc_post_passes_checked=$(printf '%s\n' "$critique_output" | LC_ALL=C grep -Ec '^lens[0-9]+:[[:space:]]*PASS\b' 2>/dev/null || true)
+            case "$_pp_halluc_post_passes_checked" in ''|*[!0-9]*) _pp_halluc_post_passes_checked=0 ;; esac
+            if command -v pp_retry_classify_reason >/dev/null 2>&1; then
+              # Re-scan DROP rows + run the classifier. Bash 3.2-portable
+              # while-read against a here-doc so a missing classifier or an
+              # empty critique_output is a clean no-op (count stays 0).
+              while IFS= read -r _pp_dline; do
+                [ -n "$_pp_dline" ] || continue
+                _pp_dreason=$(printf '%s' "$_pp_dline" | sed 's/^lens[0-9]*:[[:space:]]*//;s/^DROP[[:space:]]*-[[:space:]]*//')
+                # GPT-review #2: capture classifier stdout INDEPENDENT of
+                # exit code. The old form
+                #   _pp_dclass=$(classifier ... || printf 'unknown')
+                # would concatenate "citation_fail" + "unknown" if the
+                # classifier wrote partial output then exited non-zero.
+                # Capture once; fall back ONLY when output is empty.
+                _pp_dclass=$(pp_retry_classify_reason "$_pp_dreason" 2>/dev/null)
+                [ -z "$_pp_dclass" ] && _pp_dclass="unknown"
+                [ "$_pp_dclass" = "citation_fail" ] \
+                  && _pp_halluc_pre_drops=$((_pp_halluc_pre_drops + 1))
+              done <<EOF
+$(printf '%s\n' "$critique_output" | LC_ALL=C grep -E '^lens[0-9]+:[[:space:]]*DROP\b' 2>/dev/null || true)
+EOF
+            fi
+
             # I7 (v0.5.1): normalize the canary percentage ONCE here, where
             # the retry-router env is first consumed. A value like "10%"
             # (or any non-integer) used to slip through the `-lt` comparison
@@ -1400,6 +1475,62 @@ $critique_input"
                 elif echo "$verdict" | grep -Eqi '\bPASS\b'; then
                   # PASS → reset drop streak
                   echo 0 > "$streak_file"
+
+                  # v0.5.2 — hallucination shadow post-check (spec §C).
+                  # Gated on PP_HALLUC_GATE_ENABLE=1. Pure verifier:
+                  # rc=0 → would-pass, rc=1 → would-drop. Emits a per-cycle
+                  # telemetry counter (_pp_halluc_post_drops; consumed by
+                  # Task 13's kpi-cycle emitter). ACTIVE mode
+                  # (PP_HALLUC_GATE_ACTIVE=1) is the ONLY path that
+                  # actually flips PASS → DROP. Shadow path leaves the
+                  # verdict file untouched so the OAR denominator
+                  # (injected count) stays causally clean.
+                  # NOTE: byte-identity invariant — when both flags are
+                  # unset/0, this block is a no-op and STDOUT must remain
+                  # sha256-identical to v0.5.1.0.
+                  if [ "${PP_HALLUC_GATE_ENABLE:-0}" = "1" ] \
+                     && command -v pp_halluc_verify_citations >/dev/null 2>&1; then
+                    _pp_halluc_paths=$(printf '%s\n' "${_pp_valid_paths:-}")
+                    _pp_halluc_syms=$(printf '%s\n' "${_pp_valid_symbols:-}")
+                    _pp_halluc_body=$(head -1 "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt" 2>/dev/null)
+                    # GPT-review #2: silence BOTH stdout and stderr. The
+                    # verifier is contractually side-effect-free, but a
+                    # bug or shell-trace leak would otherwise corrupt
+                    # statusline STDOUT and violate byte-identity.
+                    if ! pp_halluc_verify_citations "$cwd" "$_pp_halluc_body" \
+                           "$_pp_halluc_paths" "$_pp_halluc_syms" >/dev/null 2>&1; then
+                      _pp_halluc_post_drops=$(( ${_pp_halluc_post_drops:-0} + 1 ))
+                      if [ "${PP_HALLUC_GATE_ACTIVE:-0}" = "1" ]; then
+                        # Flip verdict PASS → DROP. verdict_file is
+                        # per-lens (suffix -${ci_id}-verdict.txt) so a
+                        # single-line overwrite is safe — does not
+                        # clobber other lenses' verdicts. The DROP will
+                        # be visible to downstream consumers (display
+                        # reader + dashboard); v0.5.2 keeps this path
+                        # OFF by default (active mode lands in v0.5.3).
+                        # Task-12 review S1: use ci_id (lens registry ID), not ci
+                        # (numeric loop index). Mixing them is the C3 footgun;
+                        # downstream verdict consumers key on registry ID.
+                        echo "lens${ci_id}: DROP (halluc_post_check)" > "$verdict_file"
+                        # GPT-review #1: also update the in-memory $verdict
+                        # so downstream logic (drop streak, retry-router
+                        # branch, KPI counters in this same cycle) sees
+                        # the flipped state. Without this, the file says
+                        # DROP but the cycle's $verdict still says PASS —
+                        # streak was already reset to 0 above, so the
+                        # next cycle reads inconsistent state.
+                        verdict="DROP"
+                        # Re-establish the drop-streak counter that the
+                        # PASS branch reset to 0. Increment from the
+                        # pre-PASS streak (which is what would have
+                        # happened if critique had returned DROP).
+                        # Not in a function — bare assignment (shellcheck SC2168).
+                        _streak_prev=$(cat "$streak_file" 2>/dev/null || echo 0)
+                        case "$_streak_prev" in ''|*[!0-9]*) _streak_prev=0 ;; esac
+                        echo $((_streak_prev + 1)) > "$streak_file"
+                      fi
+                    fi
+                  fi
                 fi
                 # FIX (review I1): no verdict match (model omitted line or used unknown verb) → no streak update
               fi
@@ -1410,6 +1541,70 @@ $critique_input"
         # Bound history sizes after all writes finish
         tail -50 "$HIST_FILE_SESSION" > "${HIST_FILE_SESSION}.tmp" 2>/dev/null && mv "${HIST_FILE_SESSION}.tmp" "$HIST_FILE_SESSION"
         tail -100 "$HIST_FILE_PROJECT" > "${HIST_FILE_PROJECT}.tmp" 2>/dev/null && mv "${HIST_FILE_PROJECT}.tmp" "$HIST_FILE_PROJECT"
+
+        # === v0.5.2: OAR labeler — inline, gated, bounded ===================
+        # Wire pp_oar_label_pending into the cycle. The driver is FIFO + per-row
+        # 3s timeout + per-cycle cap of 5, so worst-case is 15s. We additionally
+        # enforce a 15s ceiling here as a watchdog: a runaway git on a mono-repo
+        # can NEVER block the next cycle. Spec §G invariant 2.
+        #
+        # Gating: PP_OAR_ENABLE=1 (default 0). When 0, this is a strict no-op
+        # so the cycle path stays byte-identical to v0.5.1.
+        #
+        # Telemetry never blocks the cycle: all stderr/stdout suppressed,
+        # `|| true` on every failure path. The inner watchdog (15s SIGTERM-then-
+        # SIGKILL polling) is the SOLE bound on labeler lifetime; in production
+        # (PP_EVAL_MODE=0) the outer cycle fires this subshell and forgets,
+        # while PP_EVAL_MODE=1 (tests) does sync-wait on the outer cycle.
+        #
+        # Task-11 review (GPT #2/#3/#6): direct-pid kill leaves grandchildren
+        # (git commands inside pp_oar_with_row_timeout) orphaned on watchdog
+        # firing. Bash 3.2 process-group manipulation requires `set -m` + the
+        # parent's job-control state, which can perturb the outer statusline
+        # subshell's semantics. Accepted leak window is bounded by the
+        # labeler's INNER per-row 3s timeout — orphaned git child lives ≤3s
+        # before its own per-row timeout fires. Documented limit.
+        #
+        # GPT-review #5: when PP_OAR_ENABLE=1 but the function failed to
+        # source (sourcing block at file top has `2>/dev/null || true`),
+        # log a one-shot warning so the operator knows OAR is silently
+        # disabled rather than running.
+        if [ "${PP_OAR_ENABLE:-0}" = "1" ]; then
+          if ! command -v pp_oar_label_pending >/dev/null 2>&1; then
+            printf 'pair-polymath: PP_OAR_ENABLE=1 but pp_oar_label_pending unavailable (lib/oar.sh sourcing failed?)\n' >&2 2>/dev/null
+          else
+            (
+              pp_oar_label_pending >/dev/null 2>&1 &
+              _pp_oar_pid=$!
+              _pp_oar_waited=0
+              # Poll every 1s for up to 15s. kill -0 = "still running?".
+              while [ "$_pp_oar_waited" -lt 15 ]; do
+                if ! kill -0 "$_pp_oar_pid" 2>/dev/null; then
+                  # Process finished — reap to avoid a zombie. Wait returns
+                  # immediately when the child is already dead.
+                  wait "$_pp_oar_pid" 2>/dev/null || true
+                  break
+                fi
+                sleep 1
+                _pp_oar_waited=$((_pp_oar_waited + 1))
+              done
+              # GPT-review #4: SIGTERM-then-SIGKILL grace, not immediate kill.
+              # SIGTERM lets the labeler release the mkdir-lock + finish any
+              # atomic mv-rewrite of oar-pending.jsonl. 1s grace, then SIGKILL.
+              if kill -0 "$_pp_oar_pid" 2>/dev/null; then
+                kill -TERM "$_pp_oar_pid" >/dev/null 2>&1 || true
+                sleep 1
+                if kill -0 "$_pp_oar_pid" 2>/dev/null; then
+                  kill -9 "$_pp_oar_pid" >/dev/null 2>&1 || true
+                fi
+                # Reap so the parent shell doesn't leak a defunct entry.
+                wait "$_pp_oar_pid" 2>/dev/null || true
+              fi
+            ) >/dev/null 2>&1 &
+            # Fire-and-forget; the inner watchdog above is what guarantees
+            # bounded lifetime. Outer cycle does NOT synchronously wait.
+          fi
+        fi
 
         # === Memory subsystem post-cycle ===
         # When enabled, persist this cycle's accepted observations to the
@@ -1541,6 +1736,47 @@ $critique_input"
       # verdict_total_drops: the cycle-wide concurrent-drop count (I2-fixed).
       _pp_kpi_drops="${_pp_concurrent_drops:-0}"
       case "$_pp_kpi_drops" in ''|*[!0-9]*) _pp_kpi_drops=0 ;; esac
+      # v0.5.2 (Task 13, plan addendum I4): hallucination rates.
+      #   halluc_pre_drop_rate = citation_fail DROPs ÷ total DROPs THIS cycle.
+      #     Proportion: of all critique-DROPs this cycle, what share were
+      #     hallucination-class (i.e. caught by the citation allowlist gate
+      #     BEFORE display). Denominator 0 (no DROPs) → 0.
+      #   halluc_post_would_drop_rate = post-check would-DROPs ÷ critique
+      #     PASSes THIS cycle. The post-check ONLY runs against critique
+      #     PASSes, so the PASS count is the true denominator (not
+      #     PP_LENS_COUNT, which would understate the rate whenever critique
+      #     DROPs happen — exactly when the post-check matters most).
+      #     Denominator 0 (no PASSes) → 0.
+      _pp_kpi_halluc_pre="${_pp_halluc_pre_drops:-0}"
+      case "$_pp_kpi_halluc_pre" in ''|*[!0-9]*) _pp_kpi_halluc_pre=0 ;; esac
+      _pp_kpi_halluc_post="${_pp_halluc_post_drops:-0}"
+      case "$_pp_kpi_halluc_post" in ''|*[!0-9]*) _pp_kpi_halluc_post=0 ;; esac
+      _pp_kpi_halluc_post_denom="${_pp_halluc_post_passes_checked:-0}"
+      case "$_pp_kpi_halluc_post_denom" in ''|*[!0-9]*) _pp_kpi_halluc_post_denom=0 ;; esac
+      # GPT-review #5: clamp rates to [0,1] in awk itself (mismatched
+      # numerator/denominator from upstream bugs could otherwise produce
+      # >1.0 leaks into the KPI stream). Defensive belt for downstream
+      # consumers expecting probability-shaped values.
+      # GPT-review #7: case regex `[!0-9.]*` accepts malformed strings
+      # like "1.2.3" or ".." — jq --argjson would then reject the JSON.
+      # Tighten to "single dot, digits only" using a two-stage case:
+      # (a) reject non-digit/non-dot, (b) reject multi-dot.
+      _pp_kpi_halluc_pre_rate=$(LC_ALL=C awk \
+        -v c="$_pp_kpi_halluc_pre" -v t="$_pp_kpi_drops" \
+        'BEGIN {
+          if (t > 0) { r = c / t; if (r > 1) r = 1; if (r < 0) r = 0;
+            printf "%.4f", r } else printf "0" }' 2>/dev/null)
+      case "$_pp_kpi_halluc_pre_rate" in
+        ''|*[!0-9.]*|*.*.*) _pp_kpi_halluc_pre_rate=0 ;;
+      esac
+      _pp_kpi_halluc_post_rate=$(LC_ALL=C awk \
+        -v c="$_pp_kpi_halluc_post" -v p="$_pp_kpi_halluc_post_denom" \
+        'BEGIN {
+          if (p > 0) { r = c / p; if (r > 1) r = 1; if (r < 0) r = 0;
+            printf "%.4f", r } else printf "0" }' 2>/dev/null)
+      case "$_pp_kpi_halluc_post_rate" in
+        ''|*[!0-9.]*|*.*.*) _pp_kpi_halluc_post_rate=0 ;;
+      esac
       # retry_acceptance_rate: count "(retry accepted)" verdict files for this
       # session vs total retries this cycle. Best-effort; 0 when no retries.
       _pp_kpi_retry_accepted=$(grep -l 'retry accepted' \
@@ -1578,6 +1814,8 @@ $critique_input"
         --arg phase_source "${_pp_kpi_phase_source:-unknown}" \
         --argjson retry_acceptance_rate "${_pp_kpi_accept_rate:-0}" \
         --argjson verdict_total_drops "${_pp_kpi_drops:-0}" \
+        --argjson halluc_pre_drop_rate "${_pp_kpi_halluc_pre_rate:-0}" \
+        --argjson halluc_post_would_drop_rate "${_pp_kpi_halluc_post_rate:-0}" \
         --arg cycle_outcome "${_pp_kpi_outcome:-success}" \
         --argjson eligible "${_pp_kpi_eligible:-0}" \
         --argjson slo_breach "${_pp_kpi_slo_breach:-0}" \
@@ -1585,7 +1823,10 @@ $critique_input"
           retry_usd:$retry_usd, inv_count:$inv_count, picked_count:$picked_count,
           phase:$phase, phase_source:$phase_source,
           retry_acceptance_rate:$retry_acceptance_rate,
-          verdict_total_drops:$verdict_total_drops, cycle_outcome:$cycle_outcome,
+          verdict_total_drops:$verdict_total_drops,
+          halluc_pre_drop_rate:$halluc_pre_drop_rate,
+          halluc_post_would_drop_rate:$halluc_post_would_drop_rate,
+          cycle_outcome:$cycle_outcome,
           eligible:$eligible, slo_breach:$slo_breach}' 2>/dev/null || printf '')
       [ -n "$_pp_kpi_blob" ] && pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
 

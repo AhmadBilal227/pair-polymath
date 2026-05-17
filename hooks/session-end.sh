@@ -27,6 +27,17 @@ _session_id=$(printf '%s' "$_input" | jq -r '.session_id // empty' 2>/dev/null)
 PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/config.sh" 2>/dev/null || true
+# v0.5.2: pp_extract_citations_from_text — used to populate cited_paths +
+# cited_symbols in the pending row (C2 fix path A from plan addendum).
+# shellcheck disable=SC1091
+. "$PP_ROOT/lib/citations.sh" 2>/dev/null || true
+# GPT review #2: surface silent degradation if the citations lib failed to
+# source. Without this, missing helper → empty cite arrays silently → OAR
+# labeler's referenced-detection rate gets biased toward zero exactly the
+# way the pre-mortem warned about.
+if ! command -v pp_extract_citations_from_text >/dev/null 2>&1; then
+  printf 'pair-polymath session-end: pp_extract_citations_from_text unavailable; cite arrays will be empty\n' >&2
+fi
 
 _now=$(date +%s)
 _pending_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/oar-pending.jsonl"
@@ -80,14 +91,80 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
       || date -u -d "@$_inject_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
       || date -u +%Y-%m-%dT%H:%M:%SZ)
     _scan_at=$(( _inject_epoch + _window_s ))
-    jq -nc \
+
+    # v0.5.2 (Task 2, plan addendum C2 fix path A): also capture the
+    # observation body + cited paths/symbols so the labeler (Task 8) is a
+    # pure function of the pending row. The observation file is the
+    # per-lens cache that statusline.sh writes alongside the hash file —
+    # filename pattern matches the v0.5.1 convention used at
+    # bin/statusline.sh:1064 (PP_CACHE_LENS).
+    #
+    # GPT review #5: defense-in-depth sanitize the lens id before
+    # constructing a filesystem path. The lens registry already validates
+    # IDs at load time, but a path containing `/` or whitespace here would
+    # escape PP_CACHE_DIR and hit the wrong file. Reject those lenses
+    # (skip the row entirely; better than mis-reading a sibling lens's
+    # observation).
+    case "$_lens" in
+      *[/[:space:]]*) continue ;;
+    esac
+    _obs_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/cc-monitor-${_session_id}-${_lens}.txt"
+    _body=""
+    if [ -f "$_obs_file" ]; then
+      # Analyst line format (see bin/statusline.sh:1162): `LENS_TYPE: title|||body`.
+      # Body = everything after the first `|||` separator on line 1. We use
+      # `head -1` then `cut`/`sed` to extract — `awk -F '\\|\\|\\|'` would
+      # work too, but cut is simpler since we only want the tail half.
+      #
+      # GPT review #12 + code-reviewer minor #3: strip CRLF. If a user
+      # manually edited the obs file in a Windows editor, head -1 keeps
+      # the \r which then lands in body + gets stored in pending row JSON.
+      _line=$(head -1 "$_obs_file" 2>/dev/null | tr -d '\r')
+      case "$_line" in
+        *'|||'*)
+          # Strip the shortest prefix through the first `|||` (parameter
+          # expansion `#` is shortest-match-from-left, NOT greedy — that's
+          # `##`). So a body that itself contains `|||` is preserved.
+          _body="${_line#*|||}"
+          ;;
+        *)
+          # No `|||` separator: treat the whole line as body (defensive —
+          # shouldn't happen in production since malformed analyst output
+          # is rejected by the regex gate at bin/statusline.sh:1162).
+          _body="$_line"
+          ;;
+      esac
+    fi
+
+    # Citation extraction. Empty body → empty allowlists → empty JSON arrays.
+    pp_extract_citations_from_text "$_body" 2>/dev/null || true
+    _cited_paths_json=$(printf '%s' "${_pp_valid_paths:-}" \
+      | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null \
+      || printf '[]')
+    _cited_symbols_json=$(printf '%s' "${_pp_valid_symbols:-}" \
+      | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null \
+      || printf '[]')
+
+    # GPT review #1: surface jq write failures. The pre-mortem flagged
+    # silent data loss as the most likely v0.5.2 failure mode. Without
+    # this, a permission/disk/quota error → pending row silently dropped
+    # → operator sees fewer labeled rows than expected → can't tell if
+    # the metric is broken or just nobody acted. Telemetry stays
+    # fail-open (hook returns 0), but the operator gets a stderr signal.
+    if ! jq -nc \
       --arg sid "$_session_id" \
       --arg lens "$_lens" \
       --arg hash "$_hash" \
       --arg inject_ts "$_inject_iso" \
       --argjson scan_at "$_scan_at" \
-      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, status: "pending"}' \
-      >> "$_pending_file" 2>/dev/null || true
+      --arg body "$_body" \
+      --argjson cited_paths "$_cited_paths_json" \
+      --argjson cited_symbols "$_cited_symbols_json" \
+      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: $body, cited_paths: $cited_paths, cited_symbols: $cited_symbols}' \
+      >> "$_pending_file" 2>/dev/null; then
+      printf 'pair-polymath session-end: failed to append pending row for lens=%s (check %s permissions)\n' \
+        "$_lens" "$_pending_file" >&2
+    fi
   done
 
 exit 0

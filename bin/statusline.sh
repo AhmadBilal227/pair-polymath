@@ -729,12 +729,21 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       git_log=""
       git_diff_stat=""
       git_recent_files=""
+      git_diff_paths=""
+      git_untracked_paths=""
+      git_staged_paths=""
       if [ "$cwd" != "-" ] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
         git_status=$(git -C "$cwd" status --short 2>/dev/null | head -20)
         git_log=$(git -C "$cwd" log -8 --oneline 2>/dev/null)
         git_diff_stat=$(git -C "$cwd" diff --stat HEAD~3..HEAD 2>/dev/null | tail -15)
         # Recently modified tracked files (most useful for picking a file to read)
         git_recent_files=$(git -C "$cwd" diff --name-only HEAD~5..HEAD 2>/dev/null | head -15)
+        # v0.5.1.1 Stage D: facts-snapshot path set for lens eligibility.
+        # Captured once at cycle start so eligibility, prompt grounding, and
+        # critique all reason against the same stable snapshot.
+        git_diff_paths=$(git -C "$cwd" diff --name-only HEAD 2>/dev/null)
+        git_untracked_paths=$(git -C "$cwd" ls-files --others --exclude-standard 2>/dev/null)
+        git_staged_paths=$(git -C "$cwd" diff --cached --name-only 2>/dev/null)
       fi
 
       # gh CLI: open PRs (cached 10min) and recent CI runs (cached 5min)
@@ -963,6 +972,60 @@ ${tool_summary:-(no recent tool calls)}
 GROUND
       )
 
+      # v0.5.1.1 Stage D: write the facts snapshot consumed by
+      # pp_lens_is_eligible. Helper/unit tests already covered the router
+      # filter with synthetic facts files; production needs this real
+      # artifact passed into pp_router_pick_lenses or PP_LENS_GATES_ACTIVE
+      # silently becomes a no-op. Atomic same-dir write matches the rest of
+      # the cache discipline.
+      _pp_facts_file="${PP_CACHE_DIR}/cc-monitor-facts-${session_id}.txt"
+      _pp_facts_tmp=""
+      _pp_facts_tmp=$(mktemp "${_pp_facts_file}.XXXXXX" 2>/dev/null) || _pp_facts_tmp=""
+      if [ -n "$_pp_facts_tmp" ]; then
+        {
+          printf '# facts_schema: %s\n' "${PP_FACTS_SCHEMA_VERSION:-2}"
+          printf '%s\n\n' "$grounded"
+          printf '# git_diff_paths\n'
+          [ -n "$git_diff_paths" ] && printf '%s\n' "$git_diff_paths"
+          printf '# /git_diff_paths\n\n'
+          printf '# git_untracked_paths\n'
+          [ -n "$git_untracked_paths" ] && printf '%s\n' "$git_untracked_paths"
+          printf '# /git_untracked_paths\n\n'
+          printf '# git_staged_paths\n'
+          [ -n "$git_staged_paths" ] && printf '%s\n' "$git_staged_paths"
+          printf '# /git_staged_paths\n'
+        } > "$_pp_facts_tmp" 2>/dev/null
+        _pp_facts_rc=$?
+        if [ "$_pp_facts_rc" -eq 0 ]; then
+          mv "$_pp_facts_tmp" "$_pp_facts_file" 2>/dev/null || _pp_facts_rc=1
+        fi
+        if [ "$_pp_facts_rc" -ne 0 ]; then
+          rm -f "$_pp_facts_tmp" 2>/dev/null
+          _pp_facts_file=""
+        fi
+      else
+        _pp_facts_file=""
+      fi
+
+      # Stamp per-lens eligibility into same-cycle shell vars for KPI
+      # by_lens. Current built-in IDs are env-safe; skip future category IDs
+      # containing characters that cannot appear in shell variable names.
+      if [ -n "${_pp_facts_file:-}" ] && [ -f "$_pp_facts_file" ] \
+          && command -v pp_lens_is_eligible >/dev/null 2>&1; then
+        for _pp_el_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
+          _pp_el_id="${PP_LENS_IDS[$_pp_el_idx]}"
+          _pp_el_var="PP_LENS_ELIGIBLE_${_pp_el_id}"
+          case "$_pp_el_var" in
+            *[!A-Za-z0-9_]*|'') continue ;;
+          esac
+          if pp_lens_is_eligible "$_pp_el_id" "$_pp_facts_file"; then
+            eval "${_pp_el_var}=1"
+          else
+            eval "${_pp_el_var}=0"
+          fi
+        done
+      fi
+
       # === Privacy log (P3.3) ===
       # Writes what we would send to OpenAI this cycle so users can verify the
       # README's "what leaves your machine" claim. Single overwriting file
@@ -1111,7 +1174,7 @@ GROUND
         _pp_router_signals=$(pp_router_extract_signals "${transcript_filtered:-}" "${_pp_tool_calls_json:-[]}" 2>/dev/null || printf '{}')
         PP_LENS_IDS_AVAILABLE=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         export PP_LENS_IDS_AVAILABLE
-        _pp_router_picked=$(pp_router_pick_lenses "$_pp_router_signals" "${transcript_filtered:-}" 2>/dev/null)
+        _pp_router_picked=$(pp_router_pick_lenses "$_pp_router_signals" "${transcript_filtered:-}" "${_pp_facts_file:-}" 2>/dev/null)
         # Build not-picked set (newline-delimited) for surprise inject.
         _pp_router_not_picked=""
         for _l in "${PP_LENS_IDS[@]}"; do

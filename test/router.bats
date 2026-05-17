@@ -152,6 +152,24 @@ _REAL_IDS=(UX_DESIGN ENGINEERING SECURITY PERF_FINOPS PRODUCT_BIZ COGNITIVE_FLOW
   ! printf '%s' "$output" | grep -qF '${signals_json}'
 }
 
+@test "render: router prompt asks for exact registry IDs, not lowercase aliases" {
+  PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  # shellcheck source=../lib/prompt-loader.sh
+  . "$PP_ROOT/lib/prompt-loader.sh"
+  signals_json='{"phase":"debugging"}'
+  transcript_tail_5='USER: tests failing'
+  lens_registry=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  PP_ROUTER_MIN=1
+  PP_ROUTER_MAX=3
+  export signals_json transcript_tail_5 lens_registry PP_ROUTER_MIN PP_ROUTER_MAX
+  run pp_render_prompt router
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF 'preserving its casing'
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  printf '%s' "$output" | grep -qxF 'COGNITIVE_FLOW'
+  ! printf '%s' "$output" | grep -qF 'Each line: lowercase'
+}
+
 @test "pick: GPT-C2 — accepts category-prefixed IDs like 'executive/cfo' (Phase 4 prep)" {
   _enable engineering security 'executive/cfo' 'meta/pre-mortem'
   PP_ROUTER_ENABLE=1 \

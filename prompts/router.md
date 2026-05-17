@@ -10,12 +10,12 @@ PRINCIPLES:
 OUTPUT FORMAT (strict, machine-parsed):
 - NEWLINE-delimited list of lens IDs.
 - Exactly between MIN=${PP_ROUTER_MIN} and MAX=${PP_ROUTER_MAX} lines.
-- Each line: lowercase, the `id` field of one enabled lens, no commentary, no trailing punctuation.
+- Each line: exactly one `id` from the enabled registry below, preserving its casing and punctuation. No commentary, no trailing punctuation.
 
 EXAMPLE OUTPUT (3 lines, no markdown):
-engineering
-security
-cognitive-flow
+ENGINEERING
+SECURITY
+COGNITIVE_FLOW
 
 INVALID OUTPUTS (will be discarded, falling open to fan-out-all):
 - comma- or space-delimited

@@ -148,6 +148,12 @@ teardown() { rm -rf "$HOME"; }
   ! grep -qE 'chmod -R go-rwx' "$PP_ROOT/README.md"
 }
 
+@test "docs: README and installer defaults match current hooks and budget" {
+  grep -qF 'statusLine + 3 hooks' "$PP_ROOT/README.md"
+  grep -qF 'PP_MAX_DAILY_CALLS=10000' "$PP_ROOT/README.md"
+  grep -qF 'default 10000' "$PP_ROOT/bin/install.sh"
+}
+
 # ============================================================
 # P1-5: bin/polymath status threshold clamp backport (parity with pip + doctor)
 # ============================================================

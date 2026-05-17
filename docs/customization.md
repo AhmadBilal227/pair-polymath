@@ -1,6 +1,6 @@
 # Customization
 
-All knobs live in `config/default.env`. To override, copy any line to `~/.claude/pair-polymath/config/user.env` and edit. Variables are sourced default-first, then user-second — so user.env always wins.
+All knobs live in `config/default.env`. To override, copy any line to `$PP_USER_CONFIG` (default `$CLAUDE_DIR/pair-polymath/config/user.env`, with `CLAUDE_DIR` defaulting to `~/.claude`) and edit. Variables are sourced default-first, then user-second — so user.env always wins.
 
 ## Cap / interval
 
@@ -109,8 +109,10 @@ Update these if you've measured your actual usage and want sharper estimates.
 
 | Var | Default | Controls |
 |---|---|---|
-| `PP_CACHE_DIR` | `~/.claude/cache` | Where per-cycle observations, budget tracker, and metrics.jsonl live. Cache files are mode `600`, parent dir `700`, since v0.4.2. Run `polymath cache list` to inspect, `polymath cache clear` to remediate lax-mode legacy files. |
-| `PP_STATE_DIR` | `~/.claude/pair-polymath` | Where user-supplied lenses, prompts, and `user.env` are read from. |
+| `CLAUDE_DIR` | `~/.claude` | Claude Code integration root (`settings.json`) and default parent for Pair Polymath state/cache. |
+| `PP_CACHE_DIR` | `$CLAUDE_DIR/cache` | Where per-cycle observations, budget tracker, and metrics.jsonl live. Cache files are mode `600`, parent dir `700`, since v0.4.2. Run `polymath cache list` to inspect, `polymath cache clear` to remediate lax-mode legacy files. |
+| `PP_STATE_DIR` | `$CLAUDE_DIR/pair-polymath` | Where user-supplied lenses, prompts, and default `user.env` are read from. |
+| `PP_USER_CONFIG` | `$PP_STATE_DIR/config/user.env` | User override file sourced after `config/default.env`. |
 
 ### Cache layout (v0.4.2+)
 
@@ -129,7 +131,7 @@ Update these if you've measured your actual usage and want sharper estimates.
 | Var | Default | Controls |
 |---|---|---|
 | `PP_MEMORY_ENABLE` | `0` | Master toggle. `1` enables observation capture + injection. |
-| `PP_MEMORY_DIR` | `~/.claude/pair-polymath/memory` | Where per-project memory DBs live. |
+| `PP_MEMORY_DIR` | `$CLAUDE_DIR/pair-polymath/memory` | Where per-project memory DBs live. |
 | `PP_MEMORY_REDACT` | `1` | Apply `pp_memory_redact_body` at store time + inject time. |
 | `PP_MEMORY_DECAY_PER_DAY` | `0.5` | Activation decay rate per day since last_seen. |
 | `PP_MEMORY_RETRIEVAL_ALPHA` | `0.3` | BM25 weight in hybrid `activation + α × bm25` scoring. |
@@ -148,4 +150,4 @@ Memory observations are local-only. The salted project hash means identical proj
 
 ---
 
-To add a custom lens: drop `~/.claude/pair-polymath/lenses/08-mylens.json` matching the [Lens schema](../README.md#lens-schema). To override the analyst prompt: drop `~/.claude/pair-polymath/prompts/analyst-primary.md` with your text — the loader does `${var}` substitution against the calling scope.
+To add a custom lens: drop `$PP_STATE_DIR/lenses/08-mylens.json` matching the [Lens schema](../README.md#lens-schema). To override the analyst prompt: drop `$PP_STATE_DIR/prompts/analyst-primary.md` with your text — the loader does `${var}` substitution against the calling scope.

@@ -31,7 +31,7 @@ cd pair-polymath
 ./bin/install.sh
 ```
 
-Needs a TTY (API key prompt). Detects `jq` + `llm` (≥0.20) and walks you through installing what's missing. Backs up `~/.claude/settings.json` before merging in our statusLine + 2 hooks atomically. Restart Claude Code; first cycle runs within ~5 minutes of activity.
+Needs a TTY (API key prompt). Detects `jq` + `llm` (≥0.20) and walks you through installing what's missing. Backs up `$CLAUDE_DIR/settings.json` (default `~/.claude/settings.json`) before merging in our statusLine + 3 hooks atomically. Restart Claude Code; first cycle runs within ~5 minutes of activity.
 
 Verify: `bash ./bin/polymath doctor` (22 health checks). Uninstall: `./bin/uninstall.sh`.
 
@@ -44,19 +44,19 @@ Verify: `bash ./bin/polymath doctor` (22 health checks). Uninstall: `./bin/unins
 | Active + drops + retries | 9–16 | 5–15 |
 | Worst case sustained | 23 | 15–35 |
 
-Hard cap on **call count** via `PP_MAX_DAILY_CALLS=3500` (atomic `mkdir`-locked reservation per cycle). See actual spend: `polymath cost --since 30d`. Disable for sensitive sessions: `polymath disable`.
+Hard cap on **call count** via `PP_MAX_DAILY_CALLS=10000` (atomic `mkdir`-locked reservation per cycle). See actual spend: `polymath cost --since 30d`. Disable for sensitive sessions: `polymath disable`.
 
 ## Privacy in one paragraph
 
-What leaves per cycle: ~5 KB transcript tail, `git status` + last 5 commit subjects, ~3 KB of ONE planner-picked file (containment-checked, 30+ secret-bearing basename + path-component denylists in [`lib/grounding.sh`](lib/grounding.sh)), public HN + arXiv RSS titles. NEVER: full conversation history, files outside cwd, recursively-expanded `${VAR}` values in prompts. **At risk:** secrets you pasted INTO your transcript. Every cycle writes a verifiable snapshot to `~/.claude/cache/last-cycle-payload.json`. Full threat model: [SECURITY.md](SECURITY.md) + [docs/security.md](docs/security.md).
+What leaves per cycle: ~5 KB transcript tail, `git status` + last 5 commit subjects, ~3 KB of ONE planner-picked file (containment-checked, 30+ secret-bearing basename + path-component denylists in [`lib/grounding.sh`](lib/grounding.sh)), public HN + arXiv RSS titles. NEVER: full conversation history, files outside cwd, recursively-expanded `${VAR}` values in prompts. **At risk:** secrets you pasted INTO your transcript. Every cycle writes a verifiable snapshot to `$PP_CACHE_DIR/last-cycle-payload.json` (default `~/.claude/cache/last-cycle-payload.json`). Cache files are mode `0600` automatically. Full threat model: [SECURITY.md](SECURITY.md) + [docs/security.md](docs/security.md).
 
 ## Customize without editing shell
 
 | Thing | Where |
 |---|---|
-| Daily cap / intervals / model choice | `~/.claude/pair-polymath/config/user.env` (`PP_*=value`) |
-| Add a new lens | `~/.claude/pair-polymath/lenses/08-mylens.json` ([schema](docs/customization.md)) |
-| Override the analyst prompt | `~/.claude/pair-polymath/prompts/analyst-primary.md` |
+| Daily cap / intervals / model choice | `$PP_USER_CONFIG` (default `$CLAUDE_DIR/pair-polymath/config/user.env`) |
+| Add a new lens | `$PP_STATE_DIR/lenses/08-mylens.json` ([schema](docs/customization.md)) |
+| Override the analyst prompt | `$PP_STATE_DIR/prompts/analyst-primary.md` |
 | Disable advisor (status-only) | `polymath disable` |
 | Inspect lens-gates kill-switches | `polymath lens-gates status` |
 

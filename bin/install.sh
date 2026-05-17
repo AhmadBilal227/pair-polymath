@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pair Polymath installer — v0.2 (P2.3 flags + audit log + bare-install detection).
 # Detects deps, installs if missing (interactive), prompts for OpenAI key,
-# merges into ~/.claude/settings.json with backup. Idempotent.
+# merges into $CLAUDE_DIR/settings.json with backup. Idempotent.
 #
 # Usage: ./install.sh [--dry-run] [--yes] [--no-sudo] [--non-interactive] [--help]
 # Run with --help for full flag reference.
@@ -214,9 +214,9 @@ if [ -f "$BARE_STATUSLINE" ]; then
   Recommended manual migration:
 
     1. Back up your current Claude Code config:
-         cp ~/.claude/settings.json ~/.claude/settings.json.pre-pp-bak
+         cp "$CLAUDE_DIR/settings.json" "$CLAUDE_DIR/settings.json.pre-pp-bak"
     2. (Optional) Move the old statusline aside:
-         mv ~/.claude/statusline-command.sh ~/.claude/statusline-command.sh.pre-pp
+         mv "$BARE_STATUSLINE" "$BARE_STATUSLINE.pre-pp"
     3. Continue this installer — it will prompt before replacing your
        statusLine in settings.json (default: keep yours).
 
@@ -678,7 +678,7 @@ else
     "$USER_CONFIG_DIR/config"
   chmod 700 "$USER_CONFIG_DIR" 2>/dev/null || true
   audit_log "chmod-user-config" "chmod 700 $USER_CONFIG_DIR" 0 ""
-  # Tighten ~/.claude/cache to 700 ONLY when we create it fresh. Never chmod
+  # Tighten $CLAUDE_DIR/cache to 700 ONLY when we create it fresh. Never chmod
   # a user-existing directory — they may have intentionally relaxed perms
   # (e.g. shared dev box) and we shouldn't override that decision.
   if [ ! -d "$CLAUDE_DIR/cache" ]; then
@@ -691,7 +691,7 @@ else
 # All variables and their defaults live in $PP_ROOT/config/default.env.
 #
 # Example overrides:
-# PP_MAX_DAILY_CALLS=2000     # lower the daily LLM-call cap (default 3500)
+# PP_MAX_DAILY_CALLS=2000     # lower the daily LLM-call cap (default 10000)
 # PP_EXTERNAL_LLM=0           # disable LLM cycle entirely (status-only mode)
 # PP_ENABLE_ESCALATION=0      # disable deep-investigation escalation
 EOF

@@ -466,12 +466,20 @@ _pp_doctor_write_verdict() {
   mkdir -p "$PP_CACHE_DIR"
   # Drift exists but it's 25h old — out-of-window, should NOT alarm.
   _pp_doctor_write_verdict UX_DESIGN aaaaaaaa bbbbbbbb 1500
-  # Skip if touch -t didn't accept either date dialect (rare CI sandbox).
-  local _mtime
-  _mtime=$(stat -f %m "$PP_CACHE_DIR/cc-monitor-sess1-UX_DESIGN-verdict.txt" 2>/dev/null \
-        || stat -c %Y "$PP_CACHE_DIR/cc-monitor-sess1-UX_DESIGN-verdict.txt" 2>/dev/null)
+  # Probe GNU-first then BSD (matches lib/oar.sh:637 pattern). `stat -f %m`
+  # on GNU coreutils means "filesystem format" and prints fs metadata — not
+  # file mtime — without failing, so a BSD-first probe on Ubuntu CI yields
+  # non-numeric output and the `((…))` below errors. Skip if neither dialect
+  # gives a clean integer mtime.
+  local _mtime _f="$PP_CACHE_DIR/cc-monitor-sess1-UX_DESIGN-verdict.txt"
+  if stat -c %Y /dev/null >/dev/null 2>&1; then
+    _mtime=$(stat -c %Y "$_f" 2>/dev/null)
+  elif stat -f %m /dev/null >/dev/null 2>&1; then
+    _mtime=$(stat -f %m "$_f" 2>/dev/null)
+  fi
+  case "$_mtime" in ''|*[!0-9]*) skip "stat mtime probe unsupported here" ;; esac
   local _now; _now=$(date +%s)
-  [ -n "$_mtime" ] && [ "$((_now - _mtime))" -gt 86400 ] || skip "touch -t not portable here"
+  [ "$((_now - _mtime))" -gt 86400 ] || skip "touch -t did not stick mtime to 25h ago"
   run doctor_check_drift_count
   [ "$status" -eq 0 ]
   [[ "$output" == *"no verdict data"* ]] || [[ "$output" == *"drift_count=0"* ]]

@@ -4,7 +4,7 @@
 # by default — separate prompt for those).
 #
 # Match strategy: filter by BASENAME of our scripts (statusline.sh,
-# inject-monitor-insight.sh, cache-test-result.sh) so an old install from
+# inject-monitor-insight.sh, cache-test-result.sh, session-end.sh) so an old install from
 # a moved/renamed checkout still gets cleaned up (review fix M3).
 
 set -u
@@ -45,12 +45,18 @@ else
       | map(select((.hooks // []) | length > 0))
     )
     |
-    .hooks.PostToolUse |= (
-      (. // [])
-      | map(.hooks |= ((. // []) | map(select((.command // "") | test("cache-test-result\\.sh") | not))))
-      | map(select((.hooks // []) | length > 0))
-    )
-  ' "$SETTINGS_FILE" > "$tmp"
+	    .hooks.PostToolUse |= (
+	      (. // [])
+	      | map(.hooks |= ((. // []) | map(select((.command // "") | test("cache-test-result\\.sh") | not))))
+	      | map(select((.hooks // []) | length > 0))
+	    )
+	    |
+	    .hooks.SessionEnd |= (
+	      (. // [])
+	      | map(.hooks |= ((. // []) | map(select((.command // "") | test("session-end\\.sh") | not))))
+	      | map(select((.hooks // []) | length > 0))
+	    )
+	  ' "$SETTINGS_FILE" > "$tmp"
 
   if jq empty "$tmp" 2>/dev/null; then
     mv "$tmp" "$SETTINGS_FILE"

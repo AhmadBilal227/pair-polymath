@@ -125,7 +125,7 @@ pp_router_pick_lenses() {
   # collapsed to fail-open in production (caught by the 4-way ralph
   # review). Regex now accepts both cases plus underscores and slashes
   # so v0.4 Phase 4 category-prefixed IDs (executive/cfo) also pass.
-  local _validated="" _seen="" _line _norm
+  local _validated="" _seen="" _line _norm _valid_from_raw=0
   while IFS= read -r _line; do
     # Trim leading/trailing whitespace.
     _norm=$(printf '%s' "$_line" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
@@ -143,12 +143,22 @@ pp_router_pick_lenses() {
         *)
           _validated="${_validated}${_norm}"$'\n'
           _seen="$_seen $_norm"
+          _valid_from_raw=1
         ;;
       esac
     fi
   done <<EOF
 $_raw
 EOF
+
+  # Fail-open: non-empty router output that validates to zero enabled IDs
+  # is malformed (markdown bullets, comma text, unknown IDs). Do not floor-
+  # pad it into a single arbitrary lens; fan out to all enabled as the
+  # router prompt and fail-open contract promise.
+  if [ "$_valid_from_raw" != "1" ]; then
+    printf '%s\n' "$_enabled_cached" | LC_ALL=C grep -v '^$' || true
+    return 0
+  fi
 
   # Floor: pad from enabled set until we hit PP_ROUTER_MIN.
   local _count

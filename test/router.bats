@@ -186,8 +186,11 @@ _REAL_IDS=(UX_DESIGN ENGINEERING SECURITY PERF_FINOPS PRODUCT_BIZ COGNITIVE_FLOW
     PP_ROUTER_FORCE_OUTPUT=$'- engineering\n1. security' \
     run pp_router_pick_lenses '' ''
   [ "$status" -eq 0 ]
-  # Lines with leading punctuation should be filtered out before validation
+  # Lines with leading punctuation should be filtered out before validation,
+  # then fail open to all enabled instead of padding to one arbitrary lens.
   ! printf '%s' "$output" | grep -qE '^[-*0-9]'
+  printf '%s' "$output" | grep -qxF 'engineering'
+  printf '%s' "$output" | grep -qxF 'security'
 }
 
 @test "pick: NEWLINE-delimited output (not space-separated; advisory)" {

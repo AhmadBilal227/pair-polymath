@@ -1,0 +1,1 @@
+lens0: PASS — concrete suggestion grounded in src/auth.ts:42

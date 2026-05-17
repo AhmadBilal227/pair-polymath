@@ -4,7 +4,7 @@
 
 UX. Engineering. Security. Perf/FinOps. Product/Biz. Strategic Founder. Cognitive Flow. Each one reads the transcript tail + git status + one file (its own pick), produces one observation, gets critique-judged, and the survivors land in Claude's context as a `[BACKGROUND ADVISORY — UNTRUSTED]` block. Claude can verify, ignore, or push back. You stay in control.
 
-[![bats](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/bats.yml/badge.svg)](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/bats.yml) [![shellcheck](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/shellcheck.yml) [![install-test](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/install-test.yml/badge.svg)](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/install-test.yml) ![macOS](https://img.shields.io/badge/macOS-tested-success) ![Ubuntu](https://img.shields.io/badge/Ubuntu-CI%20verified-success) ![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-orange) ![v0.5.2.1](https://img.shields.io/badge/version-0.5.2.1-blue) ![tests](https://img.shields.io/badge/bats-862%20green-success) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![bats](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/bats.yml/badge.svg)](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/bats.yml) [![shellcheck](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/shellcheck.yml) [![install-test](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/install-test.yml/badge.svg)](https://github.com/AhmadBilal227/pair-polymath/actions/workflows/install-test.yml) ![macOS](https://img.shields.io/badge/macOS-tested-success) ![Ubuntu](https://img.shields.io/badge/Ubuntu-CI%20verified-success) ![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-orange) ![v0.5.2.1](https://img.shields.io/badge/version-0.5.2.1-blue) ![tests](https://img.shields.io/badge/bats-green-success) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ---
 
@@ -71,7 +71,7 @@ What leaves per cycle: ~5 KB transcript tail, `git status` + last 5 commit subje
 
 ## Status
 
-**Latest:** [`v0.5.2.1`](https://github.com/AhmadBilal227/pair-polymath/releases/tag/v0.5.2.1) — planner / grounding fix. Three changes (SILENT first-class, FILE-READ-derived symbol inventory unified between lens prompts and validator, planner eligibility gates per lens). All shadow-by-default behind 4 kill-switches; STDOUT byte-identical to v0.5.2.0 until you opt in. 862/862 bats green; dual-write schema migration preserves v0.5.2.0 reader compatibility.
+**Latest:** [`v0.5.2.1`](https://github.com/AhmadBilal227/pair-polymath/releases/tag/v0.5.2.1) — planner / grounding fix. Three changes (SILENT first-class, FILE-READ-derived symbol inventory unified between lens prompts and validator, planner eligibility gates per lens). All shadow-by-default behind 4 kill-switches; STDOUT byte-identical to v0.5.2.0 until you opt in. Full Bats suite green; dual-write schema migration preserves v0.5.2.0 reader compatibility.
 
 **Recent:** [`v0.5.2.0`](https://github.com/AhmadBilal227/pair-polymath/releases/tag/v0.5.2.0) — OAR (Observation→Action Rate) measurement plumbing + shadow-by-default hallucination verifier.
 

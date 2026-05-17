@@ -1,6 +1,6 @@
 # Cost Model
 
-`polymath cost` shows estimated USD spend from `~/.claude/cache/metrics.jsonl`. This document explains the math.
+`polymath cost` shows estimated USD spend from `$PP_CACHE_DIR/metrics.jsonl` (default `$CLAUDE_DIR/cache/metrics.jsonl`). This document explains the math.
 
 ## Per-cycle formula
 
@@ -31,9 +31,9 @@ Avg tokens per call type (see `lib/metrics.sh` for current values):
 | analyst | ~2200 | ~180 | gpt-5-mini |
 | critique | ~3500 | ~500 | gpt-5 |
 | inv (escalation pre-investigation) | ~1500 | ~100 | gpt-5-mini |
-| retry | ~2500 | ~180 | gpt-5-mini (or gpt-5.5 if escalated) |
+| retry | ~2500 | ~180 | gpt-5-mini by default; cost-aware retry router can choose `PP_RETRY_MODEL_LOW` / `PP_RETRY_MODEL_HIGH` |
 
-Prices (defaults in `lib/metrics.sh`; override via `user.env`):
+Prices (defaults in `config/default.env`; override via `user.env`):
 
 | Model | Input $/M | Output $/M |
 |---|---|---|
@@ -51,6 +51,6 @@ v0.3 plans real per-call `--usage` parsing via `llm --usage`, which gives exact 
 
 ## When the daily cap kicks in
 
-`PP_MAX_DAILY_CALLS=3500` (default) is a hard cap on **call count**, not USD. Enforced via the same atomic shared lock that backs `budget_reserve`. If reserving worst-case 23 calls would push the daily total over 3500, the cycle is skipped entirely.
+`PP_MAX_DAILY_CALLS=10000` (default) is a hard cap on **call count**, not USD. Enforced via the same atomic shared lock that backs `budget_reserve`. If reserving worst-case 23 calls would push the daily total over 10000, the cycle is skipped entirely.
 
 To express a USD cap (v0.3 territory): a hook that reads `polymath cost --since 1d --json` and sets `PP_EXTERNAL_LLM=0` once total exceeds a threshold.

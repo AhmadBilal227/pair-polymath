@@ -77,7 +77,7 @@ Get one from [platform.openai.com/api-keys](https://platform.openai.com/api-keys
 
 ## `✗ settings.json invalid` / `not found`
 
-Run `./bin/install.sh` from this checkout. The installer atomically merges in the statusLine + 2 hooks with a timestamped backup of any existing file.
+Run `./bin/install.sh` from this checkout. The installer atomically merges in the statusLine + 3 hooks with a timestamped backup of any existing file.
 
 ## `✗ cache dir writable`
 

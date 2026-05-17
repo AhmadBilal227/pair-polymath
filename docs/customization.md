@@ -45,7 +45,7 @@ All knobs live in `config/default.env`. To override, copy any line to `$PP_USER_
 | Var | Default | Controls |
 |---|---|---|
 | `PP_MODEL` | `gpt-5-mini` | Per-lens analyst model. Cheap + fast is what you want here. |
-| `PP_MODEL_DEEP` | `gpt-5.5` | Rotating deep slot + escalation retry. Used for ~1 call per cycle, so the cost impact of upgrading this is bounded. |
+| `PP_MODEL_DEEP` | `gpt-5.5` | Rotating deep analyst slot. Escalation pre-investigation still uses `gpt-5-mini`; retry model choice is controlled by `PP_RETRY_MODEL*`. |
 | `PP_MODEL_CRITIQUE` | `gpt-5` | Critique pass that PASSes or DROPs each analyst output. Higher reasoning here improves the signal-to-noise ratio significantly. |
 
 ## Feature flags
@@ -121,7 +121,7 @@ Update these if you've measured your actual usage and want sharper estimates.
 | `cc-tips-<16hex>.txt` | LLM-personalized tip rotation, **scoped to one project** (sha256 of git-toplevel or cwd). Project A's tips never leak into project B. | 30 min |
 | `cc-monitor-<session>-<lens>.txt` | One lens observation per session/lens. Session-scoped, id-keyed (reordering lenses won't serve stale observations under the wrong identity). | 30 min |
 | `cc-monitor-injected-{hash,time}-*.txt` | Per-lens idempotency state for the inject hook. | session lifetime |
-| `cc-monitor-budget-<YYYYMMDD>.txt` | Daily LLM call counter; the daily cap accounting. **Never auto-deleted** (resets at local midnight via new file). | 1 day |
+| `pp-budget-<YYYYMMDD>.txt` | Daily LLM call counter; the daily cap accounting. **Never auto-deleted** (resets at local midnight via new file). | 1 day |
 | `last-cycle-payload.json` | Per-cycle privacy log: what was sent to LLMs (byte counts + 500-char previews). | 1 cycle |
 
 ## Memory subsystem (v0.3 Phase 2.3 — off-by-default)
@@ -134,13 +134,13 @@ Update these if you've measured your actual usage and want sharper estimates.
 | `PP_MEMORY_DIR` | `$CLAUDE_DIR/pair-polymath/memory` | Where per-project memory DBs live. |
 | `PP_MEMORY_REDACT` | `1` | Apply `pp_memory_redact_body` at store time + inject time. |
 | `PP_MEMORY_DECAY_PER_DAY` | `0.5` | Activation decay rate per day since last_seen. |
-| `PP_MEMORY_RETRIEVAL_ALPHA` | `0.3` | BM25 weight in hybrid `activation + α × bm25` scoring. |
+| `PP_MEMORY_RETRIEVAL_ALPHA` | `1.0` | BM25 weight in hybrid `activation + α × bm25` scoring. |
 | `PP_MEMORY_ACTIVATION_K` | `15` | Top-K observations injected per cycle. |
 | `PP_MEMORY_INJECT_BODY_CHARS` | `240` | Per-observation body truncation at inject. |
 | `PP_MEMORY_PATTERN_INJECT_K` | `5` | Top-N patterns injected per cycle. |
 | `PP_MEMORY_MAINTENANCE_EVERY_N` | `12` | Run activation-recompute + eviction + pattern-extraction every Nth cycle. |
-| `PP_MEMORY_MAX_BYTES` | `52428800` (50 MB) | DB size budget before eviction fires. |
-| `PP_MEMORY_EVICT_BATCH_SIZE` | `100` | Rows evicted per maintenance pass. |
+| `PP_MEMORY_MAX_BYTES` | `104857600` (100 MB) | DB size budget before eviction fires. |
+| `PP_MEMORY_EVICT_BATCH_SIZE` | `50` | Rows evicted per maintenance pass. |
 | `PP_MEMORY_PATTERN_BATCH_SIZE` | `200` | Observations sampled per pattern-extraction LLM call. |
 | `PP_MEMORY_PATTERNS_MAX` | `1000` | Patterns.jsonl FIFO cap. |
 | `PP_MEMORY_LOCK_STALE_S` | `300` | Maintenance-lock stale-takeover threshold (5 min). |

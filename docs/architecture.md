@@ -26,7 +26,7 @@ sequenceDiagram
   participant User
   participant Claude as Claude Code
   participant Hook as UserPromptSubmit hook
-  participant Cache as ~/.claude/cache/cc-monitor-SESSION-LENS.txt
+  participant Cache as $PP_CACHE_DIR/cc-monitor-SESSION-LENS.txt
 
   User->>Claude: submit prompt
   Claude->>Hook: inject-monitor-insight.sh stdin (session_id)
@@ -52,7 +52,7 @@ lib/
   lens-loader.sh       # parses lenses/*.json with user override
   prompt-loader.sh     # single-pass ${var} substitution (secret-leak guard)
   metrics.sh           # USD rollup → metrics.jsonl (v0.2)
-  doctor.sh            # 12 health checks
+  doctor.sh            # 22 health checks
   audit-log.sh         # installer JSONL audit (v0.2)
 
 lib/memory/             # v0.3 Phase 2.3 — off-by-default memory subsystem
@@ -81,9 +81,9 @@ prompts/
 
 | Path | Owner | Purpose |
 |---|---|---|
-| `settings.json` | Claude Code | statusLine + 2 hooks merged in by `install.sh` |
+| `settings.json` | Claude Code | statusLine + 3 hooks merged in by `install.sh` |
 | `cache/pp-budget-YYYYMMDD.txt` | budget.sh | daily call counter |
-| `cache/pp-budget-YYYYMMDD.txt.lock` | budget.sh | mkdir-style atomic lock |
+| `cache/pp-budget.lock` | budget.sh | mkdir-style atomic lock |
 | `cache/cc-monitor-SESSION-LENS.txt` | statusline.sh | per-lens observation |
 | `cache/cc-monitor-SESSION-LENS-verdict.txt` | statusline.sh | critique PASS/DROP sidecar |
 | `cache/cc-monitor-SESSION-LENS-streak.txt` | statusline.sh | drop-streak counter for escalation |
@@ -98,7 +98,7 @@ prompts/
 
 ## Invariants
 
-1. **Single source of truth for daily budget.** `pp-budget-YYYYMMDD.txt` is mutated only under `${file}.lock` (`mkdir`-based atomic lock). All callers use `budget_inc` / `budget_reserve`.
+1. **Single source of truth for daily budget.** `pp-budget-YYYYMMDD.txt` is mutated only under `pp-budget.lock` (`mkdir`-based atomic lock). All callers use `budget_inc` / `budget_reserve`.
 2. **Cache files are id-keyed**, not numeric-index-keyed. Reordering / disabling lenses cannot serve stale observations under a wrong identity.
 3. **Containment**: `pp_contain_path` realpath-prefix-matches the candidate against cwd. Secret-file / secret-dir denylists reject `.env`, `*.key`, `.ssh/*` etc. even when inside cwd.
 4. **Prompt rendering is single-pass** over placeholders in the ORIGINAL template. A substitution value containing `${X}` is NEVER re-scanned.

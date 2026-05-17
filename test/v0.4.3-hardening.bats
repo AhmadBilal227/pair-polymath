@@ -94,15 +94,15 @@ teardown() { rm -rf "$HOME"; }
 # ============================================================
 
 @test "P1-1 cache clear: chmod 600 the preserved budget files (doctor #17 won't stay yellow)" {
-  : > "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt"
-  chmod 644 "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt"
+  : > "$PP_CACHE_DIR/pp-budget-20260513.txt"
+  chmod 644 "$PP_CACHE_DIR/pp-budget-20260513.txt"
   : > "$PP_CACHE_DIR/cc-monitor-fakesession-ENGINEERING.txt"
   run bash "$PP_ROOT/bin/polymath" cache clear
   [ "$status" -eq 0 ]
-  [ -f "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt" ]
+  [ -f "$PP_CACHE_DIR/pp-budget-20260513.txt" ]
   local _mode
-  _mode=$(stat -c %a "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt" 2>/dev/null \
-    || stat -f %Lp "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt" 2>/dev/null)
+  _mode=$(stat -c %a "$PP_CACHE_DIR/pp-budget-20260513.txt" 2>/dev/null \
+    || stat -f %Lp "$PP_CACHE_DIR/pp-budget-20260513.txt" 2>/dev/null)
   [ "$_mode" = "600" ]
 }
 
@@ -114,14 +114,14 @@ teardown() { rm -rf "$HOME"; }
   : > "$PP_CACHE_DIR/cc-monitor-injected-hash-fakesess-ENGINEERING.txt"
   : > "$PP_CACHE_DIR/cc-monitor-injected-time-fakesess-ENGINEERING.txt"
   : > "$PP_CACHE_DIR/cc-monitor-fakesess-ENGINEERING.txt"
-  : > "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt"
+  : > "$PP_CACHE_DIR/pp-budget-20260513.txt"
   run bash "$PP_ROOT/bin/polymath" cache clear
   [ "$status" -eq 0 ]
   ! [ -f "$PP_CACHE_DIR/cc-monitor-injected-hash-fakesess-ENGINEERING.txt" ]
   ! [ -f "$PP_CACHE_DIR/cc-monitor-injected-time-fakesess-ENGINEERING.txt" ]
   ! [ -f "$PP_CACHE_DIR/cc-monitor-fakesess-ENGINEERING.txt" ]
   # Budget file MUST survive (with mode 600 — also covered by P1-1).
-  [ -f "$PP_CACHE_DIR/cc-monitor-budget-20260513.txt" ]
+  [ -f "$PP_CACHE_DIR/pp-budget-20260513.txt" ]
 }
 
 # ============================================================
@@ -151,7 +151,34 @@ teardown() { rm -rf "$HOME"; }
 @test "docs: README and installer defaults match current hooks and budget" {
   grep -qF 'statusLine + 3 hooks' "$PP_ROOT/README.md"
   grep -qF 'PP_MAX_DAILY_CALLS=10000' "$PP_ROOT/README.md"
+  grep -qF 'PP_MAX_DAILY_CALLS=10000' "$PP_ROOT/docs/cost-model.md"
+  grep -qF '| `PP_MAX_DAILY_CALLS` | `10000` |' "$PP_ROOT/docs/customization.md"
   grep -qF 'default 10000' "$PP_ROOT/bin/install.sh"
+  grep -qF '22 health checks' "$PP_ROOT/CLAUDE.md"
+  ! grep -qF '~247 tests' "$PP_ROOT/CLAUDE.md"
+  ! grep -qF '12 health checks' "$PP_ROOT/CLAUDE.md"
+  ! grep -qF 'bats-862' "$PP_ROOT/README.md"
+  ! grep -qF '862/862 bats green' "$PP_ROOT/README.md"
+  ! grep -qF 'PP_MAX_DAILY_CALLS=3500' "$PP_ROOT/docs/cost-model.md"
+}
+
+@test "docs: selected memory defaults match config/default.env" {
+  local _alpha _max _batch
+  _alpha=$(grep '^PP_MEMORY_RETRIEVAL_ALPHA=' "$PP_ROOT/config/default.env" | head -1 | sed 's/^[^=]*=//; s/[[:space:]].*$//')
+  _max=$(grep '^PP_MEMORY_MAX_BYTES=' "$PP_ROOT/config/default.env" | head -1 | sed 's/^[^=]*=//; s/[[:space:]].*$//')
+  _batch=$(grep '^PP_MEMORY_EVICT_BATCH_SIZE=' "$PP_ROOT/config/default.env" | head -1 | sed 's/^[^=]*=//; s/[[:space:]].*$//')
+  grep -qF "| \`PP_MEMORY_RETRIEVAL_ALPHA\` | \`$_alpha\` |" "$PP_ROOT/docs/customization.md"
+  grep -qF "| \`PP_MEMORY_MAX_BYTES\` | \`$_max\`" "$PP_ROOT/docs/customization.md"
+  grep -qF "| \`PP_MEMORY_EVICT_BATCH_SIZE\` | \`$_batch\` |" "$PP_ROOT/docs/customization.md"
+}
+
+@test "docs: support policy tracks current major/minor line" {
+  local _version _minor
+  _version=$(cat "$PP_ROOT/VERSION")
+  _minor=$(printf '%s' "$_version" | awk -F. '{printf "v%s.%s.x", $1, $2}')
+  grep -qF "| $_minor" "$PP_ROOT/SECURITY.md"
+  grep -qF "current $_minor line" "$PP_ROOT/docs/security.md"
+  ! grep -qF 'v0.1.x-alpha' "$PP_ROOT/SECURITY.md"
 }
 
 # ============================================================

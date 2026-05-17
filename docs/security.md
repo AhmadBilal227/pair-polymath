@@ -3,7 +3,7 @@
 The repo-level [SECURITY.md](../SECURITY.md) covers the formal policy:
 
 - **Reporting**: GitHub's private vulnerability reporting form
-- **Supported versions**: v0.1.x-alpha and later
+- **Supported versions**: current v0.5.x line
 - **Threat model**: what leaves your machine, what doesn't
 
 This doc is the operational companion — what you, the user, can verify yourself.

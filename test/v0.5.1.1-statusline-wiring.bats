@@ -129,6 +129,11 @@ EOF
   printf '{"session_id":"lens-gate-empty","workspace":{"current_dir":"%s"},"model":{"display_name":"S"},"transcript_path":"%s","cost":{"total_cost_usd":0.0}}\n' \
     "$PP_REPO" "$PP_TX" > "$stdin_empty"
 
+  printf 'UX: stale hook that must not survive gate filtering|||This stale body is long enough to prove the cache was cleared.\n' \
+    > "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-UX_DESIGN.txt"
+  printf 'BIZ: stale hook that must not survive gate filtering|||This stale body is long enough to prove the cache was cleared.\n' \
+    > "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-PRODUCT_BIZ.txt"
+
   bash "$PP_ROOT/bin/statusline.sh" < "$stdin_empty" >/dev/null 2>&1 || true
 
   facts="$PP_CACHE_DIR/cc-monitor-facts-lens-gate-empty.txt"
@@ -142,8 +147,12 @@ EOF
   [ -f "$shadow" ]
   [ ! -d "$lock" ]
 
-  [ ! -f "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-UX_DESIGN.txt" ]
-  [ ! -f "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-PRODUCT_BIZ.txt" ]
+  [ ! -s "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-UX_DESIGN.txt" ]
+  [ ! -s "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-PRODUCT_BIZ.txt" ]
+  grep -qF '# v2: outcome=silent' "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-UX_DESIGN-verdict.txt"
+  grep -qF '# v2: silent_reason=no_eligible_surface' "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-UX_DESIGN-verdict.txt"
+  grep -qF '# v2: outcome=silent' "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-PRODUCT_BIZ-verdict.txt"
+  grep -qF '# v2: silent_reason=no_eligible_surface' "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-PRODUCT_BIZ-verdict.txt"
   grep -F '"lens_id":"UX_DESIGN"' "$shadow" | grep -qF '"would_be_ineligible":1'
   grep -F '"lens_id":"PRODUCT_BIZ"' "$shadow" | grep -qF '"would_be_ineligible":1'
 }

@@ -92,6 +92,27 @@ _pp_write_verdict_v2() {
   return 0
 }
 
+_pp_truncate_file_atomic() {
+  local _file="$1" _tmp
+  mkdir -p "$(dirname "$_file")" 2>/dev/null || true
+  _tmp=$(mktemp "${_file}.XXXXXX" 2>/dev/null) || return 1
+  : > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+  mv "$_tmp" "$_file" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+}
+
+_pp_write_silent_no_eligible_verdict_v2() {
+  local _file="$1" _lens_idx="$2" _tmp
+  mkdir -p "$(dirname "$_file")" 2>/dev/null || true
+  _tmp=$(mktemp "${_file}.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf 'lens%s: SILENT -- lens gate found no eligible surface\n' "$_lens_idx"
+    printf '# v2: schema_version=2\n'
+    printf '# v2: outcome=silent\n'
+    printf '# v2: silent_reason=no_eligible_surface\n'
+  } > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+  mv "$_tmp" "$_file" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+}
+
 # _pp_verdict_v2_field FILE KEY
 # Reads a KEY=value token from any "# v2:" trailer line. KEY is restricted to
 # shell-ish field names because it is interpolated into a small regex.
@@ -772,7 +793,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
 
       # Last test/lint run captured by cache-test-result.sh PostToolUse hook
       test_state=""
-      test_cache_file="${HOME}/.claude/cache/cc-test-${session_id}.cache"
+      test_cache_file="${PP_CACHE_DIR}/cc-test-${session_id}.cache"
       if [ -f "$test_cache_file" ]; then
         test_age=$(($(date +%s) - $(pp_mtime "$test_cache_file" || echo 0)))
         if [ "$test_age" -lt 1800 ]; then
@@ -819,7 +840,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
           repo_key=$(echo "$repo_root" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -d' ' -f1 | head -c 12)
 
           # PR list — fire-and-forget refresh, read latest cached
-          pr_cache="${HOME}/.claude/cache/cc-pr-detail-${repo_key}.cache"
+          pr_cache="${PP_CACHE_DIR}/cc-pr-detail-${repo_key}.cache"
           pr_age=$(($(date +%s) - $(pp_mtime "$pr_cache" || echo 0)))
           if [ ! -f "$pr_cache" ] || [ "$pr_age" -gt 600 ]; then
             # FIX (advisor #3): atomic write — tmp file + mv
@@ -830,7 +851,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
           [ -f "$pr_cache" ] && gh_prs=$(cat "$pr_cache" 2>/dev/null | head -10)
 
           # CI run list — fire-and-forget refresh, 5min TTL
-          ci_cache="${HOME}/.claude/cache/cc-ci-${repo_key}.cache"
+          ci_cache="${PP_CACHE_DIR}/cc-ci-${repo_key}.cache"
           ci_age=$(($(date +%s) - $(pp_mtime "$ci_cache" || echo 0)))
           if [ ! -f "$ci_cache" ] || [ "$ci_age" -gt 300 ]; then
             # FIX (advisor #3): atomic write — tmp file + mv
@@ -850,8 +871,8 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
       # missed by R1 (Ralph R2 H/L2: Ubuntu has only sha1sum, would silently
       # produce empty project_key → all projects collide on history files).
       project_key=$(echo "$cwd" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -d' ' -f1 | head -c 12)
-      HIST_FILE_PROJECT="${HOME}/.claude/cache/cc-monitor-history-project-${project_key}.txt"
-      HIST_FILE_SESSION="${HOME}/.claude/cache/cc-monitor-history-${session_id}.txt"
+      HIST_FILE_PROJECT="${PP_CACHE_DIR}/cc-monitor-history-project-${project_key}.txt"
+      HIST_FILE_SESSION="${PP_CACHE_DIR}/cc-monitor-history-${session_id}.txt"
       prev_session=$(tail -10 "$HIST_FILE_SESSION" 2>/dev/null)
       prev_project=$(tail -20 "$HIST_FILE_PROJECT" 2>/dev/null)
       prev_observations=$(printf "%s\n%s" "$prev_session" "$prev_project" | sort -u | head -25)
@@ -1291,6 +1312,36 @@ EOF
           _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         fi
 
+        # Current-cycle lens state boundary. cc-monitor-<session>-<lens>.txt
+        # is consumed by critique, memory, eval, display, and injection as
+        # "this cycle's observation"; once gates/router can skip a lens, stale
+        # contents from a prior cycle must not survive. Clear every lens slot
+        # before fan-out, then stamp explicit no_eligible_surface SILENT
+        # verdicts for lenses the active gate proved ineligible.
+        for _pp_cycle_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
+          _pp_cycle_lens="${PP_LENS_IDS[$_pp_cycle_idx]}"
+          [ -z "$_pp_cycle_lens" ] && continue
+          _pp_cycle_cache="${PP_CACHE_DIR}/cc-monitor-${session_id}-${_pp_cycle_lens}.txt"
+          _pp_cycle_verdict="${PP_CACHE_DIR}/cc-monitor-${session_id}-${_pp_cycle_lens}-verdict.txt"
+          _pp_truncate_file_atomic "$_pp_cycle_cache" 2>/dev/null \
+            || : > "$_pp_cycle_cache" 2>/dev/null || true
+          rm -f "$_pp_cycle_verdict" 2>/dev/null || true
+
+          if [ "${_pp_lens_gates_final_filter:-0}" = "1" ] \
+              && ! printf '%s\n' "$_pp_router_picked" | LC_ALL=C grep -qxF "$_pp_cycle_lens"; then
+            _pp_cycle_elig_var="PP_LENS_ELIGIBLE_${_pp_cycle_lens}"
+            _pp_cycle_elig=""
+            case "$_pp_cycle_elig_var" in
+              *[!A-Za-z0-9_]*|'') ;;
+              *) eval "_pp_cycle_elig=\${${_pp_cycle_elig_var}:-}" ;;
+            esac
+            if [ "$_pp_cycle_elig" = "0" ]; then
+              _pp_write_silent_no_eligible_verdict_v2 \
+                "$_pp_cycle_verdict" "$_pp_cycle_idx" 2>/dev/null || true
+            fi
+          fi
+        done
+
         # R1: mark that this cycle did real analyst work. Only cycles with
         # _pp_analyst_ran=1 are SLO-eligible — skipped cycles (budget
         # exhausted / idle / no grounding / no llm) emit eligible:0 KPI rows
@@ -1324,7 +1375,7 @@ EOF
           # v0.5.1: threshold is env-tunable. Default 3 preserves v0.5.0 byte-identity;
           # v0.5.1.1 plans to raise default to 5 alongside lens persona changes (clean
           # attribution of the two effects).
-          lens_streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_group}-streak.txt"
+          lens_streak_file="${PP_CACHE_DIR}/cc-monitor-${session_id}-${lens_group}-streak.txt"
           lens_streak=$(cat "$lens_streak_file" 2>/dev/null || echo 0)
           is_escalated=0
           [ "$lens_streak" -ge "${PP_ESCALATION_STREAK_THRESHOLD:-3}" ] \
@@ -1419,7 +1470,7 @@ $lens_evidence"
             # (saves one critique LLM call per silent lens). The verdict file
             # is the cross-subshell signal — subshell-local variables would
             # not survive the `( ... ) &` boundary.
-            _pp_v2_verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_group}-verdict.txt"
+            _pp_v2_verdict_file="${PP_CACHE_DIR}/cc-monitor-${session_id}-${lens_group}-verdict.txt"
             # When flag is ON and this is NOT SILENT, clear any stale
             # outcome=silent/drop marker from a previous cycle so the
             # critique loop doesn't skip a real observation this cycle.
@@ -1477,12 +1528,12 @@ $lens_evidence"
           # ran inside `( ... ) &`, so subshell-local state cannot reach us.
           # Flag-off path is byte-identical: the helper never writes when
           # PP_SILENT_V2_ACTIVE=0, so no verdict file exists → skip never fires.
-          _pp_v2_check="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
+          _pp_v2_check="${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}-verdict.txt"
           if [ -f "$_pp_v2_check" ] \
             && grep -qE '^# v2: outcome=(silent|drop)$' "$_pp_v2_check" 2>/dev/null; then
             continue
           fi
-          cf="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
+          cf="${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}.txt"
           if [ -f "$cf" ] && [ -s "$cf" ]; then
             obs_short=$(head -1 "$cf" | head -c 500)   # cap each lens at 500 chars
             # Critique protocol still uses lensN: tokens (not filesystem names) so the
@@ -1647,8 +1698,8 @@ EOF
             for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
               ci_id="${PP_LENS_IDS[$ci]}"
               verdict=$(echo "$critique_output" | grep -E "^lens${ci}:" | head -1)
-              verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
-              streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-streak.txt"
+              verdict_file="${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}-verdict.txt"
+              streak_file="${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}-streak.txt"
               if [ -n "$verdict" ]; then
                 # v0.5.1.1 Stage C: per-invocation DUAL hash trailer.
                 # canonical_allowlist_sha8_prompt = sha8 of the FILE-READ
@@ -1686,7 +1737,7 @@ EOF
                   # address — retry stdin was byte-identical to primary stdin and
                   # the failed observation never reached the retry model, making
                   # retry a lottery re-roll instead of corrective feedback.
-                  _pp_lens_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
+                  _pp_lens_cache="${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}.txt"
                   _pp_failed_output=""
                   [ -f "$_pp_lens_cache" ] && _pp_failed_output=$(head -1 "$_pp_lens_cache" 2>/dev/null)
 
@@ -1788,7 +1839,7 @@ EOF
                     # Atomic write — matches the primary path's pattern
                     # (Ralph round 2 BUG 3). Display reads via `head -1`
                     # can't race a half-written torn line.
-                    _pp_retry_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
+                    _pp_retry_cache="${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}.txt"
                     printf '%s\n' "$retry_result" > "${_pp_retry_cache}.tmp" 2>/dev/null \
                       && mv "${_pp_retry_cache}.tmp" "$_pp_retry_cache" 2>/dev/null
                     echo "${verdict} (retry accepted)" > "$verdict_file"
@@ -1813,7 +1864,7 @@ EOF
                      && command -v pp_halluc_verify_citations >/dev/null 2>&1; then
                     _pp_halluc_paths=$(printf '%s\n' "${_pp_valid_paths:-}")
                     _pp_halluc_syms=$(printf '%s\n' "${_pp_valid_symbols:-}")
-                    _pp_halluc_body=$(head -1 "${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt" 2>/dev/null)
+                    _pp_halluc_body=$(head -1 "${PP_CACHE_DIR}/cc-monitor-${session_id}-${ci_id}.txt" 2>/dev/null)
                     # GPT-review #2: silence BOTH stdout and stderr. The
                     # verifier is contractually side-effect-free, but a
                     # bug or shell-trace leak would otherwise corrupt
@@ -2035,7 +2086,7 @@ EOF
         for _pp_kpi_lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
           _pp_kpi_lens_id="${PP_LENS_IDS[$_pp_kpi_lens_idx]}"
           [ -z "$_pp_kpi_lens_id" ] && continue
-          _pp_kpi_verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${_pp_kpi_lens_id}-verdict.txt"
+          _pp_kpi_verdict_file="${PP_CACHE_DIR}/cc-monitor-${session_id}-${_pp_kpi_lens_id}-verdict.txt"
 
           # eligible_count: Stage D stamps PP_LENS_ELIGIBLE_<id> earlier in
           # the same statusline cycle. Track "known" separately so missing
@@ -2209,7 +2260,7 @@ EOF
       # retry_acceptance_rate: count "(retry accepted)" verdict files for this
       # session vs total retries this cycle. Best-effort; 0 when no retries.
       _pp_kpi_retry_accepted=$(grep -l 'retry accepted' \
-        "${HOME}/.claude/cache/cc-monitor-${session_id}-"*-verdict.txt 2>/dev/null \
+        "${PP_CACHE_DIR}/cc-monitor-${session_id}-"*-verdict.txt 2>/dev/null \
         | wc -l | tr -d ' ' 2>/dev/null || printf '0')
       case "$_pp_kpi_retry_accepted" in ''|*[!0-9]*) _pp_kpi_retry_accepted=0 ;; esac
       _pp_kpi_accept_rate=$(LC_ALL=C awk -v a="$_pp_kpi_retry_accepted" -v t="$_pp_kpi_retry_count" \

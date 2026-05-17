@@ -56,6 +56,7 @@ pp_load_lenses() {
         ((.extras.system_prompt_addition // "") | b64),
         ((.extras.examples // []) | join("\n") | b64),
         ((.extras.silent_example // "") | b64),
+        ((.extras.silent_reasons // []) | join("") | b64),
         $src
       ]
       | @tsv
@@ -70,6 +71,7 @@ pp_load_lenses() {
   PP_LENS_SYSTEM_PROMPT_ADDITION=()
   PP_LENS_EXAMPLES=()
   PP_LENS_SILENT_EXAMPLE=()
+  PP_LENS_SILENT_REASONS=()
 
   # Dedupe by id (last entry wins → user overrides built-in), then sort by
   # display_order with id as stable tiebreak. Re-emit with \x1f between
@@ -88,7 +90,7 @@ pp_load_lenses() {
   ' "$tmp" | sort -t $'\x1f' -k1,1n -k2,2 | cut -d $'\x1f' -f3-)
 
   local loaded=0
-  while IFS=$'\x1f' read -r order id hats focus color enabled sys_b64 ex_b64 silent_b64 src; do
+  while IFS=$'\x1f' read -r order id hats focus color enabled sys_b64 ex_b64 silent_b64 silent_reasons_b64 src; do
     [ -z "$id" ] && continue
     [ "$enabled" = "false" ] && continue
     if [ "$loaded" -ge "$max" ]; then
@@ -127,6 +129,11 @@ $silent_example"
     PP_LENS_SYSTEM_PROMPT_ADDITION+=("$sys_prompt")
     PP_LENS_EXAMPLES+=("$examples")
     PP_LENS_SILENT_EXAMPLE+=("$silent_example")
+    local silent_reasons=""
+    if [ -n "$silent_reasons_b64" ]; then
+      silent_reasons=$(printf '%s' "$silent_reasons_b64" | base64 -d 2>/dev/null)
+    fi
+    PP_LENS_SILENT_REASONS+=("$silent_reasons")
     loaded=$((loaded + 1))
   done <<< "$awk_out"
 

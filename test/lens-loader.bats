@@ -139,6 +139,34 @@ JSON
   [ -z "${PP_LENS_EXAMPLES[$last]}" ]
 }
 
+@test "loader: silent_reasons array parsed into PP_LENS_SILENT_REASONS (\\x1f-joined)" {
+  pp_load_lenses
+  # All 7 built-in lenses MUST declare silent_reasons (closed-enum invariant).
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ -n "${PP_LENS_SILENT_REASONS[$i]}" ] \
+      || { echo "lens ${PP_LENS_IDS[$i]} missing silent_reasons"; return 1; }
+  done
+}
+
+@test "loader: lens with no silent_reasons defaults to empty string (no crash)" {
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  cat > "$HOME/.claude/pair-polymath/lenses/01-ux-design.json" <<'JSON'
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["UX"],
+  "focus": "f",
+  "color_hex": "#000",
+  "enabled": true,
+  "extras": {}
+}
+JSON
+  pp_load_lenses
+  [ "${PP_LENS_IDS[0]}" = "UX_DESIGN" ]
+  [ -z "${PP_LENS_SILENT_REASONS[0]}" ]
+}
+
 @test "loader: stable tiebreak when display_order ties" {
   mkdir -p "$HOME/.claude/pair-polymath/lenses"
   # Inject 2 user lenses both with display_order=100 — verify deterministic id-ascending order

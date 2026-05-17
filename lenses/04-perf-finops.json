@@ -17,6 +17,7 @@
       "FINOPS: gpt-5.5 used for the digest (4K-token reply, ~$0.04 each)|||tip-digest call uses PP_MODEL_DEEP for a summarization that gpt-5-mini handles fine. Switch tip-digest to mini; cap input at 1500 tokens.",
       "PERF: Cache stampede risk on /feed — single 5-min TTL, no jitter|||When the key expires, 100 concurrent requests all rebuild. Add +/-10% jitter and a single-flight lock; verify with a load test."
     ],
-    "silent_example": "(grounded facts show only docs/README edits with no perf-sensitive code → SILENT)"
+    "silent_example": "(grounded facts show only docs/README edits with no perf-sensitive code → SILENT)",
+    "silent_reasons": ["no_code_surface", "no_hot_path_touched", "no_io_or_query_changes", "docs_only_cycle"]
   }
 }

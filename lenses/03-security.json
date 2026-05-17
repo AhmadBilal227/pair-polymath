@@ -16,6 +16,7 @@
       "SEC: .env.production untracked but readable by build container|||git status shows .env.production at repo root with mode 0644; build pipeline cats it into logs. Move secret to CI vault and chmod 0600.",
       "SEC: Trust boundary violated — admin flag from client JWT|||api/admin/route.ts trusts payload.isAdmin without DB recheck. Server must look up the role; never trust client-supplied scopes."
     ],
-    "silent_example": "(grounded facts show only typo fixes in comments, no trust-boundary surface → SILENT)"
+    "silent_example": "(grounded facts show only typo fixes in comments, no trust-boundary surface → SILENT)",
+    "silent_reasons": ["no_code_surface", "no_auth_or_crypto_touched", "no_user_input_paths", "docs_only_cycle"]
   }
 }

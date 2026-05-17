@@ -19,6 +19,7 @@
       "BACKEND: Invariant 'order has at least one line item' not enforced|||OrderRepo.create accepts an empty items array; downstream invoice job panics on items[0]. Add a guard at construction.",
       "DEVOPS: CI publishes from any branch, not just main|||release.yml:on.push.branches is '*'. Tag pushes from a feature branch ship to prod. Restrict to main + verify with a dry-run job."
     ],
-    "silent_example": "(grounded facts show only marketing-copy edits with no code paths → SILENT)"
+    "silent_example": "(grounded facts show only marketing-copy edits with no code paths → SILENT)",
+    "silent_reasons": ["no_code_surface", "docs_only_cycle", "no_meaningful_diff"]
   }
 }

@@ -18,6 +18,7 @@
       "FOCUS: One-way door — public API surface shipped without versioning|||/api/v1 went live in 2 PRs with no deprecation policy; rollback costs grow daily. Add a version header and write a kill-criteria doc before the next /v1 PR.",
       "OPPORTUNITY: Two open PRs older than 14 days — Hofstadter's Law in action|||Both touch the same module; each blocks the other. Force a merge or close decision today; do not start a third PR on that module."
     ],
-    "silent_example": "(grounded facts show only a 2-line bugfix on a finished feature → SILENT)"
+    "silent_example": "(grounded facts show only a 2-line bugfix on a finished feature → SILENT)",
+    "silent_reasons": ["no_strategic_angle", "low_signal_cycle"]
   }
 }

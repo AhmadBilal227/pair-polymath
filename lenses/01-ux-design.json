@@ -18,6 +18,7 @@
       "A11Y: Custom dropdown traps keyboard focus on Esc|||MultiSelect.tsx onKeyDown swallows Escape without restoring focus to trigger; screen-reader users get stuck. Fix focus return.",
       "VISUAL: Error microcopy says what failed, not how to recover|||LoginScreen.tsx renders 'Invalid input' for 6 distinct cases. Replace with field-scoped guidance that ends in a verb the user can act on."
     ],
-    "silent_example": "(grounded facts contain only backend handler diffs with no UI/route surface → SILENT)"
+    "silent_example": "(grounded facts contain only backend handler diffs with no UI/route surface → SILENT)",
+    "silent_reasons": ["no_ui_surface", "no_copy_change", "no_route_or_screen", "backend_only_cycle"]
   }
 }

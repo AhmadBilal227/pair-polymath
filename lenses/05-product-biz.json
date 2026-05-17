@@ -19,6 +19,7 @@
       "BIZ: No usage metric tied to the pricing line item|||Plan 'Pro' charges per seat but logs no per-seat activity; you can't defend the price at renewal. Add a daily-active-user counter; surface in admin.",
       "MARKET: Competitor shipped public sharable reports last week|||Without an unauthenticated share URL the artifact stays invisible. Add a read-only share token; verify activation lifts via cohort."
     ],
-    "silent_example": "(grounded facts contain only test refactors, no user-facing product surface → SILENT)"
+    "silent_example": "(grounded facts contain only test refactors, no user-facing product surface → SILENT)",
+    "silent_reasons": ["no_ui_surface", "no_user_facing_change", "no_pricing_or_funnel_touched", "backend_only_cycle"]
   }
 }

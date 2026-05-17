@@ -96,6 +96,11 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/auto-rollback.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/lens-loader.sh"
+# v0.5.1.1 Stage B Task 5 — SILENT-V2 pre-critique handler. Function-only
+# at top level; the helper short-circuits and returns 1 when
+# PP_SILENT_V2_ACTIVE=0 (default), preserving v0.5.1.0 byte-identity.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/silent-v2.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/grounding.sh"
 # shellcheck disable=SC1091
@@ -1220,22 +1225,46 @@ $lens_evidence"
               lens_suggestion=$(printf "%s" "$lens_grounded" | run_llm 60 -m "$agent_model" -s "$analyst_prompt" 2>/dev/null)
             fi
 
-            # Validate + write per-lens cache
-            if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
-              if echo "$lens_suggestion" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
-                # Atomic write: tmp+mv so the display path's `head -1` can't
-                # catch a half-written line (Ralph round 2 BUG 3 + Code-rev M2).
-                # Inconsistent with the rest of the file — TIP_CACHE and PR/CI
-                # caches already use this pattern at lines ~343, ~495, ~506.
-                printf '%s\n' "$lens_suggestion" > "${PP_CACHE_LENS}.tmp" 2>/dev/null \
-                  && mv "${PP_CACHE_LENS}.tmp" "$PP_CACHE_LENS" 2>/dev/null
-                # Append to histories (session + project) — appends are atomic on POSIX
-                echo "$lens_suggestion" >> "$HIST_FILE_SESSION"
-                echo "$lens_suggestion" >> "$HIST_FILE_PROJECT"
-              fi
-              # malformed → keep previous cache content untouched
+            # v0.5.1.1 Stage B (Task 5) — SILENT-V2 pre-critique recognition.
+            # Flag off (PP_SILENT_V2_ACTIVE=0) → helper returns 1, legacy
+            # SILENT-as-noop path runs unchanged (byte-identity preserved).
+            # Flag on + SILENT → helper writes v2 verdict file; the critique
+            # input builder below reads outcome=silent and skips this lens
+            # (saves one critique LLM call per silent lens). The verdict file
+            # is the cross-subshell signal — subshell-local variables would
+            # not survive the `( ... ) &` boundary.
+            _pp_v2_verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_group}-verdict.txt"
+            # When flag is ON and this is NOT SILENT, clear any stale
+            # outcome=silent/drop marker from a previous cycle so the
+            # critique loop doesn't skip a real observation this cycle.
+            if [ "${PP_SILENT_V2_ACTIVE:-0}" = "1" ] \
+                && [ "$lens_suggestion" != "SILENT" ] \
+                && case "$lens_suggestion" in "SILENT: "*) false ;; *) true ;; esac \
+                && [ -f "$_pp_v2_verdict_file" ] \
+                && grep -qE '^# v2: outcome=(silent|drop)$' "$_pp_v2_verdict_file" 2>/dev/null; then
+              rm -f "$_pp_v2_verdict_file" 2>/dev/null
             fi
-            # SILENT → don't overwrite (keep previous valid observation)
+            if pp_silent_v2_record_verdict "$lens_idx" "$_pp_v2_verdict_file" "$lens_suggestion"; then
+              : # SILENT/invalid-reason recorded — observation cache untouched.
+            else
+              # Not SILENT (or flag off) — legacy validate + write path.
+              # Validate + write per-lens cache
+              if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
+                if echo "$lens_suggestion" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
+                  # Atomic write: tmp+mv so the display path's `head -1` can't
+                  # catch a half-written line (Ralph round 2 BUG 3 + Code-rev M2).
+                  # Inconsistent with the rest of the file — TIP_CACHE and PR/CI
+                  # caches already use this pattern at lines ~343, ~495, ~506.
+                  printf '%s\n' "$lens_suggestion" > "${PP_CACHE_LENS}.tmp" 2>/dev/null \
+                    && mv "${PP_CACHE_LENS}.tmp" "$PP_CACHE_LENS" 2>/dev/null
+                  # Append to histories (session + project) — appends are atomic on POSIX
+                  echo "$lens_suggestion" >> "$HIST_FILE_SESSION"
+                  echo "$lens_suggestion" >> "$HIST_FILE_PROJECT"
+                fi
+                # malformed → keep previous cache content untouched
+              fi
+              # SILENT with flag off → don't overwrite (legacy noop preserved).
+            fi
           ) &
           _pp_analyst_pids+=("$!")
         done
@@ -1254,6 +1283,19 @@ $lens_evidence"
         critique_input=""
         for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
           ci_id="${PP_LENS_IDS[$ci]}"
+          # v0.5.1.1 Stage B (Task 5) — skip critique for lenses already
+          # resolved to SILENT (or invalid_silent_reason DROP) by the
+          # SILENT-V2 helper. The verdict file is authoritative; running
+          # critique would waste a call and may clobber the v2 verdict with
+          # a v1 line. We check via the on-disk marker because the analyst
+          # ran inside `( ... ) &`, so subshell-local state cannot reach us.
+          # Flag-off path is byte-identical: the helper never writes when
+          # PP_SILENT_V2_ACTIVE=0, so no verdict file exists → skip never fires.
+          _pp_v2_check="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
+          if [ -f "$_pp_v2_check" ] \
+            && grep -qE '^# v2: outcome=(silent|drop)$' "$_pp_v2_check" 2>/dev/null; then
+            continue
+          fi
           cf="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
           if [ -f "$cf" ] && [ -s "$cf" ]; then
             obs_short=$(head -1 "$cf" | head -c 500)   # cap each lens at 500 chars

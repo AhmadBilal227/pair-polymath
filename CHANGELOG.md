@@ -3,6 +3,42 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.1.1] — TBD
+
+The **planner / grounding fix release**. Persona work was the wrong target — the 26-cycle data showed 63-81% of DROPs were plumbing artifacts: lenses cited symbols not in the validator's allowlist, lenses fanned out into cycles with no in-scope surface, and SILENT was getting scored as DROP instead of as a legitimate non-observation. v0.5.1.1 fixes the plumbing; persona work moves to v0.5.1.2.
+
+Four independent kill-switches (all default OFF — shadow-by-default per spec rollout playbook):
+
+- `PP_LENS_GATES_TELEMETRY` (Stage A) — emits `canonical_allowlist_sha8` + `rendered_prompt_sha8` verdict trailers, the 7 new KPI fields per cycle, and the `would_be_ineligible` counterfactual stamped on PASSes. Pure shadow signal — no behavior change. Schema-version constants (`PP_VERDICT_SCHEMA_VERSION=2`, `PP_OAR_SCHEMA_VERSION=2`, `PP_FACTS_SCHEMA_VERSION=2`, `PP_KPI_SCHEMA_VERSION=2`) ship unconditionally so v1 readers in the 30-day cutover window route per-row.
+- `PP_SILENT_V2_ACTIVE` (Stage B) — SILENT recognised at the analyst-output level BEFORE critique runs; closed-enum `silent_reason` per lens; OAR labeler maps `outcome=silent`. Skips the critique LLM call for silent lenses (cost win). Auto-rollback: set 0 if any `silent_reason` fails enum validation >1% of attempts in 24h.
+- `PP_INVENTORY_UNIFY_ACTIVE` (Stage C) — prompt-side SYMBOL REFERENCE COUNTS becomes FILE-READ-derived (identical to validator's allowlist); grep hits move to a new NEARBY MENTIONS (NOT CITABLE) section. New `PP_SYMBOL_INVENTORY_TOP_N=80` deterministic-sort cap stabilises `rendered_prompt_sha8` across cycles on large files. Auto-rollback: set 0 if `drift_count > 0` (doctor check #22 fires).
+- `PP_LENS_GATES_ACTIVE` (Stage D) — `pp_router_pick_lenses` filters out lenses whose `eligibility` JSON block fails for the current snapshot (bash-3.2-portable glob engine; gitless fallback); replacements drawn from the next-ranked eligible lens. Auto-rollback: set 0 if `no_eligible_surface` skip rate >5% of cycles in 24h, or if any 7-lens cycle ever evaluates to 0 eligible.
+
+### Added
+
+- `lib/lens-loader.sh` — `eligibility` JSON parsing + `pp_lens_glob_to_regex` bash-3.2-portable glob-to-regex helper.
+- 7 lens JSON files populated with `eligibility` blocks (UX cares about UI surfaces, ENGINEERING about code, STRATEGIC_FOUNDER always eligible, etc.).
+- `lib/metrics.sh` KPI cycle emitter extended with 7 per-lens fields (canonical_allowlist_sha8, rendered_prompt_sha8, drift_count, would_be_ineligible, no_eligible_surface_skips, …).
+- Prompt-side SYMBOL block unified with validator allowlist (dual-hash verdict trailer) when `PP_INVENTORY_UNIFY_ACTIVE=1`.
+- `bin/polymath lens-gates {status,enable <flag>,disable <flag>}` — operator surface mirroring `polymath retry-router` shape. Closed allowlist (the four flags above) enforced as a security boundary; arbitrary env-var writes via this CLI rejected with exit 2.
+- Doctor check #22 — `drift_count` invariant alarm fires when `canonical_allowlist_sha8 != rendered_prompt_sha8` (catches the Stage C unify regressing silently).
+
+### Operator surface
+
+```bash
+polymath lens-gates status                          # show current values of all 4 flags
+polymath lens-gates enable PP_LENS_GATES_TELEMETRY  # turn on shadow telemetry first
+polymath lens-gates enable PP_INVENTORY_UNIFY_ACTIVE
+polymath lens-gates enable PP_SILENT_V2_ACTIVE
+polymath lens-gates enable PP_LENS_GATES_ACTIVE     # flip on the eligibility router last
+```
+
+Per spec [R3 — three independent kill-switches]: each Change can be reverted without losing the benefit of the others. If SILENT-V2 regresses, flip `PP_SILENT_V2_ACTIVE=0`; the inventory unify and eligibility gates stay live.
+
+### Spec + plan refs
+
+Spec: `docs/v0.5.1.1-planner-grounding-fix-spec.md` (3-round GPT reviewed; green-lit). Plan: `docs/superpowers/plans/2026-05-17-v0.5.1.1-planner-grounding-fix.md` (Stages A-D, ~20 plan-tasks).
+
 ## [0.5.2.0] — 2026-05-17
 
 The **OAR-foundation + hallucination-gate release**. Ships the measurement plumbing for Observation-Action-Rate (acted / referenced / pushed-back / ignored) plus a shadow-by-default hallucination verifier that flags non-existent code citations after PASS. ALL NEW FLAGS DEFAULT OFF — STDOUT byte-identical to v0.5.1.0 until user opts in.

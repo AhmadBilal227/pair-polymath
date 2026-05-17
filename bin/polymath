@@ -524,6 +524,82 @@ USAGE
     esac
     ;;
 
+  lens-gates)
+    # v0.5.1.1 Stage D (Task 14b) — operator surface for the four
+    # planner-grounding kill-switches. Mirrors `polymath retry-router`
+    # ergonomics: status (default) reads current values from user.env;
+    # enable/disable mutate via _pp_set_user_env_var (the existing
+    # symlink-aware atomic helper at bin/polymath:45).
+    #
+    # SECURITY BOUNDARY: closed allowlist of writable flags. Without it,
+    # a caller could pivot this CLI into arbitrary env-var writes —
+    # e.g. set PP_EXTERNAL_LLM=1 to bypass `polymath disable`, or unset
+    # safety limits. Unknown flag names are rejected with exit 2.
+    shift
+    _pp_lg_subcmd="${1:-status}"
+    _pp_lg_known="PP_LENS_GATES_TELEMETRY PP_INVENTORY_UNIFY_ACTIVE PP_SILENT_V2_ACTIVE PP_LENS_GATES_ACTIVE"
+    case "$_pp_lg_subcmd" in
+      status)
+        # Source user.env if present so current values reflect overlay,
+        # not just baked-in defaults. config/default.env has already been
+        # sourced by lib/config.sh on shell entry; user.env is the
+        # operator-mutated overlay we're inspecting.
+        _pp_lg_user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
+        if [ -f "$_pp_lg_user_env" ]; then
+          # shellcheck disable=SC1090
+          . "$_pp_lg_user_env" 2>/dev/null || true
+        fi
+        printf '\nPair Polymath — lens gates (v0.5.1.1)\n\n'
+        printf '  PP_LENS_GATES_TELEMETRY:   %s   (shadow signal — all 7 KPI fields + would_be_ineligible)\n' \
+          "${PP_LENS_GATES_TELEMETRY:-0}"
+        printf '  PP_INVENTORY_UNIFY_ACTIVE: %s   (prompt block switches to FILE-READ-only + NEARBY MENTIONS)\n' \
+          "${PP_INVENTORY_UNIFY_ACTIVE:-0}"
+        printf '  PP_SILENT_V2_ACTIVE:       %s   (SILENT recognised pre-critique; closed-enum silent_reason)\n' \
+          "${PP_SILENT_V2_ACTIVE:-0}"
+        printf '  PP_LENS_GATES_ACTIVE:      %s   (router filters ineligible lenses + draws replacements)\n' \
+          "${PP_LENS_GATES_ACTIVE:-0}"
+        printf '\n'
+        printf 'Operator surface:\n'
+        printf '  polymath lens-gates enable <flag>     Set <flag>=1 in user.env\n'
+        printf '  polymath lens-gates disable <flag>    Set <flag>=0 in user.env\n'
+        printf '\nSee docs/v0.5.1.1-planner-grounding-fix-spec.md for the full rollout playbook.\n\n'
+        ;;
+      enable|disable)
+        _pp_lg_flag="${2:-}"
+        if [ -z "$_pp_lg_flag" ]; then
+          printf 'polymath lens-gates %s: missing <flag>\n' "$_pp_lg_subcmd" >&2
+          printf 'Known flags: %s\n' "$_pp_lg_known" >&2
+          exit 2
+        fi
+        # Validate flag is in the closed allowlist (security boundary).
+        _pp_lg_ok=0
+        for _pp_lg_k in $_pp_lg_known; do
+          if [ "$_pp_lg_k" = "$_pp_lg_flag" ]; then
+            _pp_lg_ok=1
+            break
+          fi
+        done
+        if [ "$_pp_lg_ok" -ne 1 ]; then
+          printf 'polymath lens-gates: unknown flag %s\n' "$_pp_lg_flag" >&2
+          printf 'Known flags: %s\n' "$_pp_lg_known" >&2
+          exit 2
+        fi
+        if [ "$_pp_lg_subcmd" = "enable" ]; then
+          _pp_set_user_env_var "$_pp_lg_flag" 1 || exit 1
+          printf '%s enabled (user.env updated).\n' "$_pp_lg_flag"
+        else
+          _pp_set_user_env_var "$_pp_lg_flag" 0 || exit 1
+          printf '%s disabled (user.env updated).\n' "$_pp_lg_flag"
+        fi
+        ;;
+      *)
+        printf 'polymath lens-gates: unknown subcommand %s\n' "$_pp_lg_subcmd" >&2
+        printf 'Try: status | enable <flag> | disable <flag>\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   history)
     # v0.5.2 (Task 14) — OAR observation outcomes (spec §D).
     #
@@ -1848,6 +1924,7 @@ Usage:
   polymath history     OAR observation outcomes — per-lens acted% (--window, --lens, --outcome, --json)
   polymath oar-label   Manual catchup labeler (--all-due [--limit N])
   polymath retry-router   v0.5.1 cost-router state (status / shadow-summary / clear-flag)
+  polymath lens-gates  v0.5.1.1 planner-grounding kill-switches (status / enable / disable)
   polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
   polymath dismiss     Suppression rules (add / list / show / disable / enable / ack)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)

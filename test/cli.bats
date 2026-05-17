@@ -1522,3 +1522,107 @@ SHIM
   [[ "$output" == *"--all-due"* ]]
   [[ "$output" == *"--limit"* ]]
 }
+
+# --- v0.5.1.1 Stage D — polymath lens-gates ---
+# Operator surface for the 4 v0.5.1.1 planner-grounding kill-switches.
+# Mirrors `polymath retry-router` shape. Closed allowlist enforced as a
+# security boundary so callers can't pivot this CLI into arbitrary env-var
+# writes (PP_EXTERNAL_LLM bypass, etc.).
+
+@test "lens-gates: status (no subcmd) prints all 4 flags + current values" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  cat > "$CLAUDE_DIR/pair-polymath/config/user.env" <<'EOF'
+PP_LENS_GATES_TELEMETRY=1
+PP_INVENTORY_UNIFY_ACTIVE=0
+PP_SILENT_V2_ACTIVE=0
+PP_LENS_GATES_ACTIVE=0
+EOF
+  run bash "$PP_ROOT/bin/polymath" lens-gates status
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF 'PP_LENS_GATES_TELEMETRY'
+  printf '%s\n' "$output" | grep -qF 'PP_INVENTORY_UNIFY_ACTIVE'
+  printf '%s\n' "$output" | grep -qF 'PP_SILENT_V2_ACTIVE'
+  printf '%s\n' "$output" | grep -qF 'PP_LENS_GATES_ACTIVE'
+  # The telemetry knob is set to 1 in user.env — output must reflect that.
+  printf '%s\n' "$output" | grep -qF 'PP_LENS_GATES_TELEMETRY'
+  printf '%s\n' "$output" | grep -qE 'PP_LENS_GATES_TELEMETRY:[[:space:]]+1'
+}
+
+@test "lens-gates: enable PP_LENS_GATES_ACTIVE flips user.env" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  : > "$CLAUDE_DIR/pair-polymath/config/user.env"
+  run bash "$PP_ROOT/bin/polymath" lens-gates enable PP_LENS_GATES_ACTIVE
+  [ "$status" -eq 0 ]
+  grep -qx 'PP_LENS_GATES_ACTIVE=1' "$CLAUDE_DIR/pair-polymath/config/user.env"
+}
+
+@test "lens-gates: disable PP_LENS_GATES_ACTIVE flips user.env to 0" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  cat > "$CLAUDE_DIR/pair-polymath/config/user.env" <<'EOF'
+PP_LENS_GATES_ACTIVE=1
+EOF
+  run bash "$PP_ROOT/bin/polymath" lens-gates disable PP_LENS_GATES_ACTIVE
+  [ "$status" -eq 0 ]
+  grep -qx 'PP_LENS_GATES_ACTIVE=0' "$CLAUDE_DIR/pair-polymath/config/user.env"
+}
+
+@test "lens-gates: enable rejects unknown flag (closed allowlist)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  : > "$CLAUDE_DIR/pair-polymath/config/user.env"
+  run bash "$PP_ROOT/bin/polymath" lens-gates enable PP_RANDOM_KNOB
+  [ "$status" -ne 0 ]
+  # Must NOT have written the bogus flag.
+  if grep -q 'PP_RANDOM_KNOB' "$CLAUDE_DIR/pair-polymath/config/user.env" 2>/dev/null; then
+    echo "lens-gates wrote arbitrary env-var; security boundary breached"
+    return 1
+  fi
+}
+
+@test "lens-gates: unknown subcommand exits 2 with usage message" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  : > "$CLAUDE_DIR/pair-polymath/config/user.env"
+  run bash "$PP_ROOT/bin/polymath" lens-gates whoami
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -qF 'unknown subcommand'
+}
+
+@test "lens-gates: each of the 4 known flags accepts enable + disable" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  : > "$CLAUDE_DIR/pair-polymath/config/user.env"
+  for flag in PP_LENS_GATES_TELEMETRY PP_INVENTORY_UNIFY_ACTIVE PP_SILENT_V2_ACTIVE PP_LENS_GATES_ACTIVE; do
+    run bash "$PP_ROOT/bin/polymath" lens-gates enable "$flag"
+    [ "$status" -eq 0 ] || { echo "enable $flag failed: $output"; return 1; }
+    grep -qx "${flag}=1" "$CLAUDE_DIR/pair-polymath/config/user.env" \
+      || { echo "$flag not set to 1 after enable; user.env:"; cat "$CLAUDE_DIR/pair-polymath/config/user.env"; return 1; }
+    run bash "$PP_ROOT/bin/polymath" lens-gates disable "$flag"
+    [ "$status" -eq 0 ] || { echo "disable $flag failed: $output"; return 1; }
+    grep -qx "${flag}=0" "$CLAUDE_DIR/pair-polymath/config/user.env" \
+      || { echo "$flag not set to 0 after disable; user.env:"; cat "$CLAUDE_DIR/pair-polymath/config/user.env"; return 1; }
+  done
+}
+
+@test "lens-gates: enable is idempotent (running twice is fine)" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/pair-polymath/config"
+  : > "$CLAUDE_DIR/pair-polymath/config/user.env"
+  run bash "$PP_ROOT/bin/polymath" lens-gates enable PP_LENS_GATES_ACTIVE
+  [ "$status" -eq 0 ]
+  run bash "$PP_ROOT/bin/polymath" lens-gates enable PP_LENS_GATES_ACTIVE
+  [ "$status" -eq 0 ]
+  # Should still have exactly one occurrence.
+  count=$(grep -c '^PP_LENS_GATES_ACTIVE=' "$CLAUDE_DIR/pair-polymath/config/user.env")
+  [ "$count" -eq 1 ]
+  grep -qx 'PP_LENS_GATES_ACTIVE=1' "$CLAUDE_DIR/pair-polymath/config/user.env"
+}
+
+@test "lens-gates: help text includes the new subcommand row" {
+  run bash "$PP_ROOT/bin/polymath" help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"lens-gates"* ]]
+}

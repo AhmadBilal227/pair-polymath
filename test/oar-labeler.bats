@@ -1222,3 +1222,125 @@ _pp_oar_set_mtime() {
   # Match exact format: ^[0-9]\.[0-9]{4}$
   [[ "$_out" =~ ^[0-9]\.[0-9]{4}$ ]]
 }
+
+# === v0.5.1.1 Stage A — OAR labeler v1/v2 schema parity ===
+# Spec task 7: outcome=silent tolerated on READ; silent_reason passthrough;
+# unknown outcomes -> ignored + one-shot stderr warning per cycle.
+
+@test "labeler v2: writer always stamps schema_version into emitted row" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  # Minimal pending row: outcome=ignored (no detector hits).
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s1","lens":"ENGINEERING","hash":"h1","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"test body","cited_paths":[],"cited_symbols":[]}
+EOF
+  PP_OAR_ENABLE=1 PP_LENS_GATES_TELEMETRY=1 pp_oar_label_pending
+  [ -f "$PP_CACHE_DIR/oar-labeled.jsonl" ]
+  local _sv
+  _sv=$(jq -r '.schema_version // "MISSING"' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  [ "$_sv" = "2" ]
+}
+
+@test "labeler v2: writer always stamps silent_reason field (empty when not silent)" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s2","lens":"SECURITY","hash":"h2","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[]}
+EOF
+  PP_OAR_ENABLE=1 pp_oar_label_pending
+  # The field must be PRESENT (jq -e succeeds) and EMPTY ("" string).
+  local _sr
+  _sr=$(jq -r 'has("silent_reason")' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  [ "$_sr" = "true" ]
+  local _val
+  _val=$(jq -r '.silent_reason' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  [ "$_val" = "" ]
+}
+
+@test "labeler v2: pending row with outcome=silent passes through without crash" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  # A pending row carrying outcome=silent + silent_reason - Stage B
+  # writers will emit these; Stage A's labeler must NOT crash on read.
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s3","lens":"UX_DESIGN","hash":"h3","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"","cited_paths":[],"cited_symbols":[],"outcome":"silent","silent_reason":"no_ui_surface"}
+EOF
+  run env PP_OAR_ENABLE=1 bash -c '. "$PP_ROOT/lib/oar.sh"; pp_oar_label_pending'
+  [ "$status" -eq 0 ]
+  # The labeled row should preserve the silent_reason field verbatim.
+  local _sr
+  _sr=$(jq -r '.silent_reason // "MISSING"' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  [ "$_sr" = "no_ui_surface" ]
+}
+
+@test "labeler v2: pending row with outcome=silent emits outcome=silent in labeled row" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s4","lens":"PRODUCT_BIZ","hash":"h4","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"","cited_paths":[],"cited_symbols":[],"outcome":"silent","silent_reason":"no_copy_change"}
+EOF
+  PP_OAR_ENABLE=1 pp_oar_label_pending
+  local _out
+  _out=$(jq -r '.outcome' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  [ "$_out" = "silent" ]
+}
+
+@test "labeler v2: unknown outcome maps to 'ignored' (forward-compat shim)" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  # A future writer emits outcome=NEWLY_INVENTED — Stage A's reader must
+  # downgrade to "ignored" rather than abort.
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s5","lens":"PERF_FINOPS","hash":"h5","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[],"outcome":"NEWLY_INVENTED"}
+EOF
+  PP_OAR_ENABLE=1 pp_oar_label_pending
+  local _out
+  _out=$(jq -r '.outcome' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  [ "$_out" = "ignored" ]
+}
+
+@test "labeler v2: unknown outcome emits one-shot stderr warning (not per-row)" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"a","lens":"L1","hash":"h1","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[],"outcome":"WEIRD"}
+{"session_id":"b","lens":"L2","hash":"h2","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[],"outcome":"ALSO_WEIRD"}
+{"session_id":"c","lens":"L3","hash":"h3","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[],"outcome":"YET_ANOTHER"}
+EOF
+  run env PP_OAR_ENABLE=1 bash -c '. "$PP_ROOT/lib/oar.sh"; pp_oar_label_pending'
+  [ "$status" -eq 0 ]
+  # Exactly ONE warning line, not three (one-shot per cycle).
+  local _warns
+  _warns=$(printf '%s\n' "$output" | grep -c "unknown OAR outcome" || true)
+  [ "$_warns" -eq 1 ]
+}
+
+@test "labeler v2: legacy v1 row (no outcome field, no silent_reason) labels normally" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  # Pre-v0.5.1.1 pending rows have no outcome field at all - just the
+  # session_id/lens/hash/inject_ts contract. Labeler must process them
+  # as it always has: run detectors, default to 'ignored'.
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"legacy","lens":"COGNITIVE_FLOW","hash":"hL","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"legacy body","cited_paths":[],"cited_symbols":[]}
+EOF
+  PP_OAR_ENABLE=1 pp_oar_label_pending
+  local _out
+  _out=$(jq -r '.outcome' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  # Default outcome when no detector fires + no upstream outcome stamp.
+  [ "$_out" = "ignored" ]
+}
+
+@test "labeler v2: silent_reason absent in pending row -> empty string in labeled row (NOT null)" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s9","lens":"STRATEGIC_FOUNDER","hash":"h9","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[]}
+EOF
+  PP_OAR_ENABLE=1 pp_oar_label_pending
+  # jq -r prints "null" for JSON null, "" for empty string. Stage A's
+  # contract: emit "" so downstream code can rely on a string-typed field.
+  local _sr
+  _sr=$(jq -r '.silent_reason' "$PP_CACHE_DIR/oar-labeled.jsonl" | head -1)
+  [ "$_sr" = "" ]
+}

@@ -3,7 +3,7 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
-## [0.5.1.1] — TBD
+## [0.5.2.1] — 2026-05-17 — internal task label: v0.5.1.1
 
 The **planner / grounding fix release**. Persona work was the wrong target — the 26-cycle data showed 63-81% of DROPs were plumbing artifacts: lenses cited symbols not in the validator's allowlist, lenses fanned out into cycles with no in-scope surface, and SILENT was getting scored as DROP instead of as a legitimate non-observation. v0.5.1.1 fixes the plumbing; persona work moves to v0.5.1.2.
 

@@ -3,6 +3,66 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.2.0] — 2026-05-17
+
+The **OAR-foundation + hallucination-gate release**. Ships the measurement plumbing for Observation-Action-Rate (acted / referenced / pushed-back / ignored) plus a shadow-by-default hallucination verifier that flags non-existent code citations after PASS. ALL NEW FLAGS DEFAULT OFF — STDOUT byte-identical to v0.5.1.0 until user opts in.
+
+### Added
+
+#### OAR foundation
+
+- `lib/oar.sh` (~1090 LOC) — five detector helpers (`pp_oar_row_identity`, `pp_oar_pushed_back`, `pp_oar_acted_for_path`, `pp_oar_referenced`, `pp_oar_label_pending`) + driver + per-row 3s timeout watchdog. C2-fix-path-A: SessionEnd writes body + cited_paths + cited_symbols to pending row; labeler is a pure function of the pending row.
+- `hooks/session-end.sh` extended — writes the pending OAR row (body + citation arrays) when `PP_OAR_ENABLE=1`. No-op when disabled.
+- `bin/statusline.sh` — inline OAR labeler invocation gated on `PP_OAR_ENABLE=1`, wrapped in 15s SIGTERM-grace-then-SIGKILL watchdog so a stuck labeler never blocks the cycle.
+- `bin/polymath oar-label --all-due [--limit N]` — drain the OAR backlog from the CLI without waiting for the statusline cap.
+- `bin/polymath history` — analysis surface for labeled OAR rows: rollup totals, per-lens acted%, top lenses, `--lens` + `--outcome` + `--days` filters, `--json` for machine output.
+- `lib/metrics.sh` — `pp_kpi_wilson_lower_95` (two-sided z=1.96) + KPI cycle emitter extended with `acted_rate`, `referenced_rate`, `pushed_back_rate`, `ignored_rate`, `halluc_pre_drop_rate`, `halluc_post_would_drop_rate`.
+
+#### Hallucination gate
+
+- `lib/hallucination.sh` (~160 LOC) — `pp_halluc_verify_citations` pure shadow verifier. git-grep first, optional `tags` fallback when `PP_HALLUC_GATE_DEEP=1`. Min symbol length filter (`PP_HALLUC_MIN_SYM_LEN=4`) defaults to a noise-safe value. rc=2 returned when a required dep (jq/git) is missing — caller treats as "skip", never "drop".
+- Statusline post-PASS hook — `_pp_halluc_post_drops` counter incremented when a PASS observation cites non-existent code. Counter is reset per cycle. `PP_HALLUC_GATE_ENABLE=1` activates the verifier (shadow); `PP_HALLUC_GATE_ACTIVE=1` is the separate, opt-in flag that actually flips PASS->DROP.
+
+#### Doctor + tests
+
+- Doctor check #21 — `doctor_check_oar_quality` (PM3 sentinel): yellow when >=20 labeled rows AND 100% land on `outcome=ignored`. Catches the silent-failure mode where the labeler completes but `pp_oar_referenced` is broken. jq absence + JSONL malformed both surface as yellow (not silent green).
+- `config/default.env` — 8 new env knobs documented inline with spec-locked defaults: `PP_OAR_ENABLE`, `PP_OAR_REF_TAU=0.5`, `PP_OAR_LABEL_PER_CYCLE_CAP=5`, `PP_OAR_LABEL_MAX_ATTEMPTS=3`, `PP_OAR_ROW_TIMEOUT_S=3`, `PP_HALLUC_GATE_ENABLE`, `PP_HALLUC_GATE_ACTIVE`, `PP_HALLUC_GATE_DEEP`, `PP_HALLUC_MIN_SYM_LEN=4`.
+- ~140 new bats tests across 4 suites (`oar-labeler.bats`, `hallucination-gate.bats`, `kpi-halluc.bats`, `v0.5.2-wiring.bats`) + extended `cli.bats`, `doctor.bats`, `session-end.bats`. Suite total: 702 tests, all green.
+- Byte-identity preserved: existing `v0.5.1-byte-identity.bats` continues to pass — v0.5.2 default-off knobs do not change statusline STDOUT.
+
+### Silent-correctness bugs caught by multi-reviewer cycle
+
+These were caught before merge. Calling them out so the discipline (spec compliance + code quality + GPT-5 per task) shows its value.
+
+- **Trap RETURN leak** (Tasks 6+7): shell-wide trap firing on subsequent function returns; fixed by clearing trap inside the trap body.
+- **md5 fallback fork** (Task 3): `||` inside `$()` never fired because the pipeline's exit was `cut`'s; replaced with explicit `command -v` branching.
+- **Separator collision** (Task 3): `|` could ambiguate; switched to ASCII 0x1F (US separator).
+- **git rename-tracking gap** (Task 6): `git show -- $pathspec` filtered to current path; dropped pathspec from git show.
+- **Line-proximity missed deletions** (Task 6): only +NEW range checked; also overlap -OLD range.
+- **Concurrency race** (Task 8): two cycles racing on pending.jsonl mv; mkdir-lock at function entry.
+- **Cross-FS mv fallback** (Task 8): `mktemp -t` landed in tmpfs; now fail-closed when cache-dir mktemp fails.
+- **session_id path traversal** (Task 8): `transcript-tail-${sid}.txt` unsanitized; now rejects non-alphanumeric sids.
+- **SIGKILL too aggressive** (Task 11): prevented labeler from releasing lock; now SIGTERM + 1s grace + SIGKILL.
+- **Active-mode state desync** (Task 12): verdict_file said DROP but `$verdict` was still PASS; now updates both + restores streak.
+- **Verifier stdout not silenced** (Task 12): byte-identity risk; redirected to `/dev/null`.
+- **Locale mismatch in classifier** (Task 13): inconsistent `LC_ALL=C` in denominator vs numerator greps; pinned consistently.
+- **`group_by` without `sort_by`** (Task 14): split non-contiguous lens groups; prepended `sort_by(.lens)`.
+- **`--outcome` broke top-lenses** (Task 14): filter applied before per-lens stats meant every lens showed 100% acted with `--outcome acted`; now builds two row sets.
+- **Doctor #21 silent-green on jq error** (Task 17 review): the silent-failure sentinel would itself silently fail when jq absent or JSONL malformed; now yellow with explicit reason. Also filters denominator to valid objects so blank/malformed lines can't mask the degenerate pattern.
+
+### Rollout sequence (v0.5.2.0 — measurement infrastructure)
+
+Like v0.5.1.0, this release ships infrastructure ONLY. The recommended path:
+
+1. **Shadow OAR (1 week):** set `PP_OAR_ENABLE=1` in `~/.claude/pair-polymath/config/user.env`. SessionEnd starts writing pending rows; the inline labeler will start producing `outcome` classifications. No behavior change.
+2. **Inspect:** `polymath history` should show non-degenerate `acted_rate` / `referenced_rate` distribution. `polymath doctor` check #21 will go yellow if `referenced` detection is silently broken.
+3. **Shadow hallucination gate (1 week):** add `PP_HALLUC_GATE_ENABLE=1`. KPI cycle emitter starts emitting `halluc_post_would_drop_rate`. Watch for a sustained &lt;5% would-drop rate before considering the active flip.
+4. **Activate hallucination gate (only if shadow data justifies):** add `PP_HALLUC_GATE_ACTIVE=1`. Post-PASS hallucinations now flip PASS->DROP.
+
+### Coming in v0.5.3
+
+DIM (Developer Insights Module) — gated on v0.5.2 OAR fidelity being established.
+
 ## [0.5.1.0] — 2026-05-15
 
 The **cost-cut infrastructure release**. Ships observability + shadow-mode foundations for cost-aware retry routing. ALL FLAGS DEFAULT OFF — STDOUT-byte-identical to v0.5.0 until user opts in.

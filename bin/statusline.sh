@@ -92,6 +92,66 @@ _pp_write_verdict_v2() {
   return 0
 }
 
+# _pp_verdict_v2_field FILE KEY
+# Reads a KEY=value token from any "# v2:" trailer line. KEY is restricted to
+# shell-ish field names because it is interpolated into a small regex.
+_pp_verdict_v2_field() {
+  local _file="$1" _key="$2" _line
+  [ -f "$_file" ] || return 1
+  case "$_key" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+  _line=$(grep -E "^# v2: .*${_key}=" "$_file" 2>/dev/null | head -1)
+  [ -n "$_line" ] || return 1
+  printf '%s\n' "$_line" | sed -n "s/.*${_key}=\([^[:space:]]*\).*/\1/p"
+}
+
+_pp_verdict_legacy_comment_field() {
+  local _file="$1" _key="$2"
+  [ -f "$_file" ] || return 1
+  case "$_key" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+  grep -E "^# ${_key}:" "$_file" 2>/dev/null | head -1 | awk '{print $NF}'
+}
+
+_pp_verdict_kpi_drift_count() {
+  local _file="$1" _prompt="" _validator=""
+  if [ -f "$_file" ]; then
+    _prompt=$(_pp_verdict_v2_field "$_file" canonical_allowlist_sha8_prompt 2>/dev/null)
+    _validator=$(_pp_verdict_v2_field "$_file" canonical_allowlist_sha8_validator 2>/dev/null)
+    [ -z "$_prompt" ] && _prompt=$(_pp_verdict_legacy_comment_field "$_file" canonical_allowlist_sha8 2>/dev/null)
+    [ -z "$_validator" ] && _validator=$(_pp_verdict_legacy_comment_field "$_file" canonical_allowlist_sha8_validator 2>/dev/null)
+  fi
+  if [ -n "$_prompt" ] && [ -n "$_validator" ] && [ "$_prompt" != "$_validator" ]; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+_pp_verdict_kpi_no_eligible_surface_count() {
+  local _file="$1" _reason=""
+  [ -f "$_file" ] || { printf '0'; return 0; }
+  _reason=$(_pp_verdict_v2_field "$_file" silent_reason 2>/dev/null)
+  if [ "$_reason" = "no_eligible_surface" ] \
+      || grep -q '^# silent_reason: no_eligible_surface' "$_file" 2>/dev/null; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+_pp_verdict_kpi_persona_silent_count() {
+  local _file="$1" _outcome="" _reason=""
+  [ -f "$_file" ] || { printf '0'; return 0; }
+  _outcome=$(_pp_verdict_v2_field "$_file" outcome 2>/dev/null)
+  _reason=$(_pp_verdict_v2_field "$_file" silent_reason 2>/dev/null)
+  if grep -q '^# silent_reason: persona_silent' "$_file" 2>/dev/null; then
+    printf '1'
+  elif [ "$_outcome" = "silent" ] && [ "$_reason" != "no_eligible_surface" ]; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
 # Pair Polymath — load config + libs
 _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -1951,12 +2011,24 @@ EOF
           [ -z "$_pp_kpi_lens_id" ] && continue
           _pp_kpi_verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${_pp_kpi_lens_id}-verdict.txt"
 
-          # eligible_count: Stage D stamps PP_LENS_ELIGIBLE_<id> in the
-          # router. Default 0 (Stage D not yet wired = nothing eligible
-          # by telemetry; correct shadow semantics).
+          # eligible_count: Stage D stamps PP_LENS_ELIGIBLE_<id> earlier in
+          # the same statusline cycle. Track "known" separately so missing
+          # facts/evaluator does not masquerade as would_be_ineligible.
           _pp_kpi_elig_var="PP_LENS_ELIGIBLE_${_pp_kpi_lens_id}"
-          eval "_pp_kpi_elig=\${${_pp_kpi_elig_var}:-0}"
-          case "$_pp_kpi_elig" in ''|*[!0-9]*) _pp_kpi_elig=0 ;; esac
+          _pp_kpi_elig=0
+          _pp_kpi_elig_known=0
+          case "$_pp_kpi_elig_var" in
+            *[!A-Za-z0-9_]*|'') ;;
+            *)
+              eval "_pp_kpi_elig_raw=\${${_pp_kpi_elig_var}:-}"
+              case "$_pp_kpi_elig_raw" in
+                0|1)
+                  _pp_kpi_elig="$_pp_kpi_elig_raw"
+                  _pp_kpi_elig_known=1
+                  ;;
+              esac
+              ;;
+          esac
 
           # dispatched_count: was this lens in the router's pick list?
           _pp_kpi_disp=0
@@ -1964,17 +2036,15 @@ EOF
             _pp_kpi_disp=1
           fi
 
-          # silent_count_by_reason: Stage B Task 5 writes a marker line
-          # "# silent_reason: <reason>" into the verdict file.
+          # silent_count_by_reason: Stage B Task 5 writes v2 markers:
+          # "# v2: outcome=silent" and "# v2: silent_reason=<reason>".
+          # Legacy "# silent_reason:" markers are still accepted for older
+          # cache files.
           _pp_kpi_silent_nes=0
           _pp_kpi_silent_ps=0
           if [ -f "$_pp_kpi_verdict_file" ]; then
-            if grep -q '^# silent_reason: no_eligible_surface' "$_pp_kpi_verdict_file" 2>/dev/null; then
-              _pp_kpi_silent_nes=1
-            fi
-            if grep -q '^# silent_reason: persona_silent' "$_pp_kpi_verdict_file" 2>/dev/null; then
-              _pp_kpi_silent_ps=1
-            fi
+            _pp_kpi_silent_nes=$(_pp_verdict_kpi_no_eligible_surface_count "$_pp_kpi_verdict_file")
+            _pp_kpi_silent_ps=$(_pp_verdict_kpi_persona_silent_count "$_pp_kpi_verdict_file")
           fi
 
           # pass_count / drop_count: scan the cycle's verdict file for the
@@ -1991,25 +2061,25 @@ EOF
             fi
           fi
 
-          # drift_count: Stage A Task 3 stamps "# canonical_allowlist_sha8:
-          # <prompt>" + "# canonical_allowlist_sha8_validator: <validator>"
-          # into the verdict. Mismatch = drift = 1.
+          # drift_count: Stage A Task 3 stamps v2 prompt-side and
+          # validator-side canonical hashes into the verdict. Mismatch =
+          # drift = 1. Legacy marker names are accepted by the helper.
           _pp_kpi_drift=0
           if [ -f "$_pp_kpi_verdict_file" ]; then
-            _pp_kpi_drift_prompt=$(grep '^# canonical_allowlist_sha8:' "$_pp_kpi_verdict_file" 2>/dev/null | head -1 | awk '{print $NF}')
-            _pp_kpi_drift_validator=$(grep '^# canonical_allowlist_sha8_validator:' "$_pp_kpi_verdict_file" 2>/dev/null | head -1 | awk '{print $NF}')
-            if [ -n "$_pp_kpi_drift_prompt" ] && [ -n "$_pp_kpi_drift_validator" ] \
-                 && [ "$_pp_kpi_drift_prompt" != "$_pp_kpi_drift_validator" ]; then
-              _pp_kpi_drift=1
-            fi
+            _pp_kpi_drift=$(_pp_verdict_kpi_drift_count "$_pp_kpi_verdict_file")
           fi
 
-          # would_be_ineligible_count: Stage D stamps "# would_be_ineligible:
-          # true" on PASS observations in shadow mode. Only count when PASS.
+          # would_be_ineligible_count: in telemetry/shadow, a PASS from a
+          # known-ineligible lens is the counterfactual risk signal. Keep the
+          # legacy verdict marker fallback for older cache files.
           _pp_kpi_wbi=0
-          if [ "$_pp_kpi_pass" = "1" ] && [ -f "$_pp_kpi_verdict_file" ]; then
-            if grep -q '^# would_be_ineligible: true' "$_pp_kpi_verdict_file" 2>/dev/null; then
+          if [ "$_pp_kpi_pass" = "1" ]; then
+            if [ "$_pp_kpi_elig_known" = "1" ] && [ "$_pp_kpi_elig" = "0" ]; then
               _pp_kpi_wbi=1
+            elif [ -f "$_pp_kpi_verdict_file" ]; then
+              if grep -q '^# would_be_ineligible: true' "$_pp_kpi_verdict_file" 2>/dev/null; then
+                _pp_kpi_wbi=1
+              fi
             fi
           fi
           _pp_kpi_wbi=$(pp_kpi_lens_count_would_be_ineligible "$_pp_kpi_pass" "$_pp_kpi_wbi")

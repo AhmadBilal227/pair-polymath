@@ -390,3 +390,116 @@ _pp_doctor_oar_enable() {
   # are yellow. The illegal outcome is a green "non-degenerate" claim.
   [[ "$output" != *"non-degenerate"* ]]
 }
+
+# === Stage B Task 13 — doctor check #22: drift_count invariant ===
+#
+# Verdict-file v2 schema (Stage A Task 3) stamps:
+#   # v2: canonical_allowlist_sha8_prompt=<8-hex>
+#   # v2: canonical_allowlist_sha8_validator=<8-hex>
+# This check counts cases where the two diverge within the last 24h.
+#
+# NOTE (B2 implementer): Stage A as shipped (bin/statusline.sh:75) actually
+# stamps a single `canonical_allowlist_sha8=<8hex>` field rather than the
+# dual `_prompt`/`_validator` pair this plan-task assumes. That divergence
+# materialises in Stage C, when the rendered prompt block flips to top-N
+# truncation while the validator still consumes the full inventory. Until
+# then, real verdicts produce zero matches against the dual-hash regex →
+# `_total=0` → GREEN ("no verdict data"), which is exactly the conservative
+# behaviour requested. The tests below fabricate the dual-hash form so the
+# check is exercised end-to-end ahead of Stage C.
+
+_pp_doctor_write_verdict() {
+  # Helper: write a v2 verdict file at a controlled mtime.
+  # Args: <name> <prompt_sha8> <validator_sha8> <minutes_ago>
+  local _name="$1" _ps="$2" _vs="$3" _min="$4"
+  local _f="$PP_CACHE_DIR/cc-monitor-sess1-${_name}-verdict.txt"
+  {
+    printf 'lens0: PASS -- ok\n'
+    printf '# v2: schema_version=2\n'
+    printf '# v2: outcome=pass\n'
+    printf '# v2: canonical_allowlist_sha8_prompt=%s\n' "$_ps"
+    printf '# v2: canonical_allowlist_sha8_validator=%s\n' "$_vs"
+  } > "$_f"
+  # Backdate. Cross-platform touch: BSD `-A` not portable; use `-t` with
+  # date math. Fall back to no-op (file is fresh anyway, fits ≤24h cases).
+  if [ "$_min" -gt 0 ]; then
+    if date -v -"${_min}"M +%Y%m%d%H%M.%S >/dev/null 2>&1; then
+      # macOS BSD date.
+      touch -t "$(date -v -"${_min}"M +%Y%m%d%H%M.%S)" "$_f"
+    elif date -d "@$(($(date +%s) - _min*60))" +%Y%m%d%H%M.%S >/dev/null 2>&1; then
+      # GNU date.
+      touch -t "$(date -d "@$(($(date +%s) - _min*60))" +%Y%m%d%H%M.%S)" "$_f"
+    fi
+  fi
+}
+
+@test "doctor #22: GREEN when no verdict files exist" {
+  PP_CACHE_DIR="$CLAUDE_DIR/cache" run doctor_check_drift_count
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"drift count"* ]]
+  [[ "$output" == *"no verdict data"* ]]
+}
+
+@test "doctor #22: GREEN when all canonical_allowlist_sha8 pairs match" {
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_doctor_write_verdict UX_DESIGN aaaaaaaa aaaaaaaa 0
+  _pp_doctor_write_verdict ENGINEERING bbbbbbbb bbbbbbbb 0
+  _pp_doctor_write_verdict SECURITY cccccccc cccccccc 0
+  run doctor_check_drift_count
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"drift count"* ]]
+  [[ "$output" == *"drift_count=0"* ]]
+}
+
+@test "doctor #22: YELLOW when canonical_allowlist_sha8 pair diverges" {
+  mkdir -p "$PP_CACHE_DIR"
+  _pp_doctor_write_verdict UX_DESIGN aaaaaaaa aaaaaaaa 0
+  _pp_doctor_write_verdict ENGINEERING bbbbbbbb ccccdddd 0   # drift!
+  run doctor_check_drift_count
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"drift count"* ]]
+  [[ "$output" == *"drift_count=1"* ]]
+  [[ "$output" == *"inventory pipeline"* ]]
+}
+
+@test "doctor #22: ignores verdict files older than 24h" {
+  mkdir -p "$PP_CACHE_DIR"
+  # Drift exists but it's 25h old — out-of-window, should NOT alarm.
+  _pp_doctor_write_verdict UX_DESIGN aaaaaaaa bbbbbbbb 1500
+  # Probe GNU-first then BSD (matches lib/oar.sh:637 pattern). `stat -f %m`
+  # on GNU coreutils means "filesystem format" and prints fs metadata — not
+  # file mtime — without failing, so a BSD-first probe on Ubuntu CI yields
+  # non-numeric output and the `((…))` below errors. Skip if neither dialect
+  # gives a clean integer mtime.
+  local _mtime _f="$PP_CACHE_DIR/cc-monitor-sess1-UX_DESIGN-verdict.txt"
+  if stat -c %Y /dev/null >/dev/null 2>&1; then
+    _mtime=$(stat -c %Y "$_f" 2>/dev/null)
+  elif stat -f %m /dev/null >/dev/null 2>&1; then
+    _mtime=$(stat -f %m "$_f" 2>/dev/null)
+  fi
+  case "$_mtime" in ''|*[!0-9]*) skip "stat mtime probe unsupported here" ;; esac
+  local _now; _now=$(date +%s)
+  [ "$((_now - _mtime))" -gt 86400 ] || skip "touch -t did not stick mtime to 25h ago"
+  run doctor_check_drift_count
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no verdict data"* ]] || [[ "$output" == *"drift_count=0"* ]]
+}
+
+@test "doctor #22: GREEN when only single-hash (Stage A v1) verdicts exist" {
+  # Real Stage A verdicts (bin/statusline.sh:75) stamp the SINGLE-hash form
+  # `canonical_allowlist_sha8=<8hex>`. The dual-hash regex this check uses
+  # must NOT match them → _total=0 → green ("no v2 verdicts with v2 hashes").
+  # This is the conservative-safe behaviour requested when A4 only writes
+  # one canonical field.
+  mkdir -p "$PP_CACHE_DIR"
+  local _f="$PP_CACHE_DIR/cc-monitor-sess1-UX_DESIGN-verdict.txt"
+  {
+    printf '# schema_version: 2\n'
+    printf 'lens0: PASS -- ok\n'
+    printf '# v2: canonical_allowlist_sha8=aaaaaaaa rendered_prompt_sha8=aaaaaaaa silent_reason=\n'
+  } > "$_f"
+  run doctor_check_drift_count
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"drift count"* ]]
+  [[ "$output" == *"no verdict data"* ]]
+}

@@ -1,0 +1,61 @@
+# facts_schema: 2
+=== USER RECENT MESSAGES (PRIMARY CONTEXT — focus your observation on this) ===
+working on the JWT verification path
+
+=== GIT STATUS (uncommitted) ===
+ M src/auth.ts
+
+=== RECENT COMMITS ===
+b700ad5 chore: bump deps
+a35d5e4 fix: handle expired tokens
+
+=== RECENT DIFF SCOPE ===
+ src/auth.ts | 8 ++++++--
+
+=== CWD TOP-LEVEL ===
+src/  test/  package.json
+
+=== RECENT TOOL CALLS (last 15) ===
+Read: src/auth.ts
+Edit: src/auth.ts
+
+=== FILE READ (planner picked: src/auth.ts) ===
+export function someFromFileRead(token: string): boolean {
+  if (!token) return false;
+  const decoded = decode(token);
+  if (!decoded) return false;
+  return checkExpiry(decoded);
+}
+
+export function decode(t: string): Decoded | null {
+  return null;
+}
+
+export function checkExpiry(d: Decoded): boolean {
+  return d.exp > Date.now() / 1000;
+}
+
+=== SYMBOL REFERENCE COUNTS (grep across cwd) ===
+someFromFileRead: 7 refs
+decode: 12 refs
+checkExpiry: 4 refs
+someFromGrepOnly: 23 refs
+
+=== NEARBY MENTIONS (NOT CITABLE — read the file first to cite) ===
+someFromGrepOnly  (23 refs in cwd — not present in the file inventory)
+
+=== LAST TEST/LINT RUN (≤30min, from PostToolUse hook) ===
+(no recent test/lint runs)
+
+=== PREVIOUS OBSERVATIONS (do not repeat these) ===
+(none yet)
+
+# git_diff_paths
+src/auth.ts
+# /git_diff_paths
+
+# git_untracked_paths
+# /git_untracked_paths
+
+# git_staged_paths
+# /git_staged_paths

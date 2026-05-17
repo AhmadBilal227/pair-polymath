@@ -598,6 +598,79 @@ doctor_check_oar_quality() {
   return 0
 }
 
+doctor_check_drift_count() {
+  # v0.5.1.1 Stage B (Task 13) — drift_count > 0 invariant alarm.
+  #
+  # Spec AC #3: canonical_allowlist_sha8 (prompt-side) MUST equal
+  # canonical_allowlist_sha8 (validator-side) for every cycle. Stage A Task 3
+  # stamps both into every verdict file as # v2: comment lines. This check
+  # walks the last 24h of verdict files and counts divergences.
+  #
+  # IMPLEMENTER NOTE (B2): Stage A as currently shipped (bin/statusline.sh:75)
+  # stamps a SINGLE `canonical_allowlist_sha8=<8hex>` field rather than the
+  # dual `_prompt`/`_validator` pair the plan-task assumes. The divergence
+  # only materialises in Stage C, when the rendered prompt block flips to
+  # top-N truncation while the validator still consumes the full inventory.
+  # Until then, real verdicts don't carry the dual-hash form, so the regex
+  # below finds nothing, _total stays 0, and the check is conservatively
+  # GREEN ("no verdict data") rather than alarming on absent data. This is
+  # the requested cold-start safety: alarm only when we have v2 fields AND
+  # they disagree. Stage C will back-patch the verdict writer to emit both
+  # hashes (tracked as a plan bug — see plan-task self-review report).
+  #
+  # Returns:
+  #   0 = green (no v2 verdicts in window OR drift_count = 0)
+  #   1 = yellow (drift_count > 0; the unified-inventory pipeline has split)
+  #
+  # Walks ~/.claude/cache/cc-monitor-*-verdict.txt, mtime within 24h.
+  # Bash 3.2: no `mapfile`; use a here-doc fed from `find`.
+  local _cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+  if [ ! -d "$_cache_dir" ]; then
+    _pp_doctor_green "drift count" "no verdict data (cache dir absent)"
+    return 0
+  fi
+
+  # 24h window. find -mtime -1 is "modified in the last 24h" on both
+  # GNU and BSD find. Use -name glob (works everywhere).
+  local _drift=0 _total=0
+  local _f _p_sha _v_sha
+  # `2>/dev/null` swallows find's "no such file" on empty dirs.
+  while IFS= read -r _f; do
+    [ -z "$_f" ] && continue
+    _total=$((_total + 1))
+    # Both hashes are on lines like "# v2: canonical_allowlist_sha8_prompt=abcd1234"
+    _p_sha=$(grep -E '^# v2: canonical_allowlist_sha8_prompt=' "$_f" 2>/dev/null \
+             | head -1 | sed 's/.*=//')
+    _v_sha=$(grep -E '^# v2: canonical_allowlist_sha8_validator=' "$_f" 2>/dev/null \
+             | head -1 | sed 's/.*=//')
+    # Missing either hash = pre-Stage-A verdict (v1 row) OR Stage-A
+    # single-hash verdict (current shipping format); skip from numerator +
+    # denominator. The dual-hash form arrives with Stage C.
+    if [ -z "$_p_sha" ] || [ -z "$_v_sha" ]; then
+      _total=$((_total - 1))
+      continue
+    fi
+    if [ "$_p_sha" != "$_v_sha" ]; then
+      _drift=$((_drift + 1))
+    fi
+  done <<EOF
+$(find "$_cache_dir" -maxdepth 1 -name 'cc-monitor-*-verdict.txt' -type f -mtime -1 2>/dev/null)
+EOF
+
+  if [ "$_total" -eq 0 ]; then
+    _pp_doctor_green "drift count" "no verdict data with v2 hashes in last 24h"
+    return 0
+  fi
+
+  if [ "$_drift" -gt 0 ]; then
+    _pp_doctor_yellow "drift count" \
+      "drift_count=${_drift} of ${_total} verdicts in last 24h — inventory pipeline split (run polymath logs)"
+    return 1
+  fi
+  _pp_doctor_green "drift count" "drift_count=0 across ${_total} verdicts in last 24h"
+  return 0
+}
+
 doctor_check_statusline_smoke() {
   local fixture="$PP_ROOT/test/fixtures/stdin-sample.json"
   if [ ! -f "$fixture" ]; then
@@ -663,7 +736,7 @@ pp_doctor_run() {
                 doctor_check_coreutils doctor_check_budget_pressure \
                 doctor_check_cache_permissions doctor_check_dismiss_libs \
                 doctor_check_retry_router_health doctor_check_install_drift \
-                doctor_check_oar_quality doctor_check_statusline_smoke"
+                doctor_check_oar_quality doctor_check_drift_count doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

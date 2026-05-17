@@ -45,6 +45,19 @@ if ! command -v pp_render_prompt >/dev/null 2>&1; then
   fi
 fi
 
+# v0.5.1.1 Stage D — lazy-source the eligibility evaluator. Same
+# rationale as prompt-loader above: lib/eligibility.sh is normally
+# sourced by bin/statusline.sh before the router fires, but doctor
+# checks / scripted tests / standalone callers may not have it.
+# Idempotent source-in. Mirrors the lib/oar.sh → lib/grounding.sh
+# lazy-source pattern.
+if ! command -v pp_lens_is_eligible >/dev/null 2>&1; then
+  if [ -r "${_pp_router_self_dir}/eligibility.sh" ]; then
+    # shellcheck source=eligibility.sh
+    . "${_pp_router_self_dir}/eligibility.sh" 2>/dev/null || true
+  fi
+fi
+
 : "${PP_ROUTER_ENABLE:=1}"
 : "${PP_ROUTER_MAX:=3}"
 : "${PP_ROUTER_MIN:=1}"
@@ -59,10 +72,21 @@ _pp_router_emit_enabled() {
   printf '%s\n' "${PP_LENS_IDS_AVAILABLE:-}" | LC_ALL=C grep -v '^$' || true
 }
 
-# pp_router_pick_lenses <signals_json> <transcript_filtered>
+# pp_router_pick_lenses <signals_json> <transcript_filtered> [facts_file]
+#
+# v0.5.1.1 Stage D: optional third arg is the facts-snapshot path. When
+# supplied AND PP_LENS_GATES_ACTIVE=1, the validated pick set is filtered
+# through pp_lens_is_eligible (one drop per ineligible pick, replacement
+# drawn from the next-ranked eligible lens in PP_LENS_IDS_AVAILABLE
+# order). When supplied AND PP_LENS_GATES_TELEMETRY=1, every picked
+# lens's would-be-ineligible verdict is appended to
+# PP_LENS_GATES_SHADOW_FILE (default ~/.claude/cache/lens-gates-shadow.jsonl).
+# Both gates default off — with the default config the function is
+# byte-identical to v0.5.1.0.
 pp_router_pick_lenses() {
   local _signals="${1:-}"
   local _tx="${2:-}"
+  local _facts_file="${3:-}"
 
   # P2.5 Track 3: cache the enabled-set once per call. Previously
   # invoked _pp_router_emit_enabled 4+ times per call (printf | grep
@@ -154,6 +178,102 @@ EOF
     printf '%s\n' "$_enabled_cached" | LC_ALL=C grep -v '^$' || true
     return 0
   fi
+
+  # ============================================================================
+  # v0.5.1.1 Stage D — eligibility filter + replacement draw.
+  # ============================================================================
+  #
+  # When PP_LENS_GATES_ACTIVE=1 AND a facts file is supplied, filter the
+  # validated pick set through pp_lens_is_eligible. Drop the ineligible
+  # picks; for each dropped pick, draw the next-ranked eligible lens from
+  # the enabled set (PP_LENS_IDS_AVAILABLE order). Cap at PP_ROUTER_MAX.
+  #
+  # When PP_LENS_GATES_TELEMETRY=1, stamp every PICKED lens's would-be-
+  # ineligible flag into PP_LENS_GATES_SHADOW_FILE (one JSONL row per pick).
+  # Runs INDEPENDENTLY of PP_LENS_GATES_ACTIVE — operator can compare what
+  # the gate would have done vs what actually happened in shadow mode.
+  #
+  # Fail-open semantics: if eligibility evaluator is missing (lib not
+  # sourced) OR facts file is absent / unreadable, the filter pass is
+  # SKIPPED — same as PP_LENS_GATES_ACTIVE=0. No silent dark-mode.
+  local _vl _ts _shadow
+  if [ "${PP_LENS_GATES_TELEMETRY:-0}" = "1" ] && [ -n "$_facts_file" ] && [ -f "$_facts_file" ] \
+     && command -v pp_lens_is_eligible >/dev/null 2>&1; then
+    _shadow="${PP_LENS_GATES_SHADOW_FILE:-$HOME/.claude/cache/lens-gates-shadow.jsonl}"
+    mkdir -p "$(dirname "$_shadow")" 2>/dev/null || true
+    _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || _ts="1970-01-01T00:00:00Z"
+    while IFS= read -r _vl; do
+      [ -z "$_vl" ] && continue
+      if pp_lens_is_eligible "$_vl" "$_facts_file"; then
+        printf '{"ts":"%s","lens_id":"%s","would_be_ineligible":0}\n' \
+          "$_ts" "$_vl" >> "$_shadow" 2>/dev/null
+      else
+        printf '{"ts":"%s","lens_id":"%s","would_be_ineligible":1}\n' \
+          "$_ts" "$_vl" >> "$_shadow" 2>/dev/null
+      fi
+    done <<EOF
+$_validated
+EOF
+  fi
+
+  if [ "${PP_LENS_GATES_ACTIVE:-0}" = "1" ] && [ -n "$_facts_file" ] && [ -f "$_facts_file" ] \
+     && command -v pp_lens_is_eligible >/dev/null 2>&1; then
+    # Pass 1: split _validated into eligible vs dropped.
+    local _eligible="" _dropped="" _vline _cand _seen_e=""
+    while IFS= read -r _vline; do
+      [ -z "$_vline" ] && continue
+      if pp_lens_is_eligible "$_vline" "$_facts_file"; then
+        _eligible="${_eligible}${_vline}"$'\n'
+      else
+        _dropped="${_dropped}${_vline}"$'\n'
+      fi
+    done <<EOF
+$_validated
+EOF
+
+    # Pass 2: for each dropped pick, draw ONE replacement from the
+    # enabled set in order, skipping already-picked and ineligible. Stop
+    # when we've replaced all drops OR enabled-set is exhausted.
+    local _drop_count
+    _drop_count=$(printf '%s' "$_dropped" | LC_ALL=C grep -c '^.' 2>/dev/null)
+    _drop_count="${_drop_count:-0}"
+    if [ "$_drop_count" -gt 0 ]; then
+      local _need="$_drop_count"
+      # Build _seen_e from current _eligible list (case-sensitive).
+      while IFS= read -r _vline; do
+        [ -z "$_vline" ] && continue
+        _seen_e="${_seen_e} ${_vline}"
+      done <<EOF
+$_eligible
+EOF
+      # Also block already-considered (dropped) picks from being re-drawn.
+      while IFS= read -r _vline; do
+        [ -z "$_vline" ] && continue
+        _seen_e="${_seen_e} ${_vline}"
+      done <<EOF
+$_dropped
+EOF
+      while IFS= read -r _cand; do
+        [ -z "$_cand" ] && continue
+        [ "$_need" -le 0 ] && break
+        case " $_seen_e " in
+          *" $_cand "*) continue ;;
+        esac
+        if pp_lens_is_eligible "$_cand" "$_facts_file"; then
+          _eligible="${_eligible}${_cand}"$'\n'
+          _seen_e="$_seen_e $_cand"
+          _need=$((_need - 1))
+        fi
+      done <<EOF
+$_enabled_cached
+EOF
+    fi
+
+    _validated="$_eligible"
+  fi
+  # ============================================================================
+  # END v0.5.1.1 Stage D
+  # ============================================================================
 
   # Cap at MAX: tail-clip extras.
   printf '%s' "$_validated" | LC_ALL=C grep -v '^$' | head -n "${PP_ROUTER_MAX:-3}"

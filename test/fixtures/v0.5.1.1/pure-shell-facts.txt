@@ -1,0 +1,58 @@
+# facts_schema: 2
+=== USER RECENT MESSAGES (PRIMARY CONTEXT — focus your observation on this) ===
+working on bash portability fixes for the statusline cycle
+
+=== GIT STATUS (uncommitted) ===
+ M bin/statusline.sh
+ M lib/router.sh
+?? lib/eligibility.sh
+
+=== RECENT COMMITS ===
+b700ad5 docs(v0.5.2): append GPT pre-implementation review addendum to plan
+a35d5e4 docs(v0.5.3): fold GPT stress-test (steelman + gaps) into vision doc
+
+=== RECENT DIFF SCOPE ===
+ bin/statusline.sh  | 12 ++++++++----
+ lib/router.sh      |  6 +++---
+
+=== CWD TOP-LEVEL ===
+bin/  lib/  lenses/  test/  config/
+
+=== RECENT TOOL CALLS (last 15) ===
+Read: bin/statusline.sh
+Edit: lib/router.sh
+Bash: bats test/router.bats
+
+=== FILE READ (planner picked: bin/statusline.sh) ===
+#!/usr/bin/env bash
+# bin/statusline.sh — Claude Code statusline driver (refreshed every 2s).
+# Owns the cycle gate (PP_PARALLEL_INTERVAL_S=300) + analyst fan-out.
+
+set -eo pipefail
+LC_ALL=C; export LC_ALL
+
+PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PP_ROOT/lib/config.sh"
+
+=== SYMBOL REFERENCE COUNTS (grep across cwd) ===
+PP_ROOT: 14 refs
+set -eo pipefail: 8 refs
+
+=== LAST TEST/LINT RUN (≤30min, from PostToolUse hook) ===
+(no recent test/lint runs)
+
+=== PREVIOUS OBSERVATIONS (do not repeat these) ===
+(none yet)
+
+# git_diff_paths
+bin/statusline.sh
+lib/router.sh
+# /git_diff_paths
+
+# git_untracked_paths
+lib/eligibility.sh
+# /git_untracked_paths
+
+# git_staged_paths
+# /git_staged_paths

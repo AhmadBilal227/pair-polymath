@@ -139,6 +139,34 @@ JSON
   [ -z "${PP_LENS_EXAMPLES[$last]}" ]
 }
 
+@test "loader: silent_reasons array parsed into PP_LENS_SILENT_REASONS (\\x1f-joined)" {
+  pp_load_lenses
+  # All 7 built-in lenses MUST declare silent_reasons (closed-enum invariant).
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ -n "${PP_LENS_SILENT_REASONS[$i]}" ] \
+      || { echo "lens ${PP_LENS_IDS[$i]} missing silent_reasons"; return 1; }
+  done
+}
+
+@test "loader: lens with no silent_reasons defaults to empty string (no crash)" {
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  cat > "$HOME/.claude/pair-polymath/lenses/01-ux-design.json" <<'JSON'
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["UX"],
+  "focus": "f",
+  "color_hex": "#000",
+  "enabled": true,
+  "extras": {}
+}
+JSON
+  pp_load_lenses
+  [ "${PP_LENS_IDS[0]}" = "UX_DESIGN" ]
+  [ -z "${PP_LENS_SILENT_REASONS[0]}" ]
+}
+
 @test "loader: stable tiebreak when display_order ties" {
   mkdir -p "$HOME/.claude/pair-polymath/lenses"
   # Inject 2 user lenses both with display_order=100 — verify deterministic id-ascending order
@@ -155,4 +183,108 @@ JSON
   # AA_APPLE sorts before ZZ_BANANA by id within the tied display_order=100.
   [ "${PP_LENS_IDS[7]}" = "AA_APPLE" ]
   [ "${PP_LENS_IDS[8]}" = "ZZ_BANANA" ]
+}
+
+# --- v0.5.1.1 Stage D — eligibility block parsing ---
+
+@test "loader: eligibility kind populated for every built-in lens" {
+  pp_load_lenses
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    case "${PP_LENS_ELIGIBILITY_KIND[$i]}" in
+      always|path_glob) ;;
+      *)
+        echo "lens ${PP_LENS_IDS[$i]} has invalid eligibility kind: '${PP_LENS_ELIGIBILITY_KIND[$i]}'"
+        return 1 ;;
+    esac
+  done
+}
+
+@test "loader: UX_DESIGN eligibility kind is path_glob" {
+  pp_load_lenses
+  # UX_DESIGN is index 0 (display_order=1).
+  [ "${PP_LENS_ELIGIBILITY_KIND[0]}" = "path_glob" ]
+}
+
+@test "loader: UX_DESIGN regexes include the **/*.tsx pattern" {
+  pp_load_lenses
+  printf '%s\n' "${PP_LENS_ELIGIBILITY_REGEXES[0]}" | tr $'\x1f' '\n' \
+    | grep -qF '^(.*/)?[^/]*\.tsx$'
+}
+
+@test "loader: STRATEGIC_FOUNDER eligibility kind is always" {
+  pp_load_lenses
+  local idx=""
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ "${PP_LENS_IDS[$i]}" = "STRATEGIC_FOUNDER" ] && idx=$i && break
+  done
+  [ -n "$idx" ]
+  [ "${PP_LENS_ELIGIBILITY_KIND[$idx]}" = "always" ]
+}
+
+@test "loader: COGNITIVE_FLOW eligibility kind is always" {
+  pp_load_lenses
+  local idx=""
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ "${PP_LENS_IDS[$i]}" = "COGNITIVE_FLOW" ] && idx=$i && break
+  done
+  [ -n "$idx" ]
+  [ "${PP_LENS_ELIGIBILITY_KIND[$idx]}" = "always" ]
+}
+
+@test "loader: ENGINEERING regexes cover broad code globs (matches src/foo.ts)" {
+  pp_load_lenses
+  local idx=""
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ "${PP_LENS_IDS[$i]}" = "ENGINEERING" ] && idx=$i && break
+  done
+  [ -n "$idx" ]
+  local matched=0
+  local r
+  while IFS= read -r r; do
+    [ -z "$r" ] && continue
+    if [[ "src/foo.ts" =~ $r ]]; then matched=1; break; fi
+  done <<EOF
+$(printf '%s\n' "${PP_LENS_ELIGIBILITY_REGEXES[$idx]}" | tr $'\x1f' '\n')
+EOF
+  [ "$matched" -eq 1 ]
+}
+
+@test "loader: pp_lens_eligibility_kind accessor returns correct kind by id" {
+  pp_load_lenses
+  result=$(pp_lens_eligibility_kind "UX_DESIGN")
+  [ "$result" = "path_glob" ]
+  result=$(pp_lens_eligibility_kind "STRATEGIC_FOUNDER")
+  [ "$result" = "always" ]
+}
+
+@test "loader: pp_lens_eligibility_kind on unknown lens id returns empty + exit 1" {
+  pp_load_lenses
+  run pp_lens_eligibility_kind "DOES_NOT_EXIST"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "loader: lens with missing eligibility block defaults to kind=always" {
+  # Back-compat: a custom user lens with no eligibility key MUST default
+  # to always-eligible (don't silently disable user lenses).
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  cat > "$HOME/.claude/pair-polymath/lenses/99-custom.json" <<'JSON'
+{
+  "version": 1,
+  "id": "CUSTOM",
+  "display_order": 99,
+  "hats": ["X"],
+  "focus": "test",
+  "color_hex": "#000",
+  "enabled": true,
+  "extras": {}
+}
+JSON
+  pp_load_lenses
+  local idx=""
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ "${PP_LENS_IDS[$i]}" = "CUSTOM" ] && idx=$i && break
+  done
+  [ -n "$idx" ]
+  [ "${PP_LENS_ELIGIBILITY_KIND[$idx]}" = "always" ]
 }

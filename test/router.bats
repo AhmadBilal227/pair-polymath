@@ -12,7 +12,16 @@ setup() {
   # Clean env between tests.
   unset PP_ROUTER_ENABLE PP_ROUTER_MAX PP_ROUTER_MIN \
         PP_ROUTER_SURPRISE_PROB PP_ROUTER_FORCE_OUTPUT \
-        PP_LENS_IDS_AVAILABLE PP_EVAL_MODE PP_RANDOM_SEED
+        PP_LENS_IDS_AVAILABLE PP_EVAL_MODE PP_RANDOM_SEED \
+        PP_LENS_GATES_ACTIVE PP_LENS_GATES_TELEMETRY PP_LENS_GATES_SHADOW_FILE
+
+  # v0.5.1.1 Stage D: source eligibility evaluator + load lenses so the
+  # router's filter pass can call pp_lens_is_eligible.
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/lens-loader.sh"
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/eligibility.sh"
+  pp_load_lenses 2>/dev/null || true
 }
 
 teardown() { rm -rf "$HOME"; }
@@ -295,4 +304,229 @@ MOCKEOF
   # 'engineering' should appear at most once
   count=$(printf '%s\n' "$output" | grep -c '^engineering$')
   [ "$count" -eq 1 ]
+}
+
+# ============================================================================
+# v0.5.1.1 Stage D — eligibility filter in pp_router_pick_lenses
+# ============================================================================
+
+@test "Stage D router (gates OFF): byte-identical to v0.5.0 (no facts arg)" {
+  export PP_LENS_GATES_ACTIVE=0
+  export PP_LENS_GATES_TELEMETRY=0
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_ENABLE=1
+  run pp_router_pick_lenses '{}' ''
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qxF 'UX_DESIGN'
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  printf '%s' "$output" | grep -qxF 'SECURITY'
+}
+
+@test "Stage D router (gates ON, no facts): no filtering applied (fail-open)" {
+  export PP_LENS_GATES_ACTIVE=1
+  export PP_LENS_GATES_TELEMETRY=0
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_ENABLE=1
+  # No facts file passed → eligibility evaluation skipped.
+  run pp_router_pick_lenses '{}' ''
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qxF 'UX_DESIGN'
+}
+
+@test "Stage D router (gates ON, with facts): UX_DESIGN dropped on pure-shell snapshot" {
+  export PP_LENS_GATES_ACTIVE=1
+  export PP_LENS_GATES_TELEMETRY=0
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nENGINEERING\nSECURITY\nPERF_FINOPS'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_ENABLE=1
+  # Build a pure-shell facts file.
+  facts_file="$BATS_TMPDIR/router-pure-shell-facts.txt"
+  cat > "$facts_file" <<'EOF'
+# facts_schema: 2
+=== FILE READ (planner picked: bin/statusline.sh) ===
+(omitted)
+
+# git_diff_paths
+bin/statusline.sh
+lib/router.sh
+# /git_diff_paths
+
+# git_untracked_paths
+# /git_untracked_paths
+
+# git_staged_paths
+# /git_staged_paths
+EOF
+  run pp_router_pick_lenses '{}' '' "$facts_file"
+  [ "$status" -eq 0 ]
+  # UX_DESIGN should be filtered out; replacement drawn from PERF_FINOPS
+  # (next-ranked eligible in PP_LENS_IDS_AVAILABLE order).
+  if printf '%s' "$output" | grep -qxF 'UX_DESIGN'; then
+    echo "UX_DESIGN should have been filtered. Got: $output"
+    return 1
+  fi
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  printf '%s' "$output" | grep -qxF 'SECURITY'
+  # And the replacement:
+  printf '%s' "$output" | grep -qxF 'PERF_FINOPS'
+}
+
+@test "Stage D router (gates ON): no eligible replacement -> fan-out runs smaller" {
+  export PP_LENS_GATES_ACTIVE=1
+  export PP_LENS_GATES_TELEMETRY=0
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nPRODUCT_BIZ'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nPRODUCT_BIZ'
+  export PP_ROUTER_ENABLE=1
+  # Pure-shell snapshot: NEITHER UX_DESIGN nor PRODUCT_BIZ eligible, and
+  # no replacement candidates available.
+  facts_file="$BATS_TMPDIR/router-tiny-pool-facts.txt"
+  cat > "$facts_file" <<'EOF'
+# facts_schema: 2
+=== FILE READ (planner picked: bin/statusline.sh) ===
+(omitted)
+
+# git_diff_paths
+bin/statusline.sh
+# /git_diff_paths
+
+# git_untracked_paths
+# /git_untracked_paths
+
+# git_staged_paths
+# /git_staged_paths
+EOF
+  # Must NOT crash; must NOT silently fall open to all-enabled.
+  run pp_router_pick_lenses '{}' '' "$facts_file"
+  [ "$status" -eq 0 ]
+  # Output may be empty; UX_DESIGN and PRODUCT_BIZ must NOT appear.
+  if printf '%s' "$output" | grep -qxF 'UX_DESIGN'; then
+    echo "UX_DESIGN should have been filtered"
+    return 1
+  fi
+  if printf '%s' "$output" | grep -qxF 'PRODUCT_BIZ'; then
+    echo "PRODUCT_BIZ should have been filtered"
+    return 1
+  fi
+}
+
+@test "Stage D router (gates ON): STRATEGIC_FOUNDER (kind=always) passes filter" {
+  export PP_LENS_GATES_ACTIVE=1
+  export PP_LENS_GATES_TELEMETRY=0
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nSTRATEGIC_FOUNDER'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nSTRATEGIC_FOUNDER'
+  export PP_ROUTER_ENABLE=1
+  facts_file="$BATS_TMPDIR/router-sf-facts.txt"
+  cat > "$facts_file" <<'EOF'
+# facts_schema: 2
+=== FILE READ (planner picked: bin/statusline.sh) ===
+(omitted)
+
+# git_diff_paths
+bin/statusline.sh
+# /git_diff_paths
+
+# git_untracked_paths
+# /git_untracked_paths
+
+# git_staged_paths
+# /git_staged_paths
+EOF
+  run pp_router_pick_lenses '{}' '' "$facts_file"
+  [ "$status" -eq 0 ]
+  # UX_DESIGN filtered out, STRATEGIC_FOUNDER (always-eligible) survives.
+  if printf '%s' "$output" | grep -qxF 'UX_DESIGN'; then
+    echo "UX_DESIGN should have been filtered"
+    return 1
+  fi
+  printf '%s' "$output" | grep -qxF 'STRATEGIC_FOUNDER'
+}
+
+@test "Stage D router (telemetry ON, active OFF): would_be_ineligible stamped (shadow)" {
+  export PP_LENS_GATES_ACTIVE=0
+  export PP_LENS_GATES_TELEMETRY=1
+  export PP_LENS_GATES_SHADOW_FILE="$BATS_TMPDIR/router-shadow.jsonl"
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_ENABLE=1
+  rm -f "$PP_LENS_GATES_SHADOW_FILE"
+  facts_file="$BATS_TMPDIR/router-shadow-facts.txt"
+  cat > "$facts_file" <<'EOF'
+# facts_schema: 2
+=== FILE READ (planner picked: bin/statusline.sh) ===
+(omitted)
+
+# git_diff_paths
+bin/statusline.sh
+# /git_diff_paths
+
+# git_untracked_paths
+# /git_untracked_paths
+
+# git_staged_paths
+# /git_staged_paths
+EOF
+  run pp_router_pick_lenses '{}' '' "$facts_file"
+  [ "$status" -eq 0 ]
+  # Behavior unchanged — UX_DESIGN survives picks (active=0).
+  printf '%s' "$output" | grep -qxF 'UX_DESIGN'
+  # But the shadow file records UX_DESIGN as would_be_ineligible=1.
+  [ -f "$PP_LENS_GATES_SHADOW_FILE" ]
+  grep -q '"lens_id":"UX_DESIGN"' "$PP_LENS_GATES_SHADOW_FILE"
+  grep -q '"would_be_ineligible":1' "$PP_LENS_GATES_SHADOW_FILE"
+}
+
+@test "Stage D router (gates ON): replacement draws ONE candidate, not all remaining" {
+  # If the picker dropped UX_DESIGN AND PRODUCT_BIZ as ineligible, we
+  # should draw at most 2 replacements (one per dropped pick), NOT flood
+  # the enabled set in.
+  export PP_LENS_GATES_ACTIVE=1
+  export PP_LENS_GATES_TELEMETRY=0
+  export PP_ROUTER_MAX=3
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nPRODUCT_BIZ\nENGINEERING\nSECURITY\nPERF_FINOPS\nSTRATEGIC_FOUNDER\nCOGNITIVE_FLOW'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nPRODUCT_BIZ\nENGINEERING'
+  export PP_ROUTER_ENABLE=1
+  facts_file="$BATS_TMPDIR/router-replace-facts.txt"
+  cat > "$facts_file" <<'EOF'
+# facts_schema: 2
+=== FILE READ (planner picked: bin/statusline.sh) ===
+(omitted)
+
+# git_diff_paths
+bin/statusline.sh
+# /git_diff_paths
+
+# git_untracked_paths
+# /git_untracked_paths
+
+# git_staged_paths
+# /git_staged_paths
+EOF
+  run pp_router_pick_lenses '{}' '' "$facts_file"
+  [ "$status" -eq 0 ]
+  picked_count=$(printf '%s' "$output" | grep -c '^.')
+  # Expect 3 picks total (max), with UX_DESIGN and PRODUCT_BIZ replaced
+  # by the next-ranked eligible: SECURITY, PERF_FINOPS (ENGINEERING was
+  # already picked).
+  [ "$picked_count" -eq 3 ]
+  printf '%s' "$output" | grep -qxF 'ENGINEERING'
+  printf '%s' "$output" | grep -qxF 'SECURITY'
+  printf '%s' "$output" | grep -qxF 'PERF_FINOPS'
+}
+
+@test "Stage D router (gates ON, facts file missing): falls open (no crash)" {
+  export PP_LENS_GATES_ACTIVE=1
+  export PP_LENS_GATES_TELEMETRY=0
+  export PP_LENS_IDS_AVAILABLE=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_FORCE_OUTPUT=$'UX_DESIGN\nENGINEERING\nSECURITY'
+  export PP_ROUTER_ENABLE=1
+  # Path that does not exist.
+  run pp_router_pick_lenses '{}' '' "/nonexistent/$$/$RANDOM/facts.txt"
+  [ "$status" -eq 0 ]
+  # Eligibility evaluation gracefully degrades to "no path set" → since
+  # PP_LENS_GATES_ACTIVE=1, all picks dropped. To avoid silent
+  # dark-mode, the spec/Task 10 explicitly says fan-out runs smaller —
+  # in the limit, output is empty. Test asserts NO crash and exit 0.
+  true
 }

@@ -433,3 +433,335 @@ pp_safe_git_pathspec() {
   [ -z "$p" ] && return 1
   printf ':(literal)%s' "$p"
 }
+
+# pp_grounding_symbol_inventory FACTS_FILE
+# v0.5.1.1 Stage A — single source of truth for the FILE-READ-derived
+# symbol allowlist. Used by:
+#   - bin/statusline.sh validator (VALID SYMBOLS block) — Stage A
+#   - bin/statusline.sh prompt (SYMBOL REFERENCE COUNTS, post-Stage C)
+# Splitting these two consumers across one helper eliminates the drift
+# class the v0.5.1.1 spec calls out as the root of ~70% of lens DROPs.
+#
+# Input: path to the facts file (the grounded blob; today written by
+#   bin/statusline.sh via `pp_write_privacy_log` into
+#   $PP_CACHE_DIR/last-cycle-payload.json, but for Stage A this helper
+#   accepts ANY file containing a `=== FILE READ: ...===` block — the
+#   caller is responsible for choosing the right artifact).
+# Output: stopword-filtered, sorted, unique identifiers from the FILE READ
+#   block, one per line. Empty stdout + rc=0 when block is missing or
+#   contains no identifiers. rc=1 when FACTS_FILE is unreadable.
+#
+# Identifier regex matches the same shape as citations.sh:
+#   [A-Za-z_][A-Za-z0-9_]{2,}     (>=3 chars)
+# Stopword set sourced from $_PP_CITATION_STOPWORDS in citations.sh — the
+# caller MUST source citations.sh before calling this helper. We do NOT
+# re-declare the stopword list here: if it drifts between the two callers
+# (this helper vs pp_extract_citations) the validator-side and lens-side
+# allowlists will silently disagree — exactly the bug Stage A is fixing.
+#
+# Bash 3.2 portable: no mapfile, no associative arrays. awk handles
+# section extraction (same pattern as lib/citations.sh::pp_extract_citations).
+pp_grounding_symbol_inventory() {
+  local _facts="${1:-}"
+  [ -z "$_facts" ] && return 1
+  [ -r "$_facts" ] || return 1
+
+  # === Section extraction ===
+  # Grab the body between `=== FILE READ: ...===` (or `=== FILE READ (...) ===`)
+  # and the next `=== ` header. The today-grounded blob uses the form
+  # `=== FILE READ (planner picked: <path>) ===` (bin/statusline.sh:852)
+  # so we match on the `FILE READ` substring per index(), same as
+  # pp_extract_citations at lib/citations.sh:109.
+  #
+  # The canonical "nothing read this cycle" sentinel from
+  # bin/statusline.sh:853 — `(no file read this round)` — is skipped
+  # explicitly so its own tokens (file/read/round) don't leak into the
+  # symbol allowlist. plan-task A2 (pp_grounding_inventory_is_empty)
+  # relies on this returning zero symbols for the sentinel input.
+  local _section
+  _section=$(LC_ALL=C awk '
+    /^=== / {
+      in_section = 0
+      if (index($0, "FILE READ") > 0) in_section = 1
+      next
+    }
+    in_section == 1 {
+      if ($0 == "(no file read this round)") next
+      print
+    }
+  ' "$_facts" 2>/dev/null)
+
+  [ -z "$_section" ] && return 0
+
+  # === Identifier extraction ===
+  # Identical regex to citations.sh:123 — keeps the two consumers byte-
+  # equivalent on the token-extraction step. The downstream stopword
+  # filter is also identical (citations.sh:134-144 reproduced below) so
+  # the test in step 1 ("drops stopwords") passes whichever way it's
+  # invoked.
+  local _raw
+  _raw=$(printf '%s\n' "$_section" \
+    | LC_ALL=C grep -oE '[A-Za-z_][A-Za-z0-9_]{2,}' 2>/dev/null \
+    || true)
+
+  [ -z "$_raw" ] && return 0
+
+  # === Stopword filter + sort + uniq ===
+  # _PP_CITATION_STOPWORDS comes from lib/citations.sh. If the caller
+  # didn't source it (defensive — every production caller does), the awk
+  # `stops` arg is empty, the BEGIN loop builds an empty set, and the
+  # `tok in stop` check is always false. That degrades to "no stopword
+  # filter" — broader allowlist, but not incorrect. We do NOT inline a
+  # fallback stopword list here: doing so would silently mask citations.sh
+  # being out of date or unsourced.
+  # shellcheck disable=SC2154
+  printf '%s\n' "$_raw" \
+    | LC_ALL=C awk -v stops="${_PP_CITATION_STOPWORDS:-}" '
+        BEGIN {
+          n = split(stops, arr, " ")
+          for (i = 1; i <= n; i++) stop[arr[i]] = 1
+        }
+        {
+          tok = $0
+          if (length(tok) < 3) next
+          if (tok in stop) next
+          print tok
+        }
+      ' \
+    | LC_ALL=C sort -u
+  return 0
+}
+
+# pp_grounding_inventory_is_empty FACTS_FILE
+# v0.5.1.1 Stage A — boolean for the EMPTY-ALLOWLIST EXCEPTION (spec
+# task 6b). Returns 0 ("true: inventory is empty, the EXCEPTION fires")
+# when pp_grounding_symbol_inventory would produce zero lines; returns 1
+# ("false: inventory has entries") otherwise. Missing/unreadable
+# FACTS_FILE -> treated as empty (rc=0). Reasoning: an absent snapshot
+# means there's nothing for the validator to enforce citations against;
+# defaulting to "non-empty" would DROP every observation for citing
+# paths/symbols the validator can't check, which inverts the spec's
+# intent.
+#
+# Single source of truth: BOTH the lens prompt (Stage C, will render
+# "(no FILE-READ symbols extracted; cite by path only)" when this
+# returns 0) and the validator-side critique allowlist block (Stage A,
+# renders the EMPTY-ALLOWLIST EXCEPTION clause from prompts/critique.md
+# verbatim when this returns 0) call this helper. The bats fixture in
+# test/v0.5.1.1-empty-allowlist-mirror.bats pins that both render their
+# respective empty-state text driven by this same helper's output.
+pp_grounding_inventory_is_empty() {
+  local _facts="${1:-}"
+  [ -z "$_facts" ] && return 0
+  [ -r "$_facts" ] || return 0
+
+  # Reuse the same extractor + filter pipeline. If pp_grounding_symbol_inventory
+  # would print nothing, this returns 0 (empty == true). One source of
+  # truth: any future change to the extractor automatically flows through
+  # this boolean.
+  local _out
+  _out=$(pp_grounding_symbol_inventory "$_facts" 2>/dev/null)
+  if [ -z "$_out" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# === v0.5.1.1 Task 2 (Stage C): symbol-block render helpers =================
+# Pure transforms; flag-gated at caller level. LC_ALL=C forced everywhere
+# (sort/awk) for cross-locale stability (drift_count sha8 invariant).
+#
+# Three helpers compose into one rendering pipeline:
+#   pp_grounding_symbol_inventory_from_file_read FILE_CONTENTS
+#     → FILE-READ-derived symbol set (in-memory variant of the facts-file
+#       pp_grounding_symbol_inventory above; statusline.sh hands
+#       file_contents directly so we can't go via a file path).
+#   pp_grounding_render_symbol_block FILE_CONTENTS CWD TOP_N
+#     → "name: N refs" lines. Flag OFF = legacy grep block. Flag ON =
+#       legacy block filtered to FILE-READ symbols (canonical set).
+#       Both modes pass through sort+truncate for deterministic order.
+#   pp_grounding_compose_symbol_sections PRIMARY NEARBY
+#     → section header(s) + body. Flag OFF = single SYMBOL REFERENCE
+#       COUNTS section (byte-identical to pre-Stage-C). Flag ON = primary
+#       FILE-READ section + new NEARBY MENTIONS (NOT CITABLE) section.
+#
+# Drift invariant: prompt-side and validator-side BOTH call
+# pp_grounding_symbol_inventory_from_file_read on the same file_contents.
+# A divergence in the rendered allowlist would mean the helpers themselves
+# disagreed — that's the doctor #22 alarm condition.
+
+# pp_grounding_symbol_inventory_from_file_read FILE_CONTENTS
+# Stdout: canonical FILE-READ-derived symbol set, one per line.
+# In-memory entry point for the same tokenizer pp_grounding_symbol_inventory
+# uses on facts-file input. Drift between the two would break the drift_count
+# invariant; both grep regex and sort options must stay byte-identical.
+pp_grounding_symbol_inventory_from_file_read() {
+  local _file_contents="${1:-}"
+  [ -z "$_file_contents" ] && return 0
+  printf "%s" "$_file_contents" \
+    | LC_ALL=C grep -oE '(^|[[:space:]])(function|const|let|class|def)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]+' 2>/dev/null \
+    | LC_ALL=C awk '{print $NF}' \
+    | LC_ALL=C sort -u
+}
+
+# pp_grounding_sort_and_truncate TOP_N
+# stdin: "name: N refs" lines (legacy symbol_refs format from statusline.sh).
+# stdout: top TOP_N, sorted freq DESC + ASCII tie-break ASC. Appends
+#         "(+N more — pull via FILE READ to cite)" when input rows > TOP_N.
+pp_grounding_sort_and_truncate() {
+  local _n="${1:-80}"
+  case "$_n" in ''|*[!0-9]*) _n=80 ;; esac
+  # Read stdin into a temp file so we can count + sort + truncate.
+  local _tmp
+  _tmp=$(mktemp 2>/dev/null) || return 0
+  cat > "$_tmp"
+  local _total
+  # grep -c with no match exits 1 and prints 0; `|| true` suppresses
+  # exit-1 propagation under `set -e`.
+  _total=$(LC_ALL=C grep -c ':' "$_tmp" 2>/dev/null || true)
+  case "$_total" in ''|*[!0-9]*) _total=0 ;; esac
+  # Sort key 1: refs count DESC (numeric). Sort key 2: symbol name ASC (lex).
+  # Awk projects each row to "<freq>\t<name>\toriginal-line"; sort -k1nr -k2
+  # over the projection; cut restores the original line. LC_ALL=C pins the
+  # collation so 'DeltaThing' < 'gamma' (capital before lowercase, ASCII).
+  LC_ALL=C awk -F': *' '
+    NF >= 2 {
+      sym = $1
+      refs = $2
+      gsub(/ refs.*$/, "", refs)
+      gsub(/^[ \t]+|[ \t]+$/, "", sym)
+      gsub(/^[ \t]+|[ \t]+$/, "", refs)
+      if (sym == "" || refs !~ /^[0-9]+$/) next
+      printf "%s\t%s\t%s\n", refs, sym, $0
+    }
+  ' "$_tmp" \
+    | LC_ALL=C sort -t '	' -k1,1nr -k2,2 \
+    | head -n "$_n" \
+    | cut -f3-
+  if [ "$_total" -gt "$_n" ]; then
+    local _extra=$((_total - _n))
+    printf '(+%s more — pull via FILE READ to cite)\n' "$_extra"
+  fi
+  rm -f "$_tmp" 2>/dev/null || true
+}
+
+# pp_grounding_render_symbol_block FILE_CONTENTS CWD TOP_N
+# Flag OFF (default) ⇒ legacy grep block, then sort+truncate (deterministic
+# order; bounded by TOP_N). Flag ON ⇒ filter legacy rows to symbols that
+# ALSO appear in the FILE-READ canonical set; grep frequency still drives
+# the sort key.
+pp_grounding_render_symbol_block() {
+  local _file_contents="${1:-}"
+  local _cwd="${2:-}"
+  local _n="${3:-80}"
+  case "$_n" in ''|*[!0-9]*) _n=80 ;; esac
+  [ -z "$_file_contents" ] && return 0
+  if [ -z "$_cwd" ] || [ "$_cwd" = "-" ]; then
+    return 0
+  fi
+
+  # Reproduce statusline.sh's legacy grep-derived symbol_refs computation
+  # here so the rendering pipeline has one source of truth. Do NOT change
+  # the underlying extraction; only filter / sort / truncate downstream.
+  local _candidates _legacy_block
+  _candidates=$(printf "%s" "$_file_contents" \
+    | LC_ALL=C grep -oE '(^|[[:space:]])(function|const|let|class|def)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]+' 2>/dev/null \
+    | LC_ALL=C awk '{print $NF}' | LC_ALL=C sort -u | head -15)
+  _legacy_block=""
+  if [ -n "$_candidates" ]; then
+    local _sym _refs
+    while IFS= read -r _sym; do
+      [ -z "$_sym" ] && continue
+      _refs=$(LC_ALL=C grep -rn -F --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
+                --include='*.py' --include='*.go' --include='*.rs' \
+                --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+                --exclude-dir=build --exclude-dir=coverage --exclude-dir=.next \
+                --exclude-dir=.turbo --exclude-dir=vendor \
+                -- "$_sym" "$_cwd" 2>/dev/null | wc -l | tr -d ' ')
+      case "$_refs" in ''|*[!0-9]*) _refs=0 ;; esac
+      if [ "$_refs" -gt 0 ]; then
+        _legacy_block="${_legacy_block}${_sym}: ${_refs} refs"$'\n'
+      fi
+    done <<EOF
+$_candidates
+EOF
+  fi
+
+  if [ "${PP_INVENTORY_UNIFY_ACTIVE:-0}" != "1" ]; then
+    # Legacy path — emit grep block as-is via sort_and_truncate (still
+    # deterministic; still bounded to TOP_N for token-cost predictability).
+    printf '%s' "$_legacy_block" | pp_grounding_sort_and_truncate "$_n"
+    return 0
+  fi
+
+  # Flag ON — filter the legacy block to symbols that ALSO appear in the
+  # FILE-READ-derived canonical inventory.
+  local _canonical
+  _canonical=$(pp_grounding_symbol_inventory_from_file_read "$_file_contents" 2>/dev/null \
+                 | LC_ALL=C sort -u)
+  if [ -z "$_canonical" ]; then
+    # FILE-READ inventory empty — let the caller render the explicit
+    # empty-state string via compose_symbol_sections (Task 6b).
+    return 0
+  fi
+  # Pass canonical set via a temp file rather than -v: awk's -v parser
+  # rejects embedded newlines on mawk/some macOS awks ("awk: newline in
+  # string"). The temp file is read once in BEGIN, then closed before
+  # the per-record loop scans stdin.
+  local _canon_tmp
+  _canon_tmp=$(mktemp 2>/dev/null) || return 0
+  printf '%s\n' "$_canonical" > "$_canon_tmp"
+  printf '%s' "$_legacy_block" \
+    | LC_ALL=C awk -F': *' -v canon_file="$_canon_tmp" '
+        BEGIN {
+          while ((getline line < canon_file) > 0) {
+            if (line != "") ok[line] = 1
+          }
+          close(canon_file)
+        }
+        NF >= 2 && ($1 in ok) { print $0 }
+      ' \
+    | pp_grounding_sort_and_truncate "$_n"
+  rm -f "$_canon_tmp" 2>/dev/null || true
+}
+
+# pp_grounding_compose_symbol_sections PRIMARY_BLOCK NEARBY_BLOCK
+# Flag OFF ⇒ only "=== SYMBOL REFERENCE COUNTS (grep across cwd) ===" header
+#   + PRIMARY_BLOCK (or legacy default sentinel when empty). NEARBY_BLOCK
+#   ignored. Byte-identical (post-command-sub trim) to pre-Stage-C heredoc.
+# Flag ON ⇒ "=== SYMBOL REFERENCE COUNTS (FILE-READ-derived — citable) ==="
+#   + PRIMARY_BLOCK (or empty-state sentinel), then "=== NEARBY MENTIONS
+#   (NOT CITABLE — read the file first to cite) ===" + NEARBY_BLOCK.
+#
+# Output contract: no trailing newline. Caller embeds via `${var}` inside
+# a heredoc, which adds its own \n. Internal section separators do emit
+# a blank line (\n\n between primary and nearby sections, flag on only).
+pp_grounding_compose_symbol_sections() {
+  local _primary="${1:-}"
+  local _nearby="${2:-}"
+  # Strip any trailing newline from inputs so we have exact control over
+  # output framing.
+  _primary="${_primary%$'\n'}"
+  _nearby="${_nearby%$'\n'}"
+  if [ "${PP_INVENTORY_UNIFY_ACTIVE:-0}" != "1" ]; then
+    printf '=== SYMBOL REFERENCE COUNTS (grep across cwd) ===\n'
+    if [ -n "$_primary" ]; then
+      printf '%s' "$_primary"
+    else
+      printf '(no symbols extracted from file read)'
+    fi
+    return 0
+  fi
+  printf '=== SYMBOL REFERENCE COUNTS (FILE-READ-derived — citable) ===\n'
+  if [ -n "$_primary" ]; then
+    printf '%s\n' "$_primary"
+  else
+    printf '(no FILE-READ symbols extracted; cite by path only)\n'
+  fi
+  printf '\n=== NEARBY MENTIONS (NOT CITABLE — read the file first to cite) ===\n'
+  if [ -n "$_nearby" ]; then
+    printf '%s' "$_nearby"
+  else
+    printf '(no nearby grep hits in cwd)'
+  fi
+}

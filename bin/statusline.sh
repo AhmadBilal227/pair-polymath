@@ -31,6 +31,67 @@ pp_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# _pp_sha8 — emit first 8 hex chars of sha256 of stdin. Single source so
+# every Stage A consumer (verdict stamping + drift invariant) uses the
+# same digest tool fallback chain. The fallback chain mirrors lib/oar.sh
+# (md5sum acceptable for bucketing — cryptographic strength irrelevant;
+# we only need stable hashing).
+_pp_sha8() {
+  local _h=""
+  if command -v shasum >/dev/null 2>&1; then
+    _h=$(shasum -a 256 2>/dev/null | cut -c1-8)
+  elif command -v sha256sum >/dev/null 2>&1; then
+    _h=$(sha256sum 2>/dev/null | cut -c1-8)
+  elif command -v sha256 >/dev/null 2>&1; then
+    _h=$(sha256 -q 2>/dev/null | cut -c1-8)
+  elif command -v md5sum >/dev/null 2>&1; then
+    _h=$(md5sum 2>/dev/null | cut -c1-8)
+  elif command -v md5 >/dev/null 2>&1; then
+    _h=$(md5 -q 2>/dev/null | cut -c1-8)
+  fi
+  [ -z "$_h" ] && _h="00000000"
+  printf '%s' "$_h"
+}
+
+# _pp_write_verdict_v2 FILE BODY PROMPT_SHA8 VALIDATOR_SHA8 RENDERED_SHA8 SILENT_REASON
+# v0.5.1.1 Stage A spec task 3 — sole writer of the per-lens verdict
+# file. Stage C back-patch: emits DUAL canonical_allowlist_sha8 fields
+# (prompt-side + validator-side) so doctor #22 drift_count alarm has
+# real signal. Format:
+#   # schema_version: 2
+#   <body, exactly as v1 emitted it: `lensN: PASS|DROP — reason`>
+#   # v2: canonical_allowlist_sha8_prompt=<8hex>
+#   # v2: canonical_allowlist_sha8_validator=<8hex>
+#   # v2: rendered_prompt_sha8=<8hex> silent_reason=<reason|empty>
+#
+# Semantic: prompt = sha8 of FILE-READ-derived symbol set rendered into
+# the lens prompt (post Stage C unify); validator = sha8 of FILE-READ-
+# derived symbol set fed to the critique allowlist. They MUST be identical
+# by construction (both pipe through pp_grounding_symbol_inventory_from_
+# file_read). If they ever diverge, the unification pipeline has split.
+#
+# v1 parsers (grep -E '^lens[0-9]+:') ignore the `# `-prefixed comment
+# lines. The trailer field shape is stable: silent_reason= is emitted
+# even when empty so v2 readers can parse with a fixed regex.
+#
+# Atomic write via mktemp + mv (same FS as $verdict_file path) — see
+# CLAUDE.md invariant #5. mv-into-same-dir is atomic on POSIX.
+_pp_write_verdict_v2() {
+  local _file="$1" _body="$2" _pcan="$3" _vcan="$4" _rend="$5" _silent="${6:-}"
+  local _tmp
+  _tmp=$(mktemp "${_file}.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf '# schema_version: %s\n' "${PP_VERDICT_SCHEMA_VERSION:-2}"
+    printf '%s\n' "$_body"
+    printf '# v2: canonical_allowlist_sha8_prompt=%s\n' "$_pcan"
+    printf '# v2: canonical_allowlist_sha8_validator=%s\n' "$_vcan"
+    printf '# v2: rendered_prompt_sha8=%s silent_reason=%s\n' \
+      "$_rend" "$_silent"
+  } > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+  mv "$_tmp" "$_file" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+  return 0
+}
+
 # Pair Polymath — load config + libs
 _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -48,6 +109,11 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/auto-rollback.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/lens-loader.sh"
+# v0.5.1.1 Stage B Task 5 — SILENT-V2 pre-critique handler. Function-only
+# at top level; the helper short-circuits and returns 1 when
+# PP_SILENT_V2_ACTIVE=0 (default), preserving v0.5.1.0 byte-identity.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/silent-v2.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/grounding.sh"
 # shellcheck disable=SC1091
@@ -799,29 +865,54 @@ PLAN
         fi
       fi
 
-      # Extract candidate symbols from the file the planner picked, then count refs across cwd.
-      # Helps the analyst verify symbols actually exist before naming them.
+      # v0.5.1.1 Task 2 (Stage C): SYMBOL REFERENCE COUNTS rendering moved
+      # to lib/grounding.sh helpers. _pp_symbol_primary = the primary
+      # SYMBOL REFERENCE COUNTS body (legacy grep block when flag off;
+      # FILE-READ-filtered when on). _pp_symbol_nearby = the NEARBY
+      # MENTIONS body (legacy grep block; flag-on only). _pp_canonical_
+      # inventory captures the prompt-side FILE-READ symbol set (driving
+      # the canonical_allowlist_sha8_prompt hash in the verdict trailer).
+      # Top-N cap from PP_SYMBOL_INVENTORY_TOP_N (default 80).
+      _pp_symbol_top_n="${PP_SYMBOL_INVENTORY_TOP_N:-80}"
+      case "$_pp_symbol_top_n" in ''|*[!0-9]*) _pp_symbol_top_n=80 ;; esac
+      _pp_symbol_primary=""
+      _pp_symbol_nearby=""
+      _pp_canonical_inventory=""
+      # Keep candidate_symbols + symbol_refs populated for any downstream
+      # consumer that references them (defensive — no current consumer
+      # outside this block; the heredoc now reads _pp_symbol_sections).
       candidate_symbols=""
       symbol_refs=""
-      if [ -n "$file_contents" ]; then
+      if [ -n "$file_contents" ] && [ -n "$cwd" ] && [ "$cwd" != "-" ]; then
+        # shellcheck disable=SC2034
         candidate_symbols=$(printf "%s" "$file_contents" \
-          | grep -oE '(^|[[:space:]])(function|const|let|class|def)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]+' \
-          | awk '{print $NF}' | sort -u | head -15)
-
-        if [ -n "$candidate_symbols" ] && [ "$cwd" != "-" ]; then
-          while IFS= read -r sym; do
-            [ -z "$sym" ] && continue
-            # FIX (review I6): exclude node_modules + use -F (fixed string, not regex) — symbols are identifiers
-            ref_count=$(grep -rn -F --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
-                        --include='*.py' --include='*.go' --include='*.rs' \
-                        --exclude-dir={node_modules,.git,dist,build,coverage,.next,.turbo,vendor} \
-                        -- "$sym" "$cwd" 2>/dev/null | wc -l | tr -d ' ')
-            if [ "$ref_count" -gt 0 ]; then
-              symbol_refs="${symbol_refs}${sym}: ${ref_count} refs"$'\n'
-            fi
-          done <<< "$candidate_symbols"
+          | LC_ALL=C grep -oE '(^|[[:space:]])(function|const|let|class|def)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]+' 2>/dev/null \
+          | LC_ALL=C awk '{print $NF}' | LC_ALL=C sort -u | head -15)
+        _pp_canonical_inventory=$(pp_grounding_symbol_inventory_from_file_read "$file_contents" 2>/dev/null)
+        if [ "${PP_INVENTORY_UNIFY_ACTIVE:-0}" = "1" ]; then
+          # Flag ON: legacy grep block becomes NEARBY MENTIONS (broader,
+          # non-citable orientation); primary slot is FILE-READ-filtered.
+          _pp_symbol_nearby=$(PP_INVENTORY_UNIFY_ACTIVE=0 \
+            pp_grounding_render_symbol_block "$file_contents" "$cwd" "$_pp_symbol_top_n" 2>/dev/null)
+          _pp_symbol_primary=$(pp_grounding_render_symbol_block "$file_contents" "$cwd" "$_pp_symbol_top_n" 2>/dev/null)
+        else
+          # Flag OFF (default): primary slot = legacy block; no NEARBY MENTIONS.
+          _pp_symbol_primary=$(pp_grounding_render_symbol_block "$file_contents" "$cwd" "$_pp_symbol_top_n" 2>/dev/null)
         fi
       fi
+      # Back-compat: keep $symbol_refs populated so anyone reading the
+      # variable (telemetry, future hooks) sees the same string the heredoc
+      # used to splice in. Identical to _pp_symbol_primary by construction.
+      # shellcheck disable=SC2034
+      symbol_refs="$_pp_symbol_primary"
+
+      # v0.5.1.1 Task 2: compose SYMBOL + NEARBY MENTIONS once; flag OFF
+      # ⇒ byte-identical to the legacy one-section block in the heredoc
+      # (always call the composer, even when primary is empty — it emits
+      # the "(no symbols extracted from file read)" sentinel exactly the
+      # way the pre-Stage-C heredoc did via the `${var:-default}` form).
+      _pp_symbol_sections=$(pp_grounding_compose_symbol_sections \
+        "$_pp_symbol_primary" "$_pp_symbol_nearby" 2>/dev/null)
 
       # Compose grounded blob — USER INTENT placed FIRST as the primary anchor
       grounded=$(cat <<GROUND
@@ -852,8 +943,7 @@ ${gh_ci:-(no CI data)}
 === FILE READ (planner picked: ${candidate_file:-NONE}) ===
 ${file_contents:-(no file read this round)}
 
-=== SYMBOL REFERENCE COUNTS (grep across cwd) ===
-${symbol_refs:-(no symbols extracted from file read)}
+${_pp_symbol_sections}
 
 === LAST TEST/LINT RUN (≤30min, from PostToolUse hook) ===
 ${test_state:-(no recent test/lint runs)}
@@ -1172,22 +1262,46 @@ $lens_evidence"
               lens_suggestion=$(printf "%s" "$lens_grounded" | run_llm 60 -m "$agent_model" -s "$analyst_prompt" 2>/dev/null)
             fi
 
-            # Validate + write per-lens cache
-            if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
-              if echo "$lens_suggestion" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
-                # Atomic write: tmp+mv so the display path's `head -1` can't
-                # catch a half-written line (Ralph round 2 BUG 3 + Code-rev M2).
-                # Inconsistent with the rest of the file — TIP_CACHE and PR/CI
-                # caches already use this pattern at lines ~343, ~495, ~506.
-                printf '%s\n' "$lens_suggestion" > "${PP_CACHE_LENS}.tmp" 2>/dev/null \
-                  && mv "${PP_CACHE_LENS}.tmp" "$PP_CACHE_LENS" 2>/dev/null
-                # Append to histories (session + project) — appends are atomic on POSIX
-                echo "$lens_suggestion" >> "$HIST_FILE_SESSION"
-                echo "$lens_suggestion" >> "$HIST_FILE_PROJECT"
-              fi
-              # malformed → keep previous cache content untouched
+            # v0.5.1.1 Stage B (Task 5) — SILENT-V2 pre-critique recognition.
+            # Flag off (PP_SILENT_V2_ACTIVE=0) → helper returns 1, legacy
+            # SILENT-as-noop path runs unchanged (byte-identity preserved).
+            # Flag on + SILENT → helper writes v2 verdict file; the critique
+            # input builder below reads outcome=silent and skips this lens
+            # (saves one critique LLM call per silent lens). The verdict file
+            # is the cross-subshell signal — subshell-local variables would
+            # not survive the `( ... ) &` boundary.
+            _pp_v2_verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_group}-verdict.txt"
+            # When flag is ON and this is NOT SILENT, clear any stale
+            # outcome=silent/drop marker from a previous cycle so the
+            # critique loop doesn't skip a real observation this cycle.
+            if [ "${PP_SILENT_V2_ACTIVE:-0}" = "1" ] \
+                && [ "$lens_suggestion" != "SILENT" ] \
+                && case "$lens_suggestion" in "SILENT: "*) false ;; *) true ;; esac \
+                && [ -f "$_pp_v2_verdict_file" ] \
+                && grep -qE '^# v2: outcome=(silent|drop)$' "$_pp_v2_verdict_file" 2>/dev/null; then
+              rm -f "$_pp_v2_verdict_file" 2>/dev/null
             fi
-            # SILENT → don't overwrite (keep previous valid observation)
+            if pp_silent_v2_record_verdict "$lens_idx" "$_pp_v2_verdict_file" "$lens_suggestion"; then
+              : # SILENT/invalid-reason recorded — observation cache untouched.
+            else
+              # Not SILENT (or flag off) — legacy validate + write path.
+              # Validate + write per-lens cache
+              if [ -n "$lens_suggestion" ] && [ "$lens_suggestion" != "SILENT" ]; then
+                if echo "$lens_suggestion" | head -1 | grep -Eq '^[A-Z]+: .{20,}\|\|\|.{40,}$'; then
+                  # Atomic write: tmp+mv so the display path's `head -1` can't
+                  # catch a half-written line (Ralph round 2 BUG 3 + Code-rev M2).
+                  # Inconsistent with the rest of the file — TIP_CACHE and PR/CI
+                  # caches already use this pattern at lines ~343, ~495, ~506.
+                  printf '%s\n' "$lens_suggestion" > "${PP_CACHE_LENS}.tmp" 2>/dev/null \
+                    && mv "${PP_CACHE_LENS}.tmp" "$PP_CACHE_LENS" 2>/dev/null
+                  # Append to histories (session + project) — appends are atomic on POSIX
+                  echo "$lens_suggestion" >> "$HIST_FILE_SESSION"
+                  echo "$lens_suggestion" >> "$HIST_FILE_PROJECT"
+                fi
+                # malformed → keep previous cache content untouched
+              fi
+              # SILENT with flag off → don't overwrite (legacy noop preserved).
+            fi
           ) &
           _pp_analyst_pids+=("$!")
         done
@@ -1206,6 +1320,19 @@ $lens_evidence"
         critique_input=""
         for ci in $(seq 0 $((PP_LENS_COUNT - 1))); do
           ci_id="${PP_LENS_IDS[$ci]}"
+          # v0.5.1.1 Stage B (Task 5) — skip critique for lenses already
+          # resolved to SILENT (or invalid_silent_reason DROP) by the
+          # SILENT-V2 helper. The verdict file is authoritative; running
+          # critique would waste a call and may clobber the v2 verdict with
+          # a v1 line. We check via the on-disk marker because the analyst
+          # ran inside `( ... ) &`, so subshell-local state cannot reach us.
+          # Flag-off path is byte-identical: the helper never writes when
+          # PP_SILENT_V2_ACTIVE=0, so no verdict file exists → skip never fires.
+          _pp_v2_check="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
+          if [ -f "$_pp_v2_check" ] \
+            && grep -qE '^# v2: outcome=(silent|drop)$' "$_pp_v2_check" 2>/dev/null; then
+            continue
+          fi
           cf="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}.txt"
           if [ -f "$cf" ] && [ -s "$cf" ]; then
             obs_short=$(head -1 "$cf" | head -c 500)   # cap each lens at 500 chars
@@ -1235,6 +1362,30 @@ $lens_evidence"
             critique_allowlist_note="(NOTE: both allowlists empty — fresh repo or no FILE READ. Apply EMPTY-ALLOWLIST EXCEPTION: skip citation check.)
 "
           fi
+          # v0.5.1.1 Task 2 (Stage C): when PP_INVENTORY_UNIFY_ACTIVE=1, top-N
+          # truncate the VALID SYMBOLS critique block so it matches the
+          # token budget of the prompt-side render. Flag OFF ⇒ untruncated
+          # legacy output (byte-identical critique heredoc).
+          # _pp_valid_symbols is FILE-READ-derived already (set by
+          # pp_extract_citations); the canonical (pre-truncation) set is
+          # what drives canonical_allowlist_sha8_validator, so the drift
+          # invariant is unaffected by this rendering shape.
+          _pp_valid_symbols_rendered="$_pp_valid_symbols"
+          if [ "${PP_INVENTORY_UNIFY_ACTIVE:-0}" = "1" ] && [ -n "$_pp_valid_symbols" ]; then
+            _pp_valid_symbols_top_n="${PP_SYMBOL_INVENTORY_TOP_N:-80}"
+            case "$_pp_valid_symbols_top_n" in ''|*[!0-9]*) _pp_valid_symbols_top_n=80 ;; esac
+            # Cap to top_n lines + suffix sentinel if oversized. Sort is
+            # already ASCII-stable from pp_extract_citations (LC_ALL=C
+            # sort -u upstream); just count + slice.
+            _pp_valid_symbols_size=$(printf '%s\n' "$_pp_valid_symbols" | LC_ALL=C grep -c . 2>/dev/null || true)
+            case "$_pp_valid_symbols_size" in ''|*[!0-9]*) _pp_valid_symbols_size=0 ;; esac
+            if [ "$_pp_valid_symbols_size" -gt "$_pp_valid_symbols_top_n" ]; then
+              _pp_valid_symbols_rendered=$(printf '%s\n' "$_pp_valid_symbols" \
+                | head -n "$_pp_valid_symbols_top_n")
+              _pp_valid_symbols_rendered="${_pp_valid_symbols_rendered}
+(+$((_pp_valid_symbols_size - _pp_valid_symbols_top_n)) more — pull via FILE READ to cite)"
+            fi
+          fi
           critique_data="GROUNDED FACTS:
 ${grounded:0:3000}
 
@@ -1242,7 +1393,7 @@ ${critique_allowlist_note}VALID PATHS (only these paths exist in the grounded in
 ${_pp_valid_paths}
 
 VALID SYMBOLS (only these identifiers appear in FILE READ — observations citing anything else are [unverified] or HALLUCINATED):
-${_pp_valid_symbols}
+${_pp_valid_symbols_rendered}
 
 OBSERVATIONS TO JUDGE:
 $critique_input"
@@ -1350,7 +1501,28 @@ EOF
               verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
               streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-streak.txt"
               if [ -n "$verdict" ]; then
-                echo "$verdict" > "$verdict_file"
+                # v0.5.1.1 Stage C: per-invocation DUAL hash trailer.
+                # canonical_allowlist_sha8_prompt = sha8 of the FILE-READ
+                # symbol set rendered into the lens prompt (post Stage C
+                # unify — _pp_canonical_inventory holds the canonical set
+                # captured at prompt-render time; falls back to
+                # _pp_valid_symbols when PP_INVENTORY_UNIFY_ACTIVE=0 so
+                # legacy verdicts stay populated). canonical_allowlist_
+                # sha8_validator = sha8 of FILE-READ symbol set fed to the
+                # critique allowlist (_pp_valid_symbols). Identical by
+                # construction (both derived from the same FILE READ
+                # section); doctor #22 alarms if they ever diverge.
+                # rendered_prompt_sha8 = sha8 of the actual rendered
+                # truncated block (Stage C top-N can shrink the prompt
+                # side; the field reflects post-truncation bytes).
+                # silent_reason is always empty in this writer — pre-
+                # critique SILENT recognition lands via silent-v2.sh.
+                _pp_prompt_sha8=$(printf '%s' "${_pp_canonical_inventory:-${_pp_valid_symbols:-}}" | _pp_sha8)
+                _pp_validator_sha8=$(printf '%s' "${_pp_valid_symbols:-}" | _pp_sha8)
+                _pp_rend_sha8=$(printf '%s' "${_pp_symbol_primary:-${_pp_valid_symbols:-}}" | _pp_sha8)
+                _pp_write_verdict_v2 \
+                  "$verdict_file" "$verdict" \
+                  "$_pp_prompt_sha8" "$_pp_validator_sha8" "$_pp_rend_sha8" ""
                 # FIX (review I1): DROP must be checked first (more specific) + word-boundary match
                 if echo "$verdict" | grep -Eqi '\bDROP\b'; then
                   # Increment streak (drives escalation next cycle)
@@ -1694,6 +1866,103 @@ EOF
       #
       # Fail-open: every step is guarded; any error → no KPI line, cycle
       # proceeds unaffected.
+
+      # === v0.5.1.1 Task 12: per-lens KPI accumulators ======================
+      # Builds by_lens map (per-lens-per-cycle, all counts ∈ {0,1}).
+      # Sources, per spec §"Acceptance criteria":
+      #   eligible_count        — PP_LENS_ELIGIBLE_<id>  (Stage D Task 9)
+      #   dispatched_count      — lens_id ∈ _pp_router_picked
+      #   silent_count_by_reason.no_eligible_surface — Stage D filter
+      #   silent_count_by_reason.persona_silent      — Stage B Task 5 marker
+      #   pass_count / drop_count — verdict file ^lensN:.*(PASS|DROP)
+      #   drift_count           — Stage A Task 3 prompt/validator hash mismatch
+      #   would_be_ineligible_count — PASS && Stage D shadow marker
+      # PP_LENS_GATES_TELEMETRY=0 (default) ⇒ skip; no by_lens key emitted
+      # (KPI blob bytes identical to v0.5.1.0).
+      _pp_kpi_by_lens=""
+      if [ "${PP_LENS_GATES_TELEMETRY:-0}" = "1" ] && [ "${PP_LENS_COUNT:-0}" -gt 0 ]; then
+        _pp_kpi_by_lens="{"
+        _pp_kpi_first_lens=1
+        for _pp_kpi_lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
+          _pp_kpi_lens_id="${PP_LENS_IDS[$_pp_kpi_lens_idx]}"
+          [ -z "$_pp_kpi_lens_id" ] && continue
+          _pp_kpi_verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${_pp_kpi_lens_id}-verdict.txt"
+
+          # eligible_count: Stage D stamps PP_LENS_ELIGIBLE_<id> in the
+          # router. Default 0 (Stage D not yet wired = nothing eligible
+          # by telemetry; correct shadow semantics).
+          _pp_kpi_elig_var="PP_LENS_ELIGIBLE_${_pp_kpi_lens_id}"
+          eval "_pp_kpi_elig=\${${_pp_kpi_elig_var}:-0}"
+          case "$_pp_kpi_elig" in ''|*[!0-9]*) _pp_kpi_elig=0 ;; esac
+
+          # dispatched_count: was this lens in the router's pick list?
+          _pp_kpi_disp=0
+          if printf '%s\n' "${_pp_router_picked:-}" | grep -qx "$_pp_kpi_lens_id" 2>/dev/null; then
+            _pp_kpi_disp=1
+          fi
+
+          # silent_count_by_reason: Stage B Task 5 writes a marker line
+          # "# silent_reason: <reason>" into the verdict file.
+          _pp_kpi_silent_nes=0
+          _pp_kpi_silent_ps=0
+          if [ -f "$_pp_kpi_verdict_file" ]; then
+            if grep -q '^# silent_reason: no_eligible_surface' "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_silent_nes=1
+            fi
+            if grep -q '^# silent_reason: persona_silent' "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_silent_ps=1
+            fi
+          fi
+
+          # pass_count / drop_count: scan the cycle's verdict file for the
+          # per-lens line. Per-lens verdict files are written one-per-lens
+          # under the session's prefix.
+          _pp_kpi_pass=0
+          _pp_kpi_drop=0
+          if [ -f "$_pp_kpi_verdict_file" ]; then
+            if grep -Eq "^lens${_pp_kpi_lens_idx}:[[:space:]]*PASS\\b" "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_pass=1
+            fi
+            if grep -Eq "^lens${_pp_kpi_lens_idx}:[[:space:]]*DROP\\b" "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_drop=1
+            fi
+          fi
+
+          # drift_count: Stage A Task 3 stamps "# canonical_allowlist_sha8:
+          # <prompt>" + "# canonical_allowlist_sha8_validator: <validator>"
+          # into the verdict. Mismatch = drift = 1.
+          _pp_kpi_drift=0
+          if [ -f "$_pp_kpi_verdict_file" ]; then
+            _pp_kpi_drift_prompt=$(grep '^# canonical_allowlist_sha8:' "$_pp_kpi_verdict_file" 2>/dev/null | head -1 | awk '{print $NF}')
+            _pp_kpi_drift_validator=$(grep '^# canonical_allowlist_sha8_validator:' "$_pp_kpi_verdict_file" 2>/dev/null | head -1 | awk '{print $NF}')
+            if [ -n "$_pp_kpi_drift_prompt" ] && [ -n "$_pp_kpi_drift_validator" ] \
+                 && [ "$_pp_kpi_drift_prompt" != "$_pp_kpi_drift_validator" ]; then
+              _pp_kpi_drift=1
+            fi
+          fi
+
+          # would_be_ineligible_count: Stage D stamps "# would_be_ineligible:
+          # true" on PASS observations in shadow mode. Only count when PASS.
+          _pp_kpi_wbi=0
+          if [ "$_pp_kpi_pass" = "1" ] && [ -f "$_pp_kpi_verdict_file" ]; then
+            if grep -q '^# would_be_ineligible: true' "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_wbi=1
+            fi
+          fi
+          _pp_kpi_wbi=$(pp_kpi_lens_count_would_be_ineligible "$_pp_kpi_pass" "$_pp_kpi_wbi")
+
+          # Append this lens's object. jq can't easily build nested objects
+          # incrementally in shell, so we concatenate string fragments and
+          # let the final jq -nc validate / re-pretty.
+          if [ "$_pp_kpi_first_lens" = "0" ]; then
+            _pp_kpi_by_lens="${_pp_kpi_by_lens},"
+          fi
+          _pp_kpi_first_lens=0
+          _pp_kpi_by_lens="${_pp_kpi_by_lens}\"${_pp_kpi_lens_id}\":{\"eligible_count\":${_pp_kpi_elig},\"dispatched_count\":${_pp_kpi_disp},\"silent_count_by_reason\":{\"no_eligible_surface\":${_pp_kpi_silent_nes},\"persona_silent\":${_pp_kpi_silent_ps}},\"pass_count\":${_pp_kpi_pass},\"drop_count\":${_pp_kpi_drop},\"drift_count\":${_pp_kpi_drift},\"would_be_ineligible_count\":${_pp_kpi_wbi}}"
+        done
+        _pp_kpi_by_lens="${_pp_kpi_by_lens}}"
+      fi
+
       _pp_kpi_cost_usd=0
       _pp_kpi_retry_count=0
       _pp_kpi_retry_usd=0
@@ -1802,6 +2071,11 @@ EOF
       # slo_breach: is the rollback flag currently active? (cheap check.)
       _pp_kpi_slo_breach=0
       pp_rollback_is_active 2>/dev/null && _pp_kpi_slo_breach=1
+      # Build the v1-shape blob first (all existing fields), then merge in
+      # the v2 by_lens + schema_version when telemetry is on. Dual-write
+      # migration (spec §"Schema versioning"): v1 readers ignore the new
+      # keys; v2 readers route on schema_version=2. With telemetry OFF,
+      # the blob bytes are byte-identical to v0.5.1.0.
       _pp_kpi_blob=$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg session "$session_id" \
@@ -1828,6 +2102,18 @@ EOF
           halluc_post_would_drop_rate:$halluc_post_would_drop_rate,
           cycle_outcome:$cycle_outcome,
           eligible:$eligible, slo_breach:$slo_breach}' 2>/dev/null || printf '')
+
+      # v0.5.1.1 Task 12: when PP_LENS_GATES_TELEMETRY=1, merge the by_lens
+      # sub-object + bump schema_version. jq merge keeps every v1 key and
+      # only adds the v2 ones. Falls back to v1-only blob if jq merge fails.
+      if [ -n "$_pp_kpi_blob" ] && [ "${PP_LENS_GATES_TELEMETRY:-0}" = "1" ] \
+           && [ -n "$_pp_kpi_by_lens" ]; then
+        _pp_kpi_blob=$(printf '%s' "$_pp_kpi_blob" \
+          | jq -c --argjson bylens "$_pp_kpi_by_lens" \
+                  --argjson sv "${PP_KPI_SCHEMA_VERSION:-2}" \
+                  '. + {schema_version: $sv, by_lens: $bylens}' 2>/dev/null \
+          || printf '%s' "$_pp_kpi_blob")
+      fi
       [ -n "$_pp_kpi_blob" ] && pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
 
       # === B2 (v0.5.1): auto-rollback SLO check =============================

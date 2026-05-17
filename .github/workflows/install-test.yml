@@ -21,7 +21,12 @@ jobs:
   # exercised by the macOS dev loop.
   install-clean-ubuntu:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # v0.5.2.1 grew the bats suite from ~705 to ~862 tests (Stage A-D OAR /
+    # eligibility additions); install-test's full-suite run exceeded the
+    # prior 10m ceiling. Bumped to 20m to absorb the new footprint with
+    # headroom. If the suite keeps growing, consider parallelizing bats or
+    # splitting the install-test workflow into install + bats jobs.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 

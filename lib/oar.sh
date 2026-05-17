@@ -854,6 +854,10 @@ pp_oar_label_pending() {
   [ -f "$_pending" ] || return 0
   mkdir -p "$_cache_dir" 2>/dev/null || true
 
+  # v0.5.1.1 Stage A: per-cycle reset for the unknown-outcome one-shot
+  # warning (see the outcome-enum tolerance branch below).
+  unset _PP_OAR_UNKNOWN_OUTCOME_WARNED
+
   # Task-8 review (code-reviewer + GPT): concurrent runs would clobber
   # oar-pending.jsonl mid-rewrite. Two cycles can both snapshot, both build
   # their kept files, then race on `mv -f kept → pending`. The second mv
@@ -997,6 +1001,52 @@ pp_oar_label_pending() {
     _evid_id="null"
     _conf="no_signal_in_window"
     _err=0
+    _silent_reason=""
+
+    # v0.5.1.1 Stage A spec task 7: Stage B writers emit pending rows
+    # with outcome=silent + silent_reason pre-stamped. Stage A's reader
+    # honors that pre-stamp WITHOUT running the detector chain (the
+    # observation was never injected; there's no acted/referenced/
+    # pushed-back signal to check).
+    local _preset_outcome _preset_silent_reason
+    _preset_outcome=$(printf '%s' "$_line" | jq -r '.outcome // ""' 2>/dev/null)
+    _preset_silent_reason=$(printf '%s' "$_line" | jq -r '.silent_reason // ""' 2>/dev/null)
+
+    # Outcome enum tolerance: known v1+v2 values pass through; unknown
+    # values downgrade to 'ignored' with a ONE-SHOT per-cycle stderr
+    # warning (not per-row — operator noise is high if a future writer
+    # emits 1000 rows with the same forward-version outcome).
+    case "$_preset_outcome" in
+      ""|acted|referenced|pushed-back|ignored)
+        # v1 outcomes (or absent: fall through to detector chain).
+        ;;
+      silent)
+        # v0.5.1.1 v2 outcome: skip detector chain, preserve pre-stamp.
+        _outcome="silent"
+        _silent_reason="$_preset_silent_reason"
+        ;;
+      *)
+        # Unknown forward-version outcome. Warn ONCE per cycle, then
+        # downgrade to 'ignored'. _PP_OAR_UNKNOWN_OUTCOME_WARNED is a
+        # shell var lifecycle-scoped to this pp_oar_label_pending call
+        # (unset at function entry); bash 3.2 has no per-process
+        # "warned" registry, but a function-local flag is sufficient
+        # since pp_oar_label_pending is the only caller of this branch.
+        if [ -z "${_PP_OAR_UNKNOWN_OUTCOME_WARNED:-}" ]; then
+          printf 'pair-polymath OAR labeler: unknown OAR outcome %s in pending row (session=%s lens=%s); downgrading to ignored. Stage A v1/v2-tolerance shim per spec task 7.\n' \
+            "$_preset_outcome" "$_sid" "$_lens" >&2
+          _PP_OAR_UNKNOWN_OUTCOME_WARNED=1
+        fi
+        _outcome="ignored"
+        _preset_outcome=""
+        ;;
+    esac
+
+    # v0.5.1.1 Stage A: skip detector chain when outcome was pre-stamped
+    # as 'silent' by an upstream Stage B writer. There's no observation
+    # to score against the transcript/git/code, so the only meaningful
+    # output is to passthrough the silent_reason to the labeled row.
+    if [ "$_outcome" != "silent" ]; then
 
     # ----- Step 1: pushed_back? -----
     # Order per spec §B + user-task brief: pushed_back checked first because
@@ -1110,6 +1160,8 @@ EOF
       fi
     fi
 
+    fi  # end of "if not pre-stamped silent" guard
+
     # ----- Quarantine path: only if outcome stayed 'ignored' AND a
     # detector flagged a transient error. attempts++ until max; on max,
     # move to oar-stuck.jsonl; otherwise put back in pending with bumped
@@ -1143,10 +1195,14 @@ EOF
       --arg outcome "$_outcome" --arg evid "$_evid_id" \
       --arg conf "$_conf" --arg identity "${_id:-}" \
       --arg body "$_body" \
-      '{session_id:$sid,lens:$lens,hash:$h,inject_ts:$ts,
+      --arg silent_reason "$_silent_reason" \
+      --argjson schema "${PP_OAR_SCHEMA_VERSION:-2}" \
+      '{schema_version:$schema,
+        session_id:$sid,lens:$lens,hash:$h,inject_ts:$ts,
         labeled_at:$labeled_at,outcome:$outcome,
         evidence_id:(if $evid=="null" or $evid=="" then null else $evid end),
         confidence:$conf,
+        silent_reason:$silent_reason,
         identity:(if $identity=="" then null else $identity end),
         evidence:(if $body=="" then null else $body end)}' \
       2>/dev/null) || _label_blob=""

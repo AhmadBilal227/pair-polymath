@@ -1,0 +1,28 @@
+# v0.5.1.1 Stage D — pp_lens_glob_to_regex GOLDEN FIXTURE
+#
+# One line per case. Format: <glob>\t<expected_regex>
+# Lines starting with # are comments; blank lines ignored.
+# Conversion table per spec docs/v0.5.1.1-planner-grounding-fix-spec.md
+# section [R3 — glob engine pinned, bash 3.2 portable].
+#
+# RULE 1 — **/  =>  (.*/)?
+**/foo.ts	^(.*/)?foo\.ts$
+# RULE 2 — **  =>  .*
+src/**	^src/.*$
+# RULE 3 — *  =>  [^/]*
+src/*.ts	^src/[^/]*\.ts$
+# RULE 4 — ?  =>  [^/]
+src/a?.ts	^src/a[^/]\.ts$
+# RULE 5 — {a,b,c}  =>  (a|b|c)
+src/*.{ts,tsx}	^src/[^/]*\.(ts|tsx)$
+# RULE 6 — regex metachars escaped
+src/main.test.ts	^src/main\.test\.ts$
+# --- ROUND-TRIP CASES from spec lens-JSON examples (8) ---
+**/*.tsx	^(.*/)?[^/]*\.tsx$
+**/*.jsx	^(.*/)?[^/]*\.jsx$
+**/components/**	^(.*/)?components/.*$
+**/screens/**	^(.*/)?screens/.*$
+**/*.{css,scss}	^(.*/)?[^/]*\.(css|scss)$
+**/styles/**	^(.*/)?styles/.*$
+**/*.{md,mdx}	^(.*/)?[^/]*\.(md|mdx)$
+**/copy/**	^(.*/)?copy/.*$

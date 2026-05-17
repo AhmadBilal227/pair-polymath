@@ -119,3 +119,29 @@ teardown() { rm -rf "$HOME"; }
     (.cited_symbols | length) == 0
   ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
 }
+
+@test "session-end: silent-v2 verdict sidecar produces silent pending row" {
+  cat > "$PP_CACHE_DIR/cc-monitor-s5-UX_DESIGN-verdict.txt" <<'EOF'
+lens0: SILENT -- lens gate found no eligible surface
+# v2: schema_version=2
+# v2: outcome=silent
+# v2: silent_reason=no_eligible_surface
+EOF
+  export PP_OAR_ENABLE=1
+  run bash -c "printf '{\"session_id\":\"s5\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  [ -f "$PP_CACHE_DIR/oar-pending.jsonl" ]
+  jq -e '
+    .session_id == "s5"
+    and .lens == "UX_DESIGN"
+    and .outcome == "silent"
+    and .silent_reason == "no_eligible_surface"
+    and .body == ""
+    and (.cited_paths | length) == 0
+    and (.cited_symbols | length) == 0
+    and .status == "pending"
+    and .attempts == 0
+    and (.scan_at_epoch | type) == "number"
+    and (.hash | length) > 0
+  ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}

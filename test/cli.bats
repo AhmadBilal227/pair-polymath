@@ -1363,6 +1363,57 @@ SHIM
   printf '%s' "$output" | jq -e '.total == 1 and .by_outcome.acted == 1 and .by_outcome.ignored == 0' >/dev/null
 }
 
+@test "polymath history: silent outcome is counted but excluded from eligible denominator" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc --arg ts "$_now_iso" '{session_id:"a",lens:"UX_DESIGN",hash:"ha",
+       inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"e",
+       confidence:"symbol_exact",identity:"ia"}' \
+    > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc --arg ts "$_now_iso" '{session_id:"b",lens:"UX_DESIGN",hash:"hb",
+       inject_ts:$ts,labeled_at:$ts,outcome:"ignored",evidence_id:null,
+       confidence:"no_signal_in_window",identity:"ib"}' \
+    >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc --arg ts "$_now_iso" '{session_id:"c",lens:"UX_DESIGN",hash:"hc",
+       inject_ts:$ts,labeled_at:$ts,outcome:"silent",silent_reason:"no_eligible_surface",
+       evidence_id:null,confidence:"silent",identity:"ic"}' \
+    >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  run bash "$PP_ROOT/bin/polymath" history --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '
+    .total == 3
+    and .eligible == 2
+    and .by_outcome.silent == 1
+    and .acted_pct == 0.5
+    and .by_lens[0].silent == 1
+    and .by_lens[0].n == 2
+  ' >/dev/null
+
+  run bash "$PP_ROOT/bin/polymath" history --outcome silent --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.total == 1 and .eligible == 0 and .by_outcome.silent == 1' >/dev/null
+}
+
+@test "polymath history --lens filters stuck count" {
+  export CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/cache"
+  local _now_iso
+  _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -nc --arg ts "$_now_iso" '{session_id:"a",lens:"SECURITY",hash:"ha",
+       inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"e",
+       confidence:"symbol_exact",identity:"ia"}' \
+    > "$CLAUDE_DIR/cache/oar-labeled.jsonl"
+  jq -nc '{session_id:"s1",lens:"SECURITY",hash:"hs",attempts:3}' \
+    > "$CLAUDE_DIR/cache/oar-stuck.jsonl"
+  jq -nc '{session_id:"s2",lens:"UX_DESIGN",hash:"hu",attempts:3}' \
+    >> "$CLAUDE_DIR/cache/oar-stuck.jsonl"
+  run bash "$PP_ROOT/bin/polymath" history --lens SECURITY --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.stuck == 1' >/dev/null
+}
+
 @test "polymath history: pending count surfaced from oar-pending.jsonl" {
   export CLAUDE_DIR="$HOME/.claude"
   mkdir -p "$CLAUDE_DIR/cache"
@@ -1392,6 +1443,7 @@ SHIM
   [[ "$output" == *"--window"* ]]
   [[ "$output" == *"--lens"* ]]
   [[ "$output" == *"--outcome"* ]]
+  [[ "$output" == *"silent"* ]]
   [[ "$output" == *"--json"* ]]
 }
 

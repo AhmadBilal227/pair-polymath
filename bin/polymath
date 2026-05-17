@@ -637,8 +637,8 @@ USAGE
         --outcome)
           [ -n "${2:-}" ] || { printf 'polymath history: --outcome requires a value\n' >&2; exit 2; }
           case "$2" in
-            acted|referenced|pushed-back|ignored|all) _h_outcome="$2"; shift 2 ;;
-            *) printf 'polymath history: invalid --outcome %s (acted|referenced|pushed-back|ignored|all)\n' "$2" >&2; exit 2 ;;
+            acted|referenced|pushed-back|ignored|silent|all) _h_outcome="$2"; shift 2 ;;
+            *) printf 'polymath history: invalid --outcome %s (acted|referenced|pushed-back|ignored|silent|all)\n' "$2" >&2; exit 2 ;;
           esac
           ;;
         --json) _h_json=1; shift ;;
@@ -651,7 +651,7 @@ Usage:
   polymath history --window 30d          Custom rolling window (positive int days)
   polymath history --lens SECURITY       Filter to one lens
   polymath history --outcome acted       Filter to one outcome class
-                                          (acted|referenced|pushed-back|ignored|all)
+                                          (acted|referenced|pushed-back|ignored|silent|all)
   polymath history --json                Machine-readable JSON
 
 Filters compose: --lens narrows the rows BEFORE per-lens grouping;
@@ -722,11 +722,14 @@ HELP
     fi
     _h_stuck_count=0
     if [ -f "$_h_stuck" ]; then
-      _h_stuck_count=$(wc -l < "$_h_stuck" 2>/dev/null | tr -d ' ')
+      _h_stuck_count=$(jq -R 'fromjson?' "$_h_stuck" 2>/dev/null \
+                      | jq -s --arg lens "$_h_lens" '
+                          if $lens != "" then map(select(.lens == $lens)) else . end
+                          | length' 2>/dev/null)
       case "$_h_stuck_count" in ''|*[!0-9]*) _h_stuck_count=0 ;; esac
     fi
 
-    # Per-lens grouping: emit "lens\tn\tacted" rows for the bash loop.
+    # Per-lens grouping: emit "lens\tn_non_silent\tacted\tsilent" rows.
     # Build per-lens JSON via jq -n --arg/--argjson (addendum M3) so a
     # lens name like ' "quote" ' or ' \backslash ' cannot break the JSON.
     #
@@ -747,19 +750,23 @@ HELP
     _h_per_lens_tsv=$(printf '%s' "$_h_lens_src" | jq -r '
       sort_by(.lens) | group_by(.lens)
       | .[]
-      | "\(.[0].lens)\t\(length)\t\(map(select(.outcome == "acted")) | length)"
+      | "\(.[0].lens)\t\(map(select(.outcome != "silent")) | length)\t\(map(select(.outcome == "acted")) | length)\t\(map(select(.outcome == "silent")) | length)"
     ' 2>/dev/null)
     _h_per_lens_json='[]'
     if [ -n "$_h_per_lens_tsv" ]; then
       _h_tab=$(printf '\t')
       _h_per_lens_json=$(
-        printf '%s\n' "$_h_per_lens_tsv" | while IFS="$_h_tab" read -r _h_lname _h_n _h_acted; do
+        printf '%s\n' "$_h_per_lens_tsv" | while IFS="$_h_tab" read -r _h_lname _h_n _h_acted _h_silent; do
           [ -n "$_h_lname" ] || continue
           # Defensive int-coerce: an empty / non-numeric field becomes 0.
-          # `expr "$x" + 0` is portable to bash 3.2 and avoids the
-          # `case ... esac` parser-quirk inside $(...) on macOS bash 3.2.
-          _h_n=$(expr "$_h_n" + 0 2>/dev/null || printf 0)
-          _h_acted=$(expr "$_h_acted" + 0 2>/dev/null || printf 0)
+          # Avoid `expr "$x" + 0 || printf 0`: expr exits 1 for a numeric
+          # zero result, which concatenates two zeroes into invalid JSON.
+          _h_n=$(printf '%s' "$_h_n" | LC_ALL=C tr -cd '0-9')
+          _h_acted=$(printf '%s' "$_h_acted" | LC_ALL=C tr -cd '0-9')
+          _h_silent=$(printf '%s' "${_h_silent:-}" | LC_ALL=C tr -cd '0-9')
+          [ -n "$_h_n" ] || _h_n=0
+          [ -n "$_h_acted" ] || _h_acted=0
+          [ -n "$_h_silent" ] || _h_silent=0
           _h_lo=$(pp_kpi_wilson_lower_95 "$_h_acted" "$_h_n")
           _h_pct=$(LC_ALL=C awk -v a="$_h_acted" -v n="$_h_n" \
                      'BEGIN { if (n+0==0) print 0; else printf "%.4f", a/n }')
@@ -767,9 +774,10 @@ HELP
             --arg lens "$_h_lname" \
             --argjson n "$_h_n" \
             --argjson acted "$_h_acted" \
+            --argjson silent "$_h_silent" \
             --argjson acted_pct "$_h_pct" \
             --argjson wilson "$_h_lo" \
-            '{lens:$lens, n:$n, acted:$acted, acted_pct:$acted_pct, wilson_lower_95:$wilson}'
+            '{lens:$lens, n:$n, acted:$acted, silent:$silent, acted_pct:$acted_pct, wilson_lower_95:$wilson}'
         done | jq -s '.'
       )
       [ -n "$_h_per_lens_json" ] || _h_per_lens_json='[]'
@@ -780,9 +788,10 @@ HELP
                   --argjson pending "$_h_pending_count" \
                   --argjson stuck "$_h_stuck_count" \
                   --argjson window "$_h_window" '
+        (map(select(.outcome != "silent"))) as $eligible |
         {
           total: length,
-          eligible: length,
+          eligible: ($eligible | length),
           pending: $pending,
           stuck: $stuck,
           window_days: $window,
@@ -790,11 +799,12 @@ HELP
             acted:       (map(select(.outcome == "acted"))       | length),
             referenced:  (map(select(.outcome == "referenced"))  | length),
             "pushed-back": (map(select(.outcome == "pushed-back")) | length),
-            ignored:     (map(select(.outcome == "ignored"))     | length)
+            ignored:     (map(select(.outcome == "ignored"))     | length),
+            silent:      (map(select(.outcome == "silent"))      | length)
           },
-          acted_pct:      (if length == 0 then 0 else ((map(select(.outcome == "acted"))       | length) / length) end),
-          referenced_pct: (if length == 0 then 0 else ((map(select(.outcome == "referenced"))  | length) / length) end),
-          derived_a_plus_r: (if length == 0 then 0 else ((map(select(.outcome == "acted" or .outcome == "referenced")) | length) / length) end),
+          acted_pct:      (if ($eligible | length) == 0 then 0 else ((map(select(.outcome == "acted"))       | length) / ($eligible | length)) end),
+          referenced_pct: (if ($eligible | length) == 0 then 0 else ((map(select(.outcome == "referenced"))  | length) / ($eligible | length)) end),
+          derived_a_plus_r: (if ($eligible | length) == 0 then 0 else ((map(select(.outcome == "acted" or .outcome == "referenced")) | length) / ($eligible | length)) end),
           by_lens: $per_lens
         }')
 
@@ -804,7 +814,7 @@ HELP
       printf '\nObservation outcomes (last %s days)\n\n' "$_h_window"
       printf '%s' "$_h_summary" | jq -r '
         "  Total observations:    \(.total)",
-        "  Eligible (labeled):    \(.eligible)      (\(.pending) still in scan window)",
+        "  Eligible (non-silent): \(.eligible)      (\(.pending) still in scan window)",
         "  Stuck (quarantined):   \(.stuck)      (see: polymath doctor)",
         "",
         "  By outcome:",
@@ -812,6 +822,7 @@ HELP
         "    referenced:          \(.by_outcome.referenced)      (\((.referenced_pct * 1000 | floor) / 10)%)  ← transcript mention",
         "    pushed-back:         \(.by_outcome."pushed-back")      (operator dismiss ack)",
         "    ignored:             \(.by_outcome.ignored)      (no signal within window)",
+        "    silent:              \(.by_outcome.silent)      (no eligible surface)",
         "",
         "  Derived: A+R = \((.derived_a_plus_r * 1000 | floor) / 10)%",
         "  (Note: A and R measure DIFFERENT things — A = behavior change, R = attention.",

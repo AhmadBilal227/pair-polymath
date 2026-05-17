@@ -40,7 +40,8 @@ if ! command -v pp_extract_citations_from_text >/dev/null 2>&1; then
 fi
 
 _now=$(date +%s)
-_pending_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/oar-pending.jsonl"
+_cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+_pending_file="${_cache_dir}/oar-pending.jsonl"
 mkdir -p "$(dirname "$_pending_file")" 2>/dev/null || exit 0
 
 # R10 (v0.5.1 Round-2): inject_ts must reflect when the observation was
@@ -72,8 +73,25 @@ _pp_stat_mtime() {
   printf '%s' "$_m"
 }
 
+_pp_hash12() {
+  local _h=""
+  if command -v shasum >/dev/null 2>&1; then
+    _h=$(shasum -a 256 2>/dev/null | cut -c1-12)
+  elif command -v sha256sum >/dev/null 2>&1; then
+    _h=$(sha256sum 2>/dev/null | cut -c1-12)
+  elif command -v sha256 >/dev/null 2>&1; then
+    _h=$(sha256 -q 2>/dev/null | cut -c1-12)
+  elif command -v md5sum >/dev/null 2>&1; then
+    _h=$(md5sum 2>/dev/null | cut -c1-12)
+  elif command -v md5 >/dev/null 2>&1; then
+    _h=$(md5 -q 2>/dev/null | cut -c1-12)
+  fi
+  [ -z "$_h" ] && _h="000000000000"
+  printf '%s' "$_h"
+}
+
 # Walk this session's injected-hash files
-find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
+find "$_cache_dir" -maxdepth 1 \
   -name "cc-monitor-injected-hash-${_session_id}-*.txt" -type f 2>/dev/null \
   | while IFS= read -r _f; do
     _lens=$(basename "$_f" | sed -E "s/^cc-monitor-injected-hash-${_session_id}-//; s/\.txt$//")
@@ -108,7 +126,7 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
     case "$_lens" in
       *[/[:space:]]*) continue ;;
     esac
-    _obs_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/cc-monitor-${_session_id}-${_lens}.txt"
+    _obs_file="${_cache_dir}/cc-monitor-${_session_id}-${_lens}.txt"
     _body=""
     if [ -f "$_obs_file" ]; then
       # Analyst line format (see bin/statusline.sh:1162): `LENS_TYPE: title|||body`.
@@ -163,6 +181,45 @@ find "${PP_CACHE_DIR:-$HOME/.claude/cache}" -maxdepth 1 \
       '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: $body, cited_paths: $cited_paths, cited_symbols: $cited_symbols}' \
       >> "$_pending_file" 2>/dev/null; then
       printf 'pair-polymath session-end: failed to append pending row for lens=%s (check %s permissions)\n' \
+        "$_lens" "$_pending_file" >&2
+    fi
+  done
+
+# SILENT-v2 lenses never get an injected-hash marker because no observation
+# was shown to the user. Bridge their verdict sidecars into OAR pending rows
+# so history can distinguish "correctly silent" from "missing data".
+find "$_cache_dir" -maxdepth 1 \
+  -name "cc-monitor-${_session_id}-*-verdict.txt" -type f 2>/dev/null \
+  | while IFS= read -r _vf; do
+    grep -qxF '# v2: outcome=silent' "$_vf" 2>/dev/null || continue
+    _base=$(basename "$_vf")
+    _lens="${_base#cc-monitor-${_session_id}-}"
+    _lens="${_lens%-verdict.txt}"
+    case "$_lens" in
+      ''|*[/[:space:]]*) continue ;;
+    esac
+    _reason=$(grep -E '^# v2: silent_reason=' "$_vf" 2>/dev/null \
+      | head -1 | sed 's/^# v2: silent_reason=//')
+    [ -z "$_reason" ] && _reason="unspecified"
+    case "$_reason" in *[!A-Za-z0-9_.:-]*) _reason="unspecified" ;; esac
+
+    _inject_epoch=$(_pp_stat_mtime "$_vf")
+    case "$_inject_epoch" in ''|*[!0-9]*|0) _inject_epoch="$_now" ;; esac
+    _inject_iso=$(date -u -r "$_inject_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$_inject_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u +%Y-%m-%dT%H:%M:%SZ)
+    _hash=$( { printf 'silent:%s:%s:' "$_lens" "$_reason"; cat "$_vf" 2>/dev/null; } | _pp_hash12)
+
+    if ! jq -nc \
+      --arg sid "$_session_id" \
+      --arg lens "$_lens" \
+      --arg hash "$_hash" \
+      --arg inject_ts "$_inject_iso" \
+      --argjson scan_at "$_inject_epoch" \
+      --arg reason "$_reason" \
+      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: "", cited_paths: [], cited_symbols: [], outcome: "silent", silent_reason: $reason}' \
+      >> "$_pending_file" 2>/dev/null; then
+      printf 'pair-polymath session-end: failed to append silent pending row for lens=%s (check %s permissions)\n' \
         "$_lens" "$_pending_file" >&2
     fi
   done

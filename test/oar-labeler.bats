@@ -107,6 +107,36 @@ teardown() { rm -rf "$HOME"; }
   [ "$status" -eq 0 ]
 }
 
+@test "with_row_timeout: shell functions bypass timeout(1) and run in-shell (Ubuntu CI fix)" {
+  # The Ubuntu CI failure cluster (PR #77 second run): timeout(1) execvp's
+  # its argv and cannot resolve shell functions. macOS hid the bug because
+  # /usr/bin/timeout is typically absent → pass-through. Ubuntu has it →
+  # every shell-function detector returned rc=127 → all label_pending
+  # outcome tests (acted/pushed-back/quarantine/E2E referenced) failed.
+  # This test pins the in-shell bypass even when timeout(1) IS available.
+  . "$PP_ROOT/lib/oar.sh"
+  # Clear the cache so the probe runs; we want to assert the function
+  # branch fires REGARDLESS of cache state.
+  unset _PP_OAR_TIMEOUT_CMD
+  # Define a sentinel shell function. If the wrapper exec'd this via
+  # timeout(1), it would return 127. If the wrapper bypasses to in-shell,
+  # it returns 42.
+  _pp_test_sentinel_fn() { return 42; }
+  run pp_oar_with_row_timeout 3 _pp_test_sentinel_fn
+  [ "$status" -eq 42 ]
+  unset -f _pp_test_sentinel_fn
+}
+
+@test "with_row_timeout: function bypass preserves stdout (matches direct invocation)" {
+  . "$PP_ROOT/lib/oar.sh"
+  unset _PP_OAR_TIMEOUT_CMD
+  _pp_test_emit_fn() { printf 'sentinel-output\n'; return 0; }
+  run pp_oar_with_row_timeout 3 _pp_test_emit_fn
+  [ "$status" -eq 0 ]
+  [ "$output" = "sentinel-output" ]
+  unset -f _pp_test_emit_fn
+}
+
 @test "with_row_timeout: no-command invocation returns 2 (caller bug)" {
   # GPT review #9 + #5: without the explicit "command required" guard,
   # zero-arg invocation would fall through to `timeout 3` (usage error)

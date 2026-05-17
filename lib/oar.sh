@@ -153,6 +153,23 @@ pp_oar_with_row_timeout() {
     return 2
   fi
 
+  # CI Ubuntu fix (PR #77 review): timeout(1) execvp's its argv and cannot
+  # resolve shell functions — every detector wrapped via timeout would
+  # return 127 ("command not found"). All three OAR detectors
+  # (pp_oar_pushed_back, pp_oar_acted_for_path, pp_oar_referenced) are
+  # shell functions defined in this file. On macOS this latent bug is
+  # masked because /usr/bin/timeout is typically absent and we already
+  # fall through to in-shell invocation; Ubuntu CI exposed it.
+  #
+  # type -t is a bash 3.2 builtin; "function" is the only invocable
+  # category that timeout(1) can't exec. Pass-through for functions
+  # matches the documented macOS behavior — the outer 15s cycle ceiling
+  # in bin/statusline.sh remains the hard guard for runaway functions.
+  if [ "$(type -t "$1" 2>/dev/null)" = "function" ]; then
+    "$@"
+    return $?
+  fi
+
   # First-call probe. Use the "unset" sentinel (`+x`) so an explicit
   # empty string (= "no binary found") is distinguishable from "not yet
   # checked". This matters when callers stub PATH mid-test.

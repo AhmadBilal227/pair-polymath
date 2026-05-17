@@ -59,6 +59,27 @@ JSON
   [ "${PP_LENS_HATS[0]}" = "CUSTOM_HAT" ]
 }
 
+@test "loader: user lens override with enabled=false disables built-in" {
+  mkdir -p "$HOME/.claude/pair-polymath/lenses"
+  cat > "$HOME/.claude/pair-polymath/lenses/01-ux-design.json" <<'JSON'
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["CUSTOM_HAT"],
+  "focus": "disabled override",
+  "color_hex": "#ff0000",
+  "enabled": false,
+  "extras": {}
+}
+JSON
+  pp_load_lenses
+  [ "$PP_LENS_COUNT" -eq 6 ]
+  for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
+    [ "${PP_LENS_IDS[$i]}" != "UX_DESIGN" ]
+  done
+}
+
 @test "loader: respects PP_LENS_MAX cap (DoS guard against stuffed user dir)" {
   mkdir -p "$HOME/.claude/pair-polymath/lenses"
   for i in $(seq 1 25); do

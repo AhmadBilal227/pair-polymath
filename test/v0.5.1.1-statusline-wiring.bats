@@ -45,7 +45,24 @@ setup() {
 }
 
 teardown() {
+  rm -rf /tmp/pp-fetch-lens-gate-wire.lock /tmp/pp-fetch-lens-gate-empty.lock 2>/dev/null || true
   rm -rf "$HOME"
+}
+
+_disable_builtin_lens() {
+  local _id="$1" _order="$2"
+  mkdir -p "$PP_STATE_DIR/lenses"
+  cat > "$PP_STATE_DIR/lenses/disable-${_id}.json" <<EOF
+{
+  "version": 1,
+  "id": "${_id}",
+  "display_order": ${_order},
+  "hats": ["OFF"],
+  "focus": "disabled in test",
+  "color_hex": "#000000",
+  "enabled": false
+}
+EOF
 }
 
 @test "statusline passes facts snapshot into router lens-gates path" {
@@ -83,4 +100,50 @@ EOF
   grep -F '"lens_id":"UX_DESIGN"' "$shadow" | grep -qF '"would_be_ineligible":1'
   grep -F '"lens_id":"ENGINEERING"' "$shadow" | grep -qF '"would_be_ineligible":0'
   grep -F '"lens_id":"SECURITY"' "$shadow" | grep -qF '"would_be_ineligible":0'
+}
+
+@test "statusline does not restore all lenses after active gates intentionally filter everything" {
+  _disable_builtin_lens ENGINEERING 2
+  _disable_builtin_lens SECURITY 3
+  _disable_builtin_lens PERF_FINOPS 4
+  _disable_builtin_lens STRATEGIC_FOUNDER 6
+  _disable_builtin_lens COGNITIVE_FLOW 7
+
+  cat > "$PP_FAKEBIN/llm" <<'EOF'
+#!/bin/sh
+printf 'UX: This hook is long enough for validation|||This body is deliberately long enough to be cached if an analyst runs.\n'
+EOF
+  chmod +x "$PP_FAKEBIN/llm"
+
+  cat > "$PP_STATE_DIR/config/user.env" <<EOF
+PP_ROUTER_ENABLE=1
+PP_ROUTER_SURPRISE_PROB=0
+PP_LENS_GATES_ACTIVE=1
+PP_LENS_GATES_TELEMETRY=1
+PP_LENS_GATES_SHADOW_FILE="$PP_CACHE_DIR/lens-gates-shadow.jsonl"
+PP_ROUTER_FORCE_OUTPUT="UX_DESIGN
+PRODUCT_BIZ"
+EOF
+
+  stdin_empty="$HOME/stdin-empty.json"
+  printf '{"session_id":"lens-gate-empty","workspace":{"current_dir":"%s"},"model":{"display_name":"S"},"transcript_path":"%s","cost":{"total_cost_usd":0.0}}\n' \
+    "$PP_REPO" "$PP_TX" > "$stdin_empty"
+
+  bash "$PP_ROOT/bin/statusline.sh" < "$stdin_empty" >/dev/null 2>&1 || true
+
+  facts="$PP_CACHE_DIR/cc-monitor-facts-lens-gate-empty.txt"
+  shadow="$PP_CACHE_DIR/lens-gates-shadow.jsonl"
+  lock="/tmp/pp-fetch-lens-gate-empty.lock"
+  for _i in $(seq 1 80); do
+    [ -f "$facts" ] && [ -f "$shadow" ] && [ ! -d "$lock" ] && break
+    sleep 0.1
+  done
+  [ -f "$facts" ]
+  [ -f "$shadow" ]
+  [ ! -d "$lock" ]
+
+  [ ! -f "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-UX_DESIGN.txt" ]
+  [ ! -f "$PP_CACHE_DIR/cc-monitor-lens-gate-empty-PRODUCT_BIZ.txt" ]
+  grep -F '"lens_id":"UX_DESIGN"' "$shadow" | grep -qF '"would_be_ineligible":1'
+  grep -F '"lens_id":"PRODUCT_BIZ"' "$shadow" | grep -qF '"would_be_ineligible":1'
 }

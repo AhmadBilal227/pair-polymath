@@ -1244,6 +1244,31 @@ GROUND
         done
         _pp_router_picked=$(pp_router_surprise_inject "$_pp_router_picked" "$_pp_router_not_picked")
 
+        # Stage D production guard: pp_router_pick_lenses applies active
+        # gates before surprise injection, but surprise candidates are built
+        # from the full not-picked set. Re-apply eligibility to the final
+        # set so an ineligible surprise cannot bypass gates, and so router
+        # fail-open/all-enabled output is still constrained when gates are
+        # explicitly active. Missing facts/evaluator remains fail-open.
+        _pp_lens_gates_final_filter=0
+        if [ "${PP_ROUTER_ENABLE:-1}" = "1" ] \
+            && [ "${PP_EVAL_MODE:-0}" != "1" ] \
+            && [ "${PP_LENS_GATES_ACTIVE:-0}" = "1" ] \
+            && [ -n "${_pp_facts_file:-}" ] && [ -f "$_pp_facts_file" ] \
+            && command -v pp_lens_is_eligible >/dev/null 2>&1; then
+          _pp_lens_gates_final_filter=1
+          _pp_router_picked_gated=""
+          while IFS= read -r _pp_gate_lens; do
+            [ -z "$_pp_gate_lens" ] && continue
+            if pp_lens_is_eligible "$_pp_gate_lens" "$_pp_facts_file"; then
+              _pp_router_picked_gated="${_pp_router_picked_gated}${_pp_gate_lens}"$'\n'
+            fi
+          done <<EOF
+$_pp_router_picked
+EOF
+          _pp_router_picked="$_pp_router_picked_gated"
+        fi
+
         # v0.4 Phase 2.5 Track 2: emit per-cycle router telemetry BEFORE
         # the blackout guard so picked_count reflects what the router
         # actually returned, not what the guard restored. (AI-eng round-2
@@ -1257,11 +1282,12 @@ GROUND
           "$_pp_router_picked" \
           null null null 2>/dev/null &
 
-        # Debugger I2: blackout guard. If somehow the surprise inject
-        # left us with an empty picked set (shouldn't happen via fail-open
-        # but defensive), restore the full enabled set so the cycle never
-        # produces zero observations silently.
-        if [ -z "$_pp_router_picked" ]; then
+        # Debugger I2: blackout guard. If gates were not applicable and the
+        # router/surprise path still left us empty, restore all enabled so a
+        # router failure never silently darkens the cycle. If active gates
+        # DID run, an empty set is an intentional "no eligible surface"
+        # result and must not be undone here.
+        if [ -z "$_pp_router_picked" ] && [ "${_pp_lens_gates_final_filter:-0}" != "1" ]; then
           _pp_router_picked=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         fi
 
@@ -2020,6 +2046,7 @@ EOF
           case "$_pp_kpi_elig_var" in
             *[!A-Za-z0-9_]*|'') ;;
             *)
+              _pp_kpi_elig_raw=""
               eval "_pp_kpi_elig_raw=\${${_pp_kpi_elig_var}:-}"
               case "$_pp_kpi_elig_raw" in
                 0|1)

@@ -66,7 +66,7 @@ pp_load_lenses() {
         (.hats|join(",")),
         .focus,
         .color_hex,
-        (.enabled // true | tostring),
+        ((if (.enabled == null) then true else .enabled end) | tostring),
         ((.extras.system_prompt_addition // "") | b64),
         ((.extras.examples // []) | join("\n") | b64),
         ((.extras.silent_example // "") | b64),

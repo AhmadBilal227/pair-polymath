@@ -506,6 +506,34 @@ pp_kpi_emit_cycle() {
   printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
 }
 
+# === v0.5.1.1 Task 12 (Stage C): per-lens KPI accumulators ==================
+# pp_kpi_emit_cycle stays pure transport; this helper just clamps the
+# would_be_ineligible_count to [0, PASS_COUNT] so caller bugs can't corrupt
+# the stream. Overflow surfaces as "100% PASS at risk" — doctor #22 catches
+# the upstream cause separately.
+#
+# When PP_LENS_GATES_TELEMETRY=1, the statusline KPI emitter merges a
+# `by_lens` sub-object (per-lens-per-cycle counts) into the v1 KPI blob and
+# bumps `schema_version` to 2. The 7 fields per lens:
+#   eligible_count               — 1 if lens eligible this cycle (Stage D)
+#   dispatched_count             — 1 if lens was in the router's pick list
+#   silent_count_by_reason       — {no_eligible_surface, persona_silent} ∈ {0,1}
+#   pass_count                   — 1 if critique PASS this cycle
+#   drop_count                   — 1 if critique DROP this cycle
+#   drift_count                  — 1 if prompt-side != validator-side sha8
+#   would_be_ineligible_count    — 1 if PASS AND shadow eligibility = false
+# All seven default to 0 when the upstream marker file is missing — Stage D
+# can land later without breaking the schema.
+pp_kpi_lens_count_would_be_ineligible() {
+  local _pass="${1:-0}" _wbi="${2:-0}"
+  case "$_pass" in ''|*[!0-9]*) _pass=0 ;; esac
+  case "$_wbi" in ''|*[!0-9]*) _wbi=0 ;; esac
+  if [ "$_wbi" -gt "$_pass" ]; then
+    _wbi="$_pass"
+  fi
+  printf '%s' "$_wbi"
+}
+
 # === v0.5.1 p95 computation ===================================================
 # pp_kpi_compute_p95 FIELD WINDOW_HOURS
 # Stdout: p95 of the named numeric field across kpi-cycle.jsonl rows whose

@@ -1866,6 +1866,103 @@ EOF
       #
       # Fail-open: every step is guarded; any error → no KPI line, cycle
       # proceeds unaffected.
+
+      # === v0.5.1.1 Task 12: per-lens KPI accumulators ======================
+      # Builds by_lens map (per-lens-per-cycle, all counts ∈ {0,1}).
+      # Sources, per spec §"Acceptance criteria":
+      #   eligible_count        — PP_LENS_ELIGIBLE_<id>  (Stage D Task 9)
+      #   dispatched_count      — lens_id ∈ _pp_router_picked
+      #   silent_count_by_reason.no_eligible_surface — Stage D filter
+      #   silent_count_by_reason.persona_silent      — Stage B Task 5 marker
+      #   pass_count / drop_count — verdict file ^lensN:.*(PASS|DROP)
+      #   drift_count           — Stage A Task 3 prompt/validator hash mismatch
+      #   would_be_ineligible_count — PASS && Stage D shadow marker
+      # PP_LENS_GATES_TELEMETRY=0 (default) ⇒ skip; no by_lens key emitted
+      # (KPI blob bytes identical to v0.5.1.0).
+      _pp_kpi_by_lens=""
+      if [ "${PP_LENS_GATES_TELEMETRY:-0}" = "1" ] && [ "${PP_LENS_COUNT:-0}" -gt 0 ]; then
+        _pp_kpi_by_lens="{"
+        _pp_kpi_first_lens=1
+        for _pp_kpi_lens_idx in $(seq 0 $((PP_LENS_COUNT - 1))); do
+          _pp_kpi_lens_id="${PP_LENS_IDS[$_pp_kpi_lens_idx]}"
+          [ -z "$_pp_kpi_lens_id" ] && continue
+          _pp_kpi_verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${_pp_kpi_lens_id}-verdict.txt"
+
+          # eligible_count: Stage D stamps PP_LENS_ELIGIBLE_<id> in the
+          # router. Default 0 (Stage D not yet wired = nothing eligible
+          # by telemetry; correct shadow semantics).
+          _pp_kpi_elig_var="PP_LENS_ELIGIBLE_${_pp_kpi_lens_id}"
+          eval "_pp_kpi_elig=\${${_pp_kpi_elig_var}:-0}"
+          case "$_pp_kpi_elig" in ''|*[!0-9]*) _pp_kpi_elig=0 ;; esac
+
+          # dispatched_count: was this lens in the router's pick list?
+          _pp_kpi_disp=0
+          if printf '%s\n' "${_pp_router_picked:-}" | grep -qx "$_pp_kpi_lens_id" 2>/dev/null; then
+            _pp_kpi_disp=1
+          fi
+
+          # silent_count_by_reason: Stage B Task 5 writes a marker line
+          # "# silent_reason: <reason>" into the verdict file.
+          _pp_kpi_silent_nes=0
+          _pp_kpi_silent_ps=0
+          if [ -f "$_pp_kpi_verdict_file" ]; then
+            if grep -q '^# silent_reason: no_eligible_surface' "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_silent_nes=1
+            fi
+            if grep -q '^# silent_reason: persona_silent' "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_silent_ps=1
+            fi
+          fi
+
+          # pass_count / drop_count: scan the cycle's verdict file for the
+          # per-lens line. Per-lens verdict files are written one-per-lens
+          # under the session's prefix.
+          _pp_kpi_pass=0
+          _pp_kpi_drop=0
+          if [ -f "$_pp_kpi_verdict_file" ]; then
+            if grep -Eq "^lens${_pp_kpi_lens_idx}:[[:space:]]*PASS\\b" "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_pass=1
+            fi
+            if grep -Eq "^lens${_pp_kpi_lens_idx}:[[:space:]]*DROP\\b" "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_drop=1
+            fi
+          fi
+
+          # drift_count: Stage A Task 3 stamps "# canonical_allowlist_sha8:
+          # <prompt>" + "# canonical_allowlist_sha8_validator: <validator>"
+          # into the verdict. Mismatch = drift = 1.
+          _pp_kpi_drift=0
+          if [ -f "$_pp_kpi_verdict_file" ]; then
+            _pp_kpi_drift_prompt=$(grep '^# canonical_allowlist_sha8:' "$_pp_kpi_verdict_file" 2>/dev/null | head -1 | awk '{print $NF}')
+            _pp_kpi_drift_validator=$(grep '^# canonical_allowlist_sha8_validator:' "$_pp_kpi_verdict_file" 2>/dev/null | head -1 | awk '{print $NF}')
+            if [ -n "$_pp_kpi_drift_prompt" ] && [ -n "$_pp_kpi_drift_validator" ] \
+                 && [ "$_pp_kpi_drift_prompt" != "$_pp_kpi_drift_validator" ]; then
+              _pp_kpi_drift=1
+            fi
+          fi
+
+          # would_be_ineligible_count: Stage D stamps "# would_be_ineligible:
+          # true" on PASS observations in shadow mode. Only count when PASS.
+          _pp_kpi_wbi=0
+          if [ "$_pp_kpi_pass" = "1" ] && [ -f "$_pp_kpi_verdict_file" ]; then
+            if grep -q '^# would_be_ineligible: true' "$_pp_kpi_verdict_file" 2>/dev/null; then
+              _pp_kpi_wbi=1
+            fi
+          fi
+          _pp_kpi_wbi=$(pp_kpi_lens_count_would_be_ineligible "$_pp_kpi_pass" "$_pp_kpi_wbi")
+
+          # Append this lens's object. jq can't easily build nested objects
+          # incrementally in shell, so we concatenate string fragments and
+          # let the final jq -nc validate / re-pretty.
+          if [ "$_pp_kpi_first_lens" = "0" ]; then
+            _pp_kpi_by_lens="${_pp_kpi_by_lens},"
+          fi
+          _pp_kpi_first_lens=0
+          _pp_kpi_by_lens="${_pp_kpi_by_lens}\"${_pp_kpi_lens_id}\":{\"eligible_count\":${_pp_kpi_elig},\"dispatched_count\":${_pp_kpi_disp},\"silent_count_by_reason\":{\"no_eligible_surface\":${_pp_kpi_silent_nes},\"persona_silent\":${_pp_kpi_silent_ps}},\"pass_count\":${_pp_kpi_pass},\"drop_count\":${_pp_kpi_drop},\"drift_count\":${_pp_kpi_drift},\"would_be_ineligible_count\":${_pp_kpi_wbi}}"
+        done
+        _pp_kpi_by_lens="${_pp_kpi_by_lens}}"
+      fi
+
       _pp_kpi_cost_usd=0
       _pp_kpi_retry_count=0
       _pp_kpi_retry_usd=0
@@ -1974,6 +2071,11 @@ EOF
       # slo_breach: is the rollback flag currently active? (cheap check.)
       _pp_kpi_slo_breach=0
       pp_rollback_is_active 2>/dev/null && _pp_kpi_slo_breach=1
+      # Build the v1-shape blob first (all existing fields), then merge in
+      # the v2 by_lens + schema_version when telemetry is on. Dual-write
+      # migration (spec §"Schema versioning"): v1 readers ignore the new
+      # keys; v2 readers route on schema_version=2. With telemetry OFF,
+      # the blob bytes are byte-identical to v0.5.1.0.
       _pp_kpi_blob=$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg session "$session_id" \
@@ -2000,6 +2102,18 @@ EOF
           halluc_post_would_drop_rate:$halluc_post_would_drop_rate,
           cycle_outcome:$cycle_outcome,
           eligible:$eligible, slo_breach:$slo_breach}' 2>/dev/null || printf '')
+
+      # v0.5.1.1 Task 12: when PP_LENS_GATES_TELEMETRY=1, merge the by_lens
+      # sub-object + bump schema_version. jq merge keeps every v1 key and
+      # only adds the v2 ones. Falls back to v1-only blob if jq merge fails.
+      if [ -n "$_pp_kpi_blob" ] && [ "${PP_LENS_GATES_TELEMETRY:-0}" = "1" ] \
+           && [ -n "$_pp_kpi_by_lens" ]; then
+        _pp_kpi_blob=$(printf '%s' "$_pp_kpi_blob" \
+          | jq -c --argjson bylens "$_pp_kpi_by_lens" \
+                  --argjson sv "${PP_KPI_SCHEMA_VERSION:-2}" \
+                  '. + {schema_version: $sv, by_lens: $bylens}' 2>/dev/null \
+          || printf '%s' "$_pp_kpi_blob")
+      fi
       [ -n "$_pp_kpi_blob" ] && pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
 
       # === B2 (v0.5.1): auto-rollback SLO check =============================

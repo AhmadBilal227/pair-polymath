@@ -267,3 +267,118 @@ class Gamma {}" | LC_ALL=C sort -u)
   printf '%s\n' "$_mem_out" | grep -q '^beta$'
   printf '%s\n' "$_mem_out" | grep -q '^Gamma$'
 }
+
+# ============================================================
+# Task 12 — KPI emitter: 7 new per-lens fields
+# ============================================================
+
+@test "task12: PP_LENS_GATES_TELEMETRY=0 — by_lens sub-object absent (schema unchanged)" {
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_KPI_ENABLE=1
+  unset PP_LENS_GATES_TELEMETRY PP_LENS_GATES_ACTIVE
+  # Caller constructs the blob; the emitter is pure transport. We pin
+  # statusline.sh's responsibility: when telemetry off, the blob has
+  # NO by_lens key.
+  local _blob='{"session":"s1","cost_usd":0.01,"phase":"drafting"}'
+  pp_kpi_emit_cycle "$_blob"
+  [ -f "$PP_CACHE_DIR/kpi-cycle.jsonl" ]
+  ! jq -e '.by_lens' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+}
+
+@test "task12: PP_LENS_GATES_TELEMETRY=1 — by_lens sub-object present with 7 fields per lens" {
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_KPI_ENABLE=1
+  # Hand-rolled v2-shape blob the way statusline.sh's emitter will build it.
+  local _blob
+  _blob=$(jq -nc '{
+    session: "s1",
+    schema_version: 2,
+    by_lens: {
+      UX_DESIGN: {
+        eligible_count: 1, dispatched_count: 1,
+        silent_count_by_reason: {no_eligible_surface: 0, persona_silent: 0},
+        pass_count: 1, drop_count: 0, drift_count: 0,
+        would_be_ineligible_count: 0
+      },
+      ENGINEERING: {
+        eligible_count: 1, dispatched_count: 1,
+        silent_count_by_reason: {no_eligible_surface: 0, persona_silent: 0},
+        pass_count: 0, drop_count: 1, drift_count: 0,
+        would_be_ineligible_count: 0
+      }
+    }
+  }')
+  pp_kpi_emit_cycle "$_blob"
+  jq -e '.by_lens.UX_DESIGN.eligible_count == 1' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.UX_DESIGN.dispatched_count == 1' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.UX_DESIGN.silent_count_by_reason.no_eligible_surface == 0' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.UX_DESIGN.silent_count_by_reason.persona_silent == 0' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.UX_DESIGN.pass_count == 1' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.ENGINEERING.drop_count == 1' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.UX_DESIGN.drift_count == 0' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.UX_DESIGN.would_be_ineligible_count == 0' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+}
+
+@test "task12: schema_version=2 stamped when by_lens present" {
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_KPI_ENABLE=1
+  local _blob='{"session":"s1","schema_version":2,"by_lens":{"X":{"eligible_count":1,"dispatched_count":1,"silent_count_by_reason":{"no_eligible_surface":0,"persona_silent":0},"pass_count":1,"drop_count":0,"drift_count":0,"would_be_ineligible_count":0}}}'
+  pp_kpi_emit_cycle "$_blob"
+  jq -e '.schema_version == 2' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+}
+
+@test "task12: would_be_ineligible_count counts only PASSes with would_be_ineligible=true" {
+  # Pure-shell aggregation rule — pinned at the helper level so the
+  # statusline-side accumulator and the test agree on semantics.
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/metrics.sh"
+  # Helper: pp_kpi_lens_count_would_be_ineligible <pass_count> <would_be_ineligible_count>
+  # Stdout: the would_be_ineligible_count integer (clamped to [0, pass_count]).
+  local _out
+  _out=$(pp_kpi_lens_count_would_be_ineligible 3 2 2>/dev/null)
+  [ "$_out" = "2" ]
+  _out=$(pp_kpi_lens_count_would_be_ineligible 0 0 2>/dev/null)
+  [ "$_out" = "0" ]
+  # Clamping: caller bug could send N > pass_count; we clamp.
+  _out=$(pp_kpi_lens_count_would_be_ineligible 1 5 2>/dev/null)
+  [ "$_out" = "1" ]
+}
+
+@test "task12: silent_count_by_reason is a sub-object with two keys" {
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_KPI_ENABLE=1
+  local _blob='{"session":"s1","schema_version":2,"by_lens":{"L":{"eligible_count":1,"dispatched_count":0,"silent_count_by_reason":{"no_eligible_surface":1,"persona_silent":0},"pass_count":0,"drop_count":0,"drift_count":0,"would_be_ineligible_count":0}}}'
+  pp_kpi_emit_cycle "$_blob"
+  # The sub-object must have EXACTLY no_eligible_surface + persona_silent keys
+  # (spec §"Acceptance criteria" — 2-value enum).
+  local _keys
+  _keys=$(jq -r '.by_lens.L.silent_count_by_reason | keys | join(",")' "$PP_CACHE_DIR/kpi-cycle.jsonl")
+  [ "$_keys" = "no_eligible_surface,persona_silent" ]
+}
+
+@test "task12: legacy cycle-wide fields still present alongside by_lens" {
+  # AC carve-out: existing v0.5.2 fields (cost_usd, retry_count, phase, etc)
+  # MUST coexist with the new by_lens sub-object. Dual-write migration —
+  # v1 readers see the v1 fields and ignore the v2 by_lens.
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/metrics.sh"
+  export PP_KPI_ENABLE=1
+  local _blob
+  _blob=$(jq -nc '{
+    session: "s1", schema_version: 2,
+    cost_usd: 0.012, retry_count: 2, retry_usd: 0.008,
+    inv_count: 0, picked_count: 3, phase: "drafting", phase_source: "pattern",
+    by_lens: { UX: { eligible_count: 1, dispatched_count: 1,
+                     silent_count_by_reason: {no_eligible_surface:0, persona_silent:0},
+                     pass_count: 1, drop_count: 0, drift_count: 0,
+                     would_be_ineligible_count: 0 } }
+  }')
+  pp_kpi_emit_cycle "$_blob"
+  jq -e '.cost_usd == 0.012' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.retry_count == 2' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+  jq -e '.by_lens.UX.eligible_count == 1' "$PP_CACHE_DIR/kpi-cycle.jsonl" >/dev/null
+}

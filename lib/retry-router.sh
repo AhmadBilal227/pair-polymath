@@ -69,7 +69,7 @@ pp_retry_log_shadow() {
   [ "${PP_RETRY_ROUTER_SHADOW:-0}" = "1" ] || return 0
   local _blob="${1:-}"
   [ -z "$_blob" ] && return 0
-  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/retry-router-shadow.jsonl"
+  local _file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/retry-router-shadow.jsonl"
   local _max="${PP_LOG_MAX_BYTES:-10485760}"
   case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
   mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
@@ -113,7 +113,7 @@ pp_retry_hard_cap_preflight() {
   local _sid="${1:?session_id required}"
   local _model="${2:?model required}"
   local _cap="${PP_RETRY_USD_PER_CYCLE_HARD_CAP:-0.05}"
-  local _spendfile="${PP_CACHE_DIR:-$HOME/.claude/cache}/retry-cycle-spend-${_sid}.txt"
+  local _spendfile="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/retry-cycle-spend-${_sid}.txt"
   local _lockfile="${_spendfile}.lock"
   mkdir -p "$(dirname "$_spendfile")" 2>/dev/null || return 0
   local _attempts=0

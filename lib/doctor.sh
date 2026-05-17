@@ -171,7 +171,7 @@ doctor_check_hooks_wired() {
 }
 
 doctor_check_cache_writable() {
-  local d="${PP_CACHE_DIR:-$HOME/.claude/cache}"
+  local d="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
   mkdir -p "$d" 2>/dev/null
   if [ -w "$d" ]; then
     _pp_doctor_green "cache dir writable" "$d"
@@ -182,7 +182,7 @@ doctor_check_cache_writable() {
 }
 
 doctor_check_budget_file() {
-  local f="${PP_CACHE_DIR:-$HOME/.claude/cache}/pp-budget-$(date +%Y%m%d).txt"
+  local f="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/pp-budget-$(date +%Y%m%d).txt"
   if [ ! -f "$f" ]; then
     _pp_doctor_yellow "budget tracker" "no entry yet today (will be created on first cycle)"
     return 1

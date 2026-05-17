@@ -54,11 +54,12 @@ _pp_memory_patterns_is_number() {
 
 # _pp_memory_load_prompt NAME
 # Stdout: rendered template content. Honors user override under
-# $HOME/.claude/pair-polymath/prompts/, then built-in $PP_ROOT/prompts/.
+# $PP_STATE_DIR/prompts/, then built-in $PP_ROOT/prompts/.
 # Returns 1 (empty stdout) if neither exists.
 _pp_memory_load_prompt() {
   local name="$1"
-  local user_path="${HOME}/.claude/pair-polymath/prompts/${name}.md"
+  local user_root="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
+  local user_path="${user_root}/prompts/${name}.md"
   local builtin_path="${PP_ROOT}/prompts/${name}.md"
   if [ -f "$user_path" ]; then
     cat "$user_path"

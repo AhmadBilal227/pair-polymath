@@ -410,7 +410,7 @@ pp_oar_acted_for_path() {
 
   # Plan addendum M2: mktemp in PP_CACHE_DIR assumes the dir exists. Ensure
   # it does. Fall back to a system-tmp mktemp on dir-missing.
-  local _cache_dir="${PP_CACHE_DIR:-$HOME/.claude/cache}"
+  local _cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
   mkdir -p "$_cache_dir" 2>/dev/null || true
   local _flag
   if [ -d "$_cache_dir" ] && [ -w "$_cache_dir" ]; then
@@ -618,7 +618,7 @@ pp_oar_referenced() {
   case "$_inj" in ''|*[!0-9]*) return 1 ;; esac
   case "$_scan" in ''|*[!0-9]*) return 1 ;; esac
 
-  local _cache_dir="${PP_CACHE_DIR:-$HOME/.claude/cache}"
+  local _cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
   local _tail="${_cache_dir}/transcript-tail-${_sid}.txt"
   # Per spec contract: missing transcript → rc 1 (not an error, just "no
   # evidence of reference"). The labeler driver is responsible for not
@@ -843,7 +843,7 @@ EOF
 # Atomic pending rewrite: kept rows go to a sibling mktemp file, then
 # mv-replaces pending. No in-place edit; bash 3.2 portable.
 pp_oar_label_pending() {
-  local _cache_dir="${PP_CACHE_DIR:-$HOME/.claude/cache}"
+  local _cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
   local _pending="${_cache_dir}/oar-pending.jsonl"
   local _labeled="${_cache_dir}/oar-labeled.jsonl"
   local _stuck="${_cache_dir}/oar-stuck.jsonl"

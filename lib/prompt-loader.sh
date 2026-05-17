@@ -3,7 +3,7 @@
 # Sourced by bin/statusline.sh. Requires PP_ROOT.
 #
 # Resolution: built-in prompts from $PP_ROOT/prompts/, user overrides from
-# $HOME/.claude/pair-polymath/prompts/. User file wins if both exist.
+# $PP_STATE_DIR/prompts/. User file wins if both exist.
 #
 # Substitution: ${var_name} placeholders are replaced with the value of the
 # matching shell variable in the caller's environment, BUT only for names
@@ -34,7 +34,8 @@ PP_PROMPT_VAR_ALLOWLIST="${PP_PROMPT_VAR_ALLOWLIST:-lens_group lens_focus lens_h
 pp_render_prompt() {
   # _pp_-prefixed locals avoid shadowing caller vars used in ${var} substitution.
   local _pp_name="${1:?pp_render_prompt requires a prompt name}"
-  local _pp_user_path="${HOME}/.claude/pair-polymath/prompts/${_pp_name}.md"
+  local _pp_user_root="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
+  local _pp_user_path="${_pp_user_root}/prompts/${_pp_name}.md"
   local _pp_builtin_path="${PP_ROOT}/prompts/${_pp_name}.md"
   local _pp_src=""
 

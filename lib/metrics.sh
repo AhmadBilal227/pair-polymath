@@ -41,7 +41,7 @@ PP_AVG_TOK_RETRY_IN="${PP_AVG_TOK_RETRY_IN:-2500}"
 PP_AVG_TOK_RETRY_OUT="${PP_AVG_TOK_RETRY_OUT:-180}"
 
 # Default PP_CACHE_DIR if config.sh hasn't been sourced (e.g. unit tests).
-PP_CACHE_DIR="${PP_CACHE_DIR:-${HOME}/.claude/cache}"
+PP_CACHE_DIR="${PP_CACHE_DIR:-${CLAUDE_DIR:-${HOME}/.claude}/cache}"
 PP_METRICS_FILE="${PP_CACHE_DIR}/metrics.jsonl"
 PP_METRICS_TMP_PREFIX="${PP_CACHE_DIR}/metrics-tmp"
 # Round-3 fix R3-PR10-4: serialize appends to metrics.jsonl. Two parallel
@@ -498,7 +498,7 @@ pp_kpi_emit_cycle() {
   [ "$_enabled" = "0" ] && return 0
   local _blob="${1:-}"
   [ -z "$_blob" ] && return 0
-  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+  local _file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/kpi-cycle.jsonl"
   local _max="${PP_LOG_MAX_BYTES:-10485760}"
   case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
   mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
@@ -551,7 +551,7 @@ pp_kpi_compute_p95() {
   local _window_h="${2:-24}"
   [ -n "$_field" ] || { printf '0'; return 0; }
   case "$_window_h" in ''|*[!0-9]*) _window_h=24 ;; esac
-  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+  local _file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/kpi-cycle.jsonl"
   local _now _cutoff
   _now=$(date +%s 2>/dev/null) || _now=0
   _cutoff=$(( _now - _window_h * 3600 ))

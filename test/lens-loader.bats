@@ -59,6 +59,28 @@ JSON
   [ "${PP_LENS_HATS[0]}" = "CUSTOM_HAT" ]
 }
 
+@test "loader: PP_STATE_DIR lens override wins outside HOME/.claude" {
+  export PP_STATE_DIR="$HOME/custom-state"
+  mkdir -p "$PP_STATE_DIR/lenses"
+  cat > "$PP_STATE_DIR/lenses/01-ux-design.json" <<'JSON'
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["STATE_HAT"],
+  "focus": "state-dir override focus string",
+  "color_hex": "#00ff00",
+  "enabled": true,
+  "extras": {}
+}
+JSON
+  pp_load_lenses
+  [ "$PP_LENS_COUNT" -eq 7 ]
+  [ "${PP_LENS_IDS[0]}" = "UX_DESIGN" ]
+  [ "${PP_LENS_FOCUS[0]}" = "state-dir override focus string" ]
+  [ "${PP_LENS_HATS[0]}" = "STATE_HAT" ]
+}
+
 @test "loader: user lens override with enabled=false disables built-in" {
   mkdir -p "$HOME/.claude/pair-polymath/lenses"
   cat > "$HOME/.claude/pair-polymath/lenses/01-ux-design.json" <<'JSON'

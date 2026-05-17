@@ -18,6 +18,8 @@ session_id=$(echo "$input" | jq -r '.session_id // empty' 2>/dev/null)
 # PP_ROOT is the plugin root (hooks/ lives directly under it).
 PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck disable=SC1091
+. "${PP_ROOT}/lib/config.sh" 2>/dev/null || true
+# shellcheck disable=SC1091
 . "${PP_ROOT}/lib/lens-loader.sh"
 pp_load_lenses
 LENS_NAMES=("${PP_LENS_IDS[@]}")
@@ -36,7 +38,7 @@ collected_blocks=""
 
 for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
   lens_name="${LENS_NAMES[$lens_idx]}"
-  mon_cache="${HOME}/.claude/cache/cc-monitor-${session_id}-${lens_name}.txt"
+  mon_cache="${PP_CACHE_DIR}/cc-monitor-${session_id}-${lens_name}.txt"
   [ ! -f "$mon_cache" ] && continue
   [ ! -s "$mon_cache" ] && continue
 
@@ -56,8 +58,8 @@ for lens_idx in $(seq 0 $((LENS_COUNT - 1))); do
 
   # Per-lens idempotency (keyed by lens id, not numeric index — index can shift
   # when the user enables/disables/reorders lenses)
-  hash_file="${HOME}/.claude/cache/cc-monitor-injected-hash-${session_id}-${lens_name}.txt"
-  time_file="${HOME}/.claude/cache/cc-monitor-injected-time-${session_id}-${lens_name}.txt"
+  hash_file="${PP_CACHE_DIR}/cc-monitor-injected-hash-${session_id}-${lens_name}.txt"
+  time_file="${PP_CACHE_DIR}/cc-monitor-injected-time-${session_id}-${lens_name}.txt"
   # Round-2 fix I2: shasum is perl-based and ships on macOS + most Linuxes,
   # but missing on Alpine and minimal containers. Fall back to sha1sum then
   # sha256sum (truncated).

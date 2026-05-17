@@ -11,11 +11,11 @@
 #   $PP_STATE_DIR/retry-router-rollback.json  — {disable_count, last_engage_ts}
 
 _pp_rollback_state_file() {
-  printf '%s' "${PP_STATE_DIR:-$HOME/.claude/pair-polymath}/retry-router-rollback.json"
+  printf '%s' "${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}/retry-router-rollback.json"
 }
 
 _pp_rollback_flag_file() {
-  printf '%s' "${PP_STATE_DIR:-$HOME/.claude/pair-polymath}/retry-router-disabled.flag"
+  printf '%s' "${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}/retry-router-disabled.flag"
 }
 
 pp_rollback_is_active() {
@@ -107,7 +107,7 @@ pp_rollback_check_and_engage() {
   case "$_min_samples" in ''|*[!0-9]*) _min_samples=20 ;; esac
   local _cap="${PP_RETRY_SLO_P95_CAP_USD:-0.030}"
 
-  local _file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+  local _file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/kpi-cycle.jsonl"
   [ -f "$_file" ] || return 0
 
   local _now _cutoff

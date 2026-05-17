@@ -41,6 +41,15 @@ teardown() {
   [ "$output" = "USER_OVERRIDE" ]
 }
 
+@test "loader: PP_STATE_DIR prompt override wins outside HOME/.claude" {
+  export PP_STATE_DIR="$HOME/custom-state"
+  mkdir -p "$PP_STATE_DIR/prompts"
+  echo 'STATE_DIR_OVERRIDE' > "$PP_STATE_DIR/prompts/analyst-primary.md"
+  run pp_render_prompt analyst-primary
+  [ "$status" -eq 0 ]
+  [ "$output" = "STATE_DIR_OVERRIDE" ]
+}
+
 @test "loader: missing prompt → return 1 + stderr" {
   run pp_render_prompt does-not-exist
   [ "$status" -eq 1 ]

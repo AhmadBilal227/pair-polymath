@@ -209,7 +209,7 @@ EOF
   local _vl _ts _shadow
   if [ "${PP_LENS_GATES_TELEMETRY:-0}" = "1" ] && [ -n "$_facts_file" ] && [ -f "$_facts_file" ] \
      && command -v pp_lens_is_eligible >/dev/null 2>&1; then
-    _shadow="${PP_LENS_GATES_SHADOW_FILE:-$HOME/.claude/cache/lens-gates-shadow.jsonl}"
+    _shadow="${PP_LENS_GATES_SHADOW_FILE:-${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/lens-gates-shadow.jsonl}"
     mkdir -p "$(dirname "$_shadow")" 2>/dev/null || true
     _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || _ts="1970-01-01T00:00:00Z"
     while IFS= read -r _vl; do
@@ -443,7 +443,7 @@ EOF
 #  - I2: rotation truncates .old (single rotation, no unbounded growth)
 #  - I7: comment matches implementation (direct append under lock; no tmpfile)
 
-: "${PP_ROUTER_METRICS_FILE:=${HOME}/.claude/cache/router-metrics.jsonl}"
+: "${PP_ROUTER_METRICS_FILE:=${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/router-metrics.jsonl}"
 : "${PP_ROUTER_METRICS_MAX_LINES:=5000}"
 
 pp_router_metrics_emit() {

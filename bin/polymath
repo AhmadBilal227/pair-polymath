@@ -37,14 +37,14 @@ else
 fi
 
 # _pp_set_user_env_var KEY VALUE
-# Atomically set KEY=VALUE in $CLAUDE_DIR/pair-polymath/config/user.env,
+# Atomically set KEY=VALUE in $PP_USER_CONFIG,
 # preserving every other line. Symlink-aware (writes through to the link
 # target so dotfile-managed configs aren't replaced with regular files).
 # Fails loudly on real grep / mkdir errors (review fixes H1+H2+M1+M2).
 # Returns 0 on success, 1 on any error (with stderr message).
 _pp_set_user_env_var() {
   local key="$1" value="$2"
-  local user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
+  local user_env="${PP_USER_CONFIG:-${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}/config/user.env}"
   local cfg_dir
   cfg_dir="$(dirname "$user_env")"
 
@@ -177,7 +177,7 @@ case "$cmd" in
     printf '  Prompts:         %s built-in\n' "$prompt_count"
 
     # Honor $CLAUDE_DIR like install/uninstall do (review fix L1)
-    user_prompts=$(find "${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/prompts" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+    user_prompts=$(find "${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}/prompts" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
     [ "$user_prompts" -gt 0 ] && printf '    +%s user overrides\n' "$user_prompts"
 
     # Feature flags
@@ -452,7 +452,7 @@ USAGE
             *) shift ;;
           esac
         done
-        _shadow="${PP_CACHE_DIR:-$HOME/.claude/cache}/retry-router-shadow.jsonl"
+        _shadow="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/retry-router-shadow.jsonl"
         if [ ! -f "$_shadow" ]; then
           printf 'No shadow data yet. Enable with PP_RETRY_ROUTER_SHADOW=1.\n'
           exit 0
@@ -544,7 +544,7 @@ USAGE
         # not just baked-in defaults. config/default.env has already been
         # sourced by lib/config.sh on shell entry; user.env is the
         # operator-mutated overlay we're inspecting.
-        _pp_lg_user_env="${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/config/user.env"
+        _pp_lg_user_env="${PP_USER_CONFIG:-${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}/config/user.env}"
         if [ -f "$_pp_lg_user_env" ]; then
           # shellcheck disable=SC1090
           . "$_pp_lg_user_env" 2>/dev/null || true
@@ -1008,7 +1008,7 @@ HELP
         *) shift ;;
       esac
     done
-    _kpi_file="${PP_CACHE_DIR:-$HOME/.claude/cache}/kpi-cycle.jsonl"
+    _kpi_file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/kpi-cycle.jsonl"
     # B4 (v0.5.1): also read the rotated .1 file — otherwise the rolling
     # window is silently lost the moment kpi-cycle.jsonl rotates.
     if [ ! -f "$_kpi_file" ] && [ ! -f "${_kpi_file}.1" ]; then

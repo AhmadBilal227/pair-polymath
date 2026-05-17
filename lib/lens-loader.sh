@@ -3,7 +3,7 @@
 # Sourced by bin/statusline.sh. Requires PP_ROOT + jq.
 #
 # Resolution: built-in lenses from $PP_ROOT/lenses/, then user lenses from
-# $HOME/.claude/pair-polymath/lenses/. User lenses with matching `id` OVERRIDE
+# $PP_STATE_DIR/lenses/. User lenses with matching `id` OVERRIDE
 # built-ins. Sort order: display_order ascending, id ascending on ties.
 # Hard cap: PP_LENS_MAX (default 16) — prevents a stuffed user dir from
 # turning a statusline refresh into a parallel-LLM cost bomb.
@@ -22,7 +22,8 @@
 
 pp_load_lenses() {
   local builtin_dir="$PP_ROOT/lenses"
-  local user_dir="$HOME/.claude/pair-polymath/lenses"
+  local user_root="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
+  local user_dir="$user_root/lenses"
   local max="${PP_LENS_MAX:-16}"
   local tmp
   tmp=$(mktemp)

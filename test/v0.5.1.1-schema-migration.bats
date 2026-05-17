@@ -36,23 +36,25 @@ teardown() { rm -rf "$HOME"; }
   [ "$_line" = "lens0: DROP — citation fails: lib/widget.ts not in allowlist" ]
 }
 
-@test "migration: v2 reader extracts the trailer hashes from a v2 verdict" {
-  # Stage B's drift-invariant alarm reads the trailer.
-  local _can
-  _can=$(grep -E '^# v2:' "$FIX/verdict-v2.txt" \
-    | sed -n 's/.*canonical_allowlist_sha8=\([0-9a-f]*\).*/\1/p')
-  [ "$_can" = "abc12345" ]
+@test "migration: v2 reader extracts the dual trailer hashes from a v2 verdict" {
+  # Stage C back-patch: drift alarm reads DUAL sha8 fields.
+  local _pcan _vcan
+  _pcan=$(grep -E '^# v2: canonical_allowlist_sha8_prompt=' "$FIX/verdict-v2.txt" \
+    | sed 's/.*=//')
+  _vcan=$(grep -E '^# v2: canonical_allowlist_sha8_validator=' "$FIX/verdict-v2.txt" \
+    | sed 's/.*=//')
+  [ "$_pcan" = "abc12345" ]
+  [ "$_vcan" = "abc12345" ]
 }
 
 @test "migration: v2 reader on a v1 verdict (no trailer) returns empty hash, no crash" {
-  # A v1 verdict has no `# v2:` trailer. The Stage B alarm must
+  # A v1 verdict has no `# v2:` trailer. The Stage C drift alarm must
   # gracefully default to empty rather than throwing or treating
   # missing-as-drift.
-  local _can
-  _can=$(grep -E '^# v2:' "$FIX/verdict-v1.txt" 2>/dev/null \
-    | sed -n 's/.*canonical_allowlist_sha8=\([0-9a-f]*\).*/\1/p' \
-    || true)
-  [ -z "$_can" ]
+  local _pcan
+  _pcan=$(grep -E '^# v2: canonical_allowlist_sha8_prompt=' "$FIX/verdict-v1.txt" 2>/dev/null \
+    | sed 's/.*=//' || true)
+  [ -z "$_pcan" ]
 }
 
 @test "migration: v1 OAR reader (jq -r '.outcome') extracts outcome from v2 fixture" {

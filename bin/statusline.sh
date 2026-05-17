@@ -53,12 +53,23 @@ _pp_sha8() {
   printf '%s' "$_h"
 }
 
-# _pp_write_verdict_v2 FILE BODY CANONICAL_SHA8 RENDERED_SHA8 SILENT_REASON
+# _pp_write_verdict_v2 FILE BODY PROMPT_SHA8 VALIDATOR_SHA8 RENDERED_SHA8 SILENT_REASON
 # v0.5.1.1 Stage A spec task 3 — sole writer of the per-lens verdict
-# file. Format:
+# file. Stage C back-patch: emits DUAL canonical_allowlist_sha8 fields
+# (prompt-side + validator-side) so doctor #22 drift_count alarm has
+# real signal. Format:
 #   # schema_version: 2
 #   <body, exactly as v1 emitted it: `lensN: PASS|DROP — reason`>
-#   # v2: canonical_allowlist_sha8=<8hex> rendered_prompt_sha8=<8hex> silent_reason=<reason|empty>
+#   # v2: canonical_allowlist_sha8_prompt=<8hex>
+#   # v2: canonical_allowlist_sha8_validator=<8hex>
+#   # v2: rendered_prompt_sha8=<8hex> silent_reason=<reason|empty>
+#
+# Semantic: prompt = sha8 of FILE-READ-derived symbol set rendered into
+# the lens prompt (post Stage C unify); validator = sha8 of FILE-READ-
+# derived symbol set fed to the critique allowlist. They MUST be identical
+# by construction (both pipe through pp_grounding_symbol_inventory_from_
+# file_read). If they ever diverge, the unification pipeline has split.
+#
 # v1 parsers (grep -E '^lens[0-9]+:') ignore the `# `-prefixed comment
 # lines. The trailer field shape is stable: silent_reason= is emitted
 # even when empty so v2 readers can parse with a fixed regex.
@@ -66,14 +77,16 @@ _pp_sha8() {
 # Atomic write via mktemp + mv (same FS as $verdict_file path) — see
 # CLAUDE.md invariant #5. mv-into-same-dir is atomic on POSIX.
 _pp_write_verdict_v2() {
-  local _file="$1" _body="$2" _can="$3" _rend="$4" _silent="${5:-}"
+  local _file="$1" _body="$2" _pcan="$3" _vcan="$4" _rend="$5" _silent="${6:-}"
   local _tmp
   _tmp=$(mktemp "${_file}.XXXXXX" 2>/dev/null) || return 1
   {
     printf '# schema_version: %s\n' "${PP_VERDICT_SCHEMA_VERSION:-2}"
     printf '%s\n' "$_body"
-    printf '# v2: canonical_allowlist_sha8=%s rendered_prompt_sha8=%s silent_reason=%s\n' \
-      "$_can" "$_rend" "$_silent"
+    printf '# v2: canonical_allowlist_sha8_prompt=%s\n' "$_pcan"
+    printf '# v2: canonical_allowlist_sha8_validator=%s\n' "$_vcan"
+    printf '# v2: rendered_prompt_sha8=%s silent_reason=%s\n' \
+      "$_rend" "$_silent"
   } > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 1; }
   mv "$_tmp" "$_file" 2>/dev/null || { rm -f "$_tmp"; return 1; }
   return 0
@@ -852,29 +865,54 @@ PLAN
         fi
       fi
 
-      # Extract candidate symbols from the file the planner picked, then count refs across cwd.
-      # Helps the analyst verify symbols actually exist before naming them.
+      # v0.5.1.1 Task 2 (Stage C): SYMBOL REFERENCE COUNTS rendering moved
+      # to lib/grounding.sh helpers. _pp_symbol_primary = the primary
+      # SYMBOL REFERENCE COUNTS body (legacy grep block when flag off;
+      # FILE-READ-filtered when on). _pp_symbol_nearby = the NEARBY
+      # MENTIONS body (legacy grep block; flag-on only). _pp_canonical_
+      # inventory captures the prompt-side FILE-READ symbol set (driving
+      # the canonical_allowlist_sha8_prompt hash in the verdict trailer).
+      # Top-N cap from PP_SYMBOL_INVENTORY_TOP_N (default 80).
+      _pp_symbol_top_n="${PP_SYMBOL_INVENTORY_TOP_N:-80}"
+      case "$_pp_symbol_top_n" in ''|*[!0-9]*) _pp_symbol_top_n=80 ;; esac
+      _pp_symbol_primary=""
+      _pp_symbol_nearby=""
+      _pp_canonical_inventory=""
+      # Keep candidate_symbols + symbol_refs populated for any downstream
+      # consumer that references them (defensive — no current consumer
+      # outside this block; the heredoc now reads _pp_symbol_sections).
       candidate_symbols=""
       symbol_refs=""
-      if [ -n "$file_contents" ]; then
+      if [ -n "$file_contents" ] && [ -n "$cwd" ] && [ "$cwd" != "-" ]; then
+        # shellcheck disable=SC2034
         candidate_symbols=$(printf "%s" "$file_contents" \
-          | grep -oE '(^|[[:space:]])(function|const|let|class|def)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]+' \
-          | awk '{print $NF}' | sort -u | head -15)
-
-        if [ -n "$candidate_symbols" ] && [ "$cwd" != "-" ]; then
-          while IFS= read -r sym; do
-            [ -z "$sym" ] && continue
-            # FIX (review I6): exclude node_modules + use -F (fixed string, not regex) — symbols are identifiers
-            ref_count=$(grep -rn -F --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
-                        --include='*.py' --include='*.go' --include='*.rs' \
-                        --exclude-dir={node_modules,.git,dist,build,coverage,.next,.turbo,vendor} \
-                        -- "$sym" "$cwd" 2>/dev/null | wc -l | tr -d ' ')
-            if [ "$ref_count" -gt 0 ]; then
-              symbol_refs="${symbol_refs}${sym}: ${ref_count} refs"$'\n'
-            fi
-          done <<< "$candidate_symbols"
+          | LC_ALL=C grep -oE '(^|[[:space:]])(function|const|let|class|def)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]+' 2>/dev/null \
+          | LC_ALL=C awk '{print $NF}' | LC_ALL=C sort -u | head -15)
+        _pp_canonical_inventory=$(pp_grounding_symbol_inventory_from_file_read "$file_contents" 2>/dev/null)
+        if [ "${PP_INVENTORY_UNIFY_ACTIVE:-0}" = "1" ]; then
+          # Flag ON: legacy grep block becomes NEARBY MENTIONS (broader,
+          # non-citable orientation); primary slot is FILE-READ-filtered.
+          _pp_symbol_nearby=$(PP_INVENTORY_UNIFY_ACTIVE=0 \
+            pp_grounding_render_symbol_block "$file_contents" "$cwd" "$_pp_symbol_top_n" 2>/dev/null)
+          _pp_symbol_primary=$(pp_grounding_render_symbol_block "$file_contents" "$cwd" "$_pp_symbol_top_n" 2>/dev/null)
+        else
+          # Flag OFF (default): primary slot = legacy block; no NEARBY MENTIONS.
+          _pp_symbol_primary=$(pp_grounding_render_symbol_block "$file_contents" "$cwd" "$_pp_symbol_top_n" 2>/dev/null)
         fi
       fi
+      # Back-compat: keep $symbol_refs populated so anyone reading the
+      # variable (telemetry, future hooks) sees the same string the heredoc
+      # used to splice in. Identical to _pp_symbol_primary by construction.
+      # shellcheck disable=SC2034
+      symbol_refs="$_pp_symbol_primary"
+
+      # v0.5.1.1 Task 2: compose SYMBOL + NEARBY MENTIONS once; flag OFF
+      # ⇒ byte-identical to the legacy one-section block in the heredoc
+      # (always call the composer, even when primary is empty — it emits
+      # the "(no symbols extracted from file read)" sentinel exactly the
+      # way the pre-Stage-C heredoc did via the `${var:-default}` form).
+      _pp_symbol_sections=$(pp_grounding_compose_symbol_sections \
+        "$_pp_symbol_primary" "$_pp_symbol_nearby" 2>/dev/null)
 
       # Compose grounded blob — USER INTENT placed FIRST as the primary anchor
       grounded=$(cat <<GROUND
@@ -905,8 +943,7 @@ ${gh_ci:-(no CI data)}
 === FILE READ (planner picked: ${candidate_file:-NONE}) ===
 ${file_contents:-(no file read this round)}
 
-=== SYMBOL REFERENCE COUNTS (grep across cwd) ===
-${symbol_refs:-(no symbols extracted from file read)}
+${_pp_symbol_sections}
 
 === LAST TEST/LINT RUN (≤30min, from PostToolUse hook) ===
 ${test_state:-(no recent test/lint runs)}
@@ -1325,6 +1362,30 @@ $lens_evidence"
             critique_allowlist_note="(NOTE: both allowlists empty — fresh repo or no FILE READ. Apply EMPTY-ALLOWLIST EXCEPTION: skip citation check.)
 "
           fi
+          # v0.5.1.1 Task 2 (Stage C): when PP_INVENTORY_UNIFY_ACTIVE=1, top-N
+          # truncate the VALID SYMBOLS critique block so it matches the
+          # token budget of the prompt-side render. Flag OFF ⇒ untruncated
+          # legacy output (byte-identical critique heredoc).
+          # _pp_valid_symbols is FILE-READ-derived already (set by
+          # pp_extract_citations); the canonical (pre-truncation) set is
+          # what drives canonical_allowlist_sha8_validator, so the drift
+          # invariant is unaffected by this rendering shape.
+          _pp_valid_symbols_rendered="$_pp_valid_symbols"
+          if [ "${PP_INVENTORY_UNIFY_ACTIVE:-0}" = "1" ] && [ -n "$_pp_valid_symbols" ]; then
+            _pp_valid_symbols_top_n="${PP_SYMBOL_INVENTORY_TOP_N:-80}"
+            case "$_pp_valid_symbols_top_n" in ''|*[!0-9]*) _pp_valid_symbols_top_n=80 ;; esac
+            # Cap to top_n lines + suffix sentinel if oversized. Sort is
+            # already ASCII-stable from pp_extract_citations (LC_ALL=C
+            # sort -u upstream); just count + slice.
+            _pp_valid_symbols_size=$(printf '%s\n' "$_pp_valid_symbols" | LC_ALL=C grep -c . 2>/dev/null || true)
+            case "$_pp_valid_symbols_size" in ''|*[!0-9]*) _pp_valid_symbols_size=0 ;; esac
+            if [ "$_pp_valid_symbols_size" -gt "$_pp_valid_symbols_top_n" ]; then
+              _pp_valid_symbols_rendered=$(printf '%s\n' "$_pp_valid_symbols" \
+                | head -n "$_pp_valid_symbols_top_n")
+              _pp_valid_symbols_rendered="${_pp_valid_symbols_rendered}
+(+$((_pp_valid_symbols_size - _pp_valid_symbols_top_n)) more — pull via FILE READ to cite)"
+            fi
+          fi
           critique_data="GROUNDED FACTS:
 ${grounded:0:3000}
 
@@ -1332,7 +1393,7 @@ ${critique_allowlist_note}VALID PATHS (only these paths exist in the grounded in
 ${_pp_valid_paths}
 
 VALID SYMBOLS (only these identifiers appear in FILE READ — observations citing anything else are [unverified] or HALLUCINATED):
-${_pp_valid_symbols}
+${_pp_valid_symbols_rendered}
 
 OBSERVATIONS TO JUDGE:
 $critique_input"
@@ -1440,19 +1501,28 @@ EOF
               verdict_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-verdict.txt"
               streak_file="${HOME}/.claude/cache/cc-monitor-${session_id}-${ci_id}-streak.txt"
               if [ -n "$verdict" ]; then
-                # v0.5.1.1 Stage A spec task 3: per-invocation hash trailer.
-                # canonical_allowlist_sha8 = sha256 of the FILE-READ
-                # inventory the validator consumed this cycle. In Stage A,
-                # rendered_prompt_sha8 == canonical_allowlist_sha8 (the
-                # prompt block flips to top-N in Stage C; until then there's
-                # no truncation, so both hashes match by construction).
-                # silent_reason is always empty in Stage A — pre-critique
-                # SILENT recognition lands in Stage B.
-                _pp_can_sha8=$(printf '%s' "${_pp_valid_symbols:-}" | _pp_sha8)
-                _pp_rend_sha8="$_pp_can_sha8"
+                # v0.5.1.1 Stage C: per-invocation DUAL hash trailer.
+                # canonical_allowlist_sha8_prompt = sha8 of the FILE-READ
+                # symbol set rendered into the lens prompt (post Stage C
+                # unify — _pp_canonical_inventory holds the canonical set
+                # captured at prompt-render time; falls back to
+                # _pp_valid_symbols when PP_INVENTORY_UNIFY_ACTIVE=0 so
+                # legacy verdicts stay populated). canonical_allowlist_
+                # sha8_validator = sha8 of FILE-READ symbol set fed to the
+                # critique allowlist (_pp_valid_symbols). Identical by
+                # construction (both derived from the same FILE READ
+                # section); doctor #22 alarms if they ever diverge.
+                # rendered_prompt_sha8 = sha8 of the actual rendered
+                # truncated block (Stage C top-N can shrink the prompt
+                # side; the field reflects post-truncation bytes).
+                # silent_reason is always empty in this writer — pre-
+                # critique SILENT recognition lands via silent-v2.sh.
+                _pp_prompt_sha8=$(printf '%s' "${_pp_canonical_inventory:-${_pp_valid_symbols:-}}" | _pp_sha8)
+                _pp_validator_sha8=$(printf '%s' "${_pp_valid_symbols:-}" | _pp_sha8)
+                _pp_rend_sha8=$(printf '%s' "${_pp_symbol_primary:-${_pp_valid_symbols:-}}" | _pp_sha8)
                 _pp_write_verdict_v2 \
                   "$verdict_file" "$verdict" \
-                  "$_pp_can_sha8" "$_pp_rend_sha8" ""
+                  "$_pp_prompt_sha8" "$_pp_validator_sha8" "$_pp_rend_sha8" ""
                 # FIX (review I1): DROP must be checked first (more specific) + word-boundary match
                 if echo "$verdict" | grep -Eqi '\bDROP\b'; then
                   # Increment streak (drives escalation next cycle)

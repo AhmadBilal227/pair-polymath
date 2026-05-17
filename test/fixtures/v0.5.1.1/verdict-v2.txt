@@ -1,3 +1,5 @@
 # schema_version: 2
 lens0: DROP — citation fails: lib/widget.ts not in allowlist
-# v2: canonical_allowlist_sha8=abc12345 rendered_prompt_sha8=def67890 silent_reason=
+# v2: canonical_allowlist_sha8_prompt=abc12345
+# v2: canonical_allowlist_sha8_validator=abc12345
+# v2: rendered_prompt_sha8=def67890 silent_reason=

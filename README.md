@@ -10,13 +10,14 @@ UX. Engineering. Security. Perf/FinOps. Product/Biz. Strategic Founder. Cognitiv
 
 ## What you see
 
-```
-🪄 (paper-publish●) [xhigh] ▰▰▰▱▱ 42%  $1.27  cache:23%
-▸  ENGINEERING: App.tsx is a 2400-line state monolith — split before next feature
-```
+Real screenshots from a live session:
 
-**Line 1** — standard Claude Code statusline (branch, context%, today's spend).
-**Line 2** — rotates every 30s between **advisor** (one of 7 lens observations) and **teacher** (a rotating digest of popularity-ranked HN + recent arXiv `cs.AI` / `cs.HC` titles, compressed by `gpt-5-mini`).
+![UX_DESIGN lens — advisory snippet on the statusline](docs/screenshots/statusline-ux-lens.png)
+
+![PRODUCT_BIZ lens — pricing telemetry concern](docs/screenshots/statusline-product-biz-lens.png)
+
+**Line 1** — standard Claude Code statusline (branch, dirty marker, effort level, context% bar, today's spend, optional cpu/cache).
+**Line 2** — rotates every 30s between **advisor** (one of 7 lens observations, sometimes with an alarm glyph + age suffix like `(2m)`) and **teacher** (a rotating digest of popularity-ranked HN + recent arXiv `cs.AI` / `cs.HC` titles, compressed by `gpt-5-mini`).
 
 ## Real example: caught a bug in its own installer
 

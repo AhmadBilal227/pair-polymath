@@ -14,7 +14,16 @@ teardown() {
 }
 
 _mode() {
-  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1" 2>/dev/null
+  # GNU-first probe (matches lib/oar.sh:637 canonical pattern). `stat -f`
+  # on GNU coreutils means "filesystem format" — prints fs metadata, doesn't
+  # fail — so BSD-first probe on Ubuntu CI yields non-numeric output and the
+  # `[…] = "600"` comparison always fails. Same bug class as the v0.5.2.1
+  # doctor #22 fix.
+  if stat -c %a /dev/null >/dev/null 2>&1; then
+    stat -c %a "$1" 2>/dev/null
+  else
+    stat -f %Lp "$1" 2>/dev/null
+  fi
 }
 
 @test "trace emitter: disabled by default" {

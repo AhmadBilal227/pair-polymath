@@ -243,7 +243,7 @@ teardown() { rm -rf "$HOME"; }
 @test "hook: still injects observations whose hash does NOT match a rule" {
   local _sid="bats-hook-no-suppress"
   local _lens="SECURITY"
-  local _obs="SECURITY: legitimate concern about secrets handling|||body that should fire because no rule matches yet"
+  local _obs="SECURITY: legitimate concern about secrets handling|||body that should fire because lib/security.sh references pp_secret_scan() and no rule matches yet"
   printf '%s\n' "$_obs" > "$PP_CACHE_DIR/cc-monitor-${_sid}-${_lens}.txt"
   pp_dismiss_add "Other unrelated rule" project >/dev/null
   PP_LENS_IDS="SECURITY" PP_LENS_COUNT=1

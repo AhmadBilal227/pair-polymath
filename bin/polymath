@@ -1135,7 +1135,13 @@ HELP
 
   disable)
     _pp_set_user_env_var PP_EXTERNAL_LLM 0 || exit 1
-    printf 'LLM cycle disabled. Status-only mode active; new cycles take effect within 5 min.\n'
+    # v0.5.4 Change 4: clear lens + tip + idempotency caches so paused
+    # state is INERT immediately (no waiting for the next cycle's
+    # truncation at bin/statusline.sh:~1375 — which never runs while
+    # paused). Budget files preserved by the helper. Spec: docs/v0.5.4-pause-ux-spec.md
+    _pp_cache_clear_all "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}" \
+      >/dev/null 2>&1 || true
+    printf 'LLM cycle disabled and observation cache cleared. Status-only mode active.\n'
     ;;
 
   enable)

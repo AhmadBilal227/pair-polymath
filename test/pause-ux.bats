@@ -40,6 +40,36 @@ _pp_seed_cache() {
   [ -z "$output" ]
 }
 
+# ----- Task 5: polymath disable clears cache atomically -----
+
+@test "polymath disable AC4: removes cc-monitor-*.txt files atomically" {
+  _pp_seed_cache "sess1" "ENGINEERING" "ARCH: x|||observation body long enough to satisfy validators"
+  _pp_seed_cache "sess1" "UX_DESIGN" "UX: y|||observation body long enough to satisfy validators"
+  run bash "$PP_ROOT/bin/polymath" disable
+  [ "$status" -eq 0 ]
+  # cc-monitor-* files removed atomically by _pp_cache_clear_all.
+  local _remaining
+  _remaining=$(find "$PP_CACHE_DIR" -maxdepth 1 -name 'cc-monitor-sess1-*.txt' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$_remaining" = "0" ]
+}
+
+@test "polymath disable AC4b: preserves budget files (invariant)" {
+  mkdir -p "$PP_CACHE_DIR"
+  local _budget="$PP_CACHE_DIR/pp-budget-$(date +%Y%m%d).txt"
+  printf '99\n' > "$_budget"
+  run bash "$PP_ROOT/bin/polymath" disable
+  [ "$status" -eq 0 ]
+  [ -f "$_budget" ]
+  [ "$(cat "$_budget")" = "99" ]
+}
+
+@test "polymath disable AC4c: success message reflects new cache-cleared contract" {
+  run bash "$PP_ROOT/bin/polymath" disable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"LLM cycle disabled"* ]]
+  [[ "$output" == *"cache cleared"* ]]
+}
+
 # ----- Task 3: statusline cache-read short-circuit when paused -----
 
 @test "statusline AC2: paused short-circuits cache read (no cached observation rendered)" {

@@ -139,8 +139,10 @@ teardown() { rm -rf "$HOME"; }
       # v0.5.5 brand: strip wall-clock-cycled visual elements that two
       # sequential runs naturally differ on (constellation braille frames
       # ⠁ ⠂ ⠄ ⡀ and the ⚛ atom sigil itself). Content semantics are what
-      # this test checks, not visual-frame identity.
-      s/[\x{2801}\x{2802}\x{2804}\x{2808}]//g;
+      # this test checks, not visual-frame identity. Fourth frame is
+      # U+2840 (DOTS-7), NOT U+2808 — an earlier patch had the wrong
+      # codepoint and the test was flaky on the ⡀ branch (CI #76614371717).
+      s/[\x{2801}\x{2802}\x{2804}\x{2840}]//g;
       s/\x{269B}//g;
     '
   }

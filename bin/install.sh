@@ -753,6 +753,8 @@ step "Merging into $SETTINGS_FILE"
 # when PP_ROOT contains spaces (review fix M2). Single-quoted around the path
 # means bash strips the quotes and runs the path as one argument.
 SL_CMD="bash '${PP_ROOT}/bin/statusline.sh'"
+# v0.5.5 brand: monochrome ⚛ row prefix for polymath-spawned subagents.
+SUBAGENT_SL_CMD="bash '${PP_ROOT}/hooks/subagent-statusline.sh'"
 HOOK_USER_CMD="'${PP_ROOT}/hooks/inject-monitor-insight.sh'"
 HOOK_POST_CMD="'${PP_ROOT}/hooks/cache-test-result.sh'"
 # v0.5.1: SessionEnd hook is a no-op when PP_OAR_ENABLE=0 (default), so
@@ -761,7 +763,7 @@ HOOK_SESSION_END_CMD="'${PP_ROOT}/hooks/session-end.sh'"
 
 if [ "$PP_DRY_RUN" = "1" ]; then
   printf '  [DRY-RUN] Would back up %s\n' "$SETTINGS_FILE"
-  printf '  [DRY-RUN] Would merge statusLine + 3 hooks via jq into %s\n' "$SETTINGS_FILE"
+  printf '  [DRY-RUN] Would merge statusLine + subagentStatusLine + 3 hooks via jq into %s\n' "$SETTINGS_FILE"
   audit_log "settings-merge" "jq ... > $SETTINGS_FILE" 0 "dry-run"
 else
   if [ -f "$SETTINGS_FILE" ]; then
@@ -797,12 +799,19 @@ else
   merge_stderr=$(mktemp 2>/dev/null) || merge_stderr="/tmp/pp-merge-$$"
   merge_rc=0
   jq --arg sl "$SL_CMD" \
+     --arg subagent_sl "$SUBAGENT_SL_CMD" \
      --arg hook_user "$HOOK_USER_CMD" \
      --arg hook_post "$HOOK_POST_CMD" \
      --arg hook_session_end "$HOOK_SESSION_END_CMD" \
      --argjson set_sl "$install_statusline" '
     # statusLine (conditional on $set_sl)
     (if $set_sl == 1 then .statusLine = {type: "command", command: $sl, refreshInterval: 2} else . end)
+    |
+    # v0.5.5 brand: subagentStatusLine — overrides ONLY polymath-spawned
+    # subagent rows (lens fan-out, critique, retries). The hook passes
+    # through any row whose name does not match our allowlist, so user-
+    # spawned subagents render normally.
+    (if $set_sl == 1 then .subagentStatusLine = {type: "command", command: $subagent_sl} else . end)
     |
     # UserPromptSubmit hook — append if not already present (idempotent)
     (.hooks //= {})
@@ -853,8 +862,8 @@ else
     exit 1
   fi
   if [ "$install_statusline" = "1" ]; then
-    ok "settings.json updated (statusLine + 3 hooks)"
-    audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "statusLine + 3 hooks"
+    ok "settings.json updated (statusLine + subagentStatusLine + 3 hooks)"
+    audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "statusLine + subagentStatusLine + 3 hooks"
   else
     ok "settings.json updated (3 hooks; existing statusLine preserved)"
     audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "3 hooks only"

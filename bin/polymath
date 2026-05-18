@@ -1782,10 +1782,36 @@ HELP
     fi
 
     # Real path — fetch + diff + (maybe) prompt + pull + install
-    printf 'Fetching from origin...\n'
+    # v0.5.5 brand: constellation spinner during the fetch (network wait).
+    # Lazy-source brand.sh; falls back to plain text on older installs.
+    if [ -z "${_PP_BRAND_SOURCED:-}" ]; then
+      # shellcheck disable=SC1091
+      . "$PP_ROOT/lib/brand.sh" 2>/dev/null || true
+    fi
+    if type pp_brand_loading >/dev/null 2>&1 && [ -t 1 ]; then
+      # Spin in background; foreground does the fetch; kill spinner after.
+      (
+        while :; do
+          printf '\r%s Fetching from origin... ' "$(pp_brand_loading)" >&2
+          sleep 1
+        done
+      ) &
+      _pp_spinner_pid=$!
+      trap 'kill "$_pp_spinner_pid" 2>/dev/null; wait "$_pp_spinner_pid" 2>/dev/null; true' EXIT
+    else
+      printf 'Fetching from origin...\n'
+      _pp_spinner_pid=""
+    fi
     if ! git -C "$PP_ROOT" fetch origin --tags --quiet 2>&1; then
+      [ -n "$_pp_spinner_pid" ] && { kill "$_pp_spinner_pid" 2>/dev/null; wait "$_pp_spinner_pid" 2>/dev/null; printf '\r\033[K' >&2; }
       printf 'polymath update: git fetch failed (network? auth?)\n' >&2
       exit 1
+    fi
+    if [ -n "$_pp_spinner_pid" ]; then
+      kill "$_pp_spinner_pid" 2>/dev/null
+      wait "$_pp_spinner_pid" 2>/dev/null
+      printf '\r\033[K' >&2
+      trap - EXIT
     fi
 
     # Capture local HEAD before pull so we can diff after the pull (R4-1).
@@ -2269,6 +2295,266 @@ HELP
     esac
     ;;
 
+  auto-update)
+    shift
+    _sub="${1:-status}"; shift || true
+    _interval="daily"
+    _hhmm="03:17"   # 03:17 default — jitter off the round-number herd
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --interval) _interval="${2:-daily}"; shift 2 ;;
+        --time)     _hhmm="${2:-03:17}"; shift 2 ;;
+        *) printf 'polymath auto-update: unknown flag %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+    case "$_interval" in
+      daily|weekly) ;;
+      *) printf 'polymath auto-update: --interval must be daily|weekly (got %s)\n' "$_interval" >&2; exit 2 ;;
+    esac
+    case "$_hhmm" in
+      [0-9][0-9]:[0-9][0-9]) ;;
+      *) printf 'polymath auto-update: --time must be HH:MM (got %s)\n' "$_hhmm" >&2; exit 2 ;;
+    esac
+    _hh="${_hhmm%:*}"; _mm="${_hhmm#*:}"
+    # Strip a leading zero so arithmetic doesn't interpret 08/09 as octal,
+    # then range-check. Doing it after the format check keeps the error
+    # messages specific (format vs range).
+    _hh_n="${_hh#0}"; _hh_n="${_hh_n:-0}"
+    _mm_n="${_mm#0}"; _mm_n="${_mm_n:-0}"
+    if [ "$_hh_n" -lt 0 ] 2>/dev/null || [ "$_hh_n" -gt 23 ] 2>/dev/null || \
+       [ "$_mm_n" -lt 0 ] 2>/dev/null || [ "$_mm_n" -gt 59 ] 2>/dev/null; then
+      printf 'polymath auto-update: --time HH must be 00-23 and MM must be 00-59 (got %s)\n' "$_hhmm" >&2
+      exit 2
+    fi
+    _worker="$PP_ROOT/bin/auto-update.sh"
+    [ -x "$_worker" ] || chmod +x "$_worker" 2>/dev/null || true
+
+    _macos_plist="$HOME/Library/LaunchAgents/com.pair-polymath.auto-update.plist"
+    _macos_label="com.pair-polymath.auto-update"
+    _systemd_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    _systemd_service="$_systemd_dir/pair-polymath-auto-update.service"
+    _systemd_timer="$_systemd_dir/pair-polymath-auto-update.timer"
+    _cron_marker="# pair-polymath auto-update"
+
+    # Detect available scheduler. Prefer launchd on macOS, systemd --user on
+    # Linux when present, cron as the portable fallback. PP_AUTO_UPDATE_BACKEND
+    # forces a choice (for tests + unusual environments).
+    _backend="${PP_AUTO_UPDATE_BACKEND:-}"
+    if [ -z "$_backend" ]; then
+      case "$(uname -s 2>/dev/null)" in
+        Darwin) _backend="launchd" ;;
+        Linux)
+          if command -v systemctl >/dev/null 2>&1 && systemctl --user list-units >/dev/null 2>&1; then
+            _backend="systemd"
+          elif command -v crontab >/dev/null 2>&1; then
+            _backend="cron"
+          else
+            _backend="none"
+          fi
+          ;;
+        *) command -v crontab >/dev/null 2>&1 && _backend="cron" || _backend="none" ;;
+      esac
+    fi
+
+    case "$_sub" in
+      enable)
+        if [ "$_interval" = "weekly" ] && [ "$_backend" = "launchd" ]; then
+          # launchd StartCalendarInterval supports Weekday but the simplest
+          # weekly pattern is Sunday. Document and continue.
+          _wd="Weekday=0"
+        else
+          _wd=""
+        fi
+        case "$_backend" in
+          launchd)
+            mkdir -p "$(dirname "$_macos_plist")"
+            cat >"$_macos_plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$_macos_label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$_worker</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>$_hh_n</integer>
+    <key>Minute</key><integer>$_mm_n</integer>
+$([ -n "$_wd" ] && printf '    <key>Weekday</key><integer>0</integer>\n')  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>${PP_HOME:-$HOME/.claude/pair-polymath}/logs/auto-update.stdout.log</string>
+  <key>StandardErrorPath</key><string>${PP_HOME:-$HOME/.claude/pair-polymath}/logs/auto-update.stderr.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PP_ROOT</key><string>$PP_ROOT</string>
+    <key>HOME</key><string>$HOME</string>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+            # Idempotent reload: unload-then-load is the well-supported path
+            # across macOS 10.10 → 15.x. launchctl bootstrap exists on newer
+            # macOS but its error semantics are inconsistent across point
+            # releases — load/unload behaves identically and is safe to retry.
+            launchctl unload "$_macos_plist" >/dev/null 2>&1 || true
+            if launchctl load "$_macos_plist" 2>/dev/null; then
+              printf 'auto-update enabled (launchd, %s daily at %s).\n' "$_macos_label" "$_hhmm"
+              printf '  Plist: %s\n' "$_macos_plist"
+              printf '  Logs:  %s/logs/auto-update.log\n' "${PP_HOME:-$HOME/.claude/pair-polymath}"
+            else
+              printf 'polymath auto-update: launchctl load failed; check %s manually.\n' "$_macos_plist" >&2
+              exit 2
+            fi
+            ;;
+          systemd)
+            mkdir -p "$_systemd_dir"
+            cat >"$_systemd_service" <<SVC
+[Unit]
+Description=Pair Polymath auto-update worker
+
+[Service]
+Type=oneshot
+Environment=PP_ROOT=$PP_ROOT
+ExecStart=/bin/bash $_worker
+SVC
+            _oncal="*-*-* $_hh:$_mm:00"
+            [ "$_interval" = "weekly" ] && _oncal="Sun *-*-* $_hh:$_mm:00"
+            cat >"$_systemd_timer" <<TMR
+[Unit]
+Description=Pair Polymath auto-update timer ($_interval at $_hhmm)
+
+[Timer]
+OnCalendar=$_oncal
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+TMR
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+            if systemctl --user enable --now pair-polymath-auto-update.timer >/dev/null 2>&1; then
+              printf 'auto-update enabled (systemd --user, %s at %s).\n' "$_interval" "$_hhmm"
+              printf '  Service: %s\n' "$_systemd_service"
+              printf '  Timer:   %s\n' "$_systemd_timer"
+            else
+              printf 'polymath auto-update: systemctl --user enable failed.\n' >&2
+              printf '  Hint: user lingering may be required (sudo loginctl enable-linger $USER).\n' >&2
+              exit 2
+            fi
+            ;;
+          cron)
+            _spec="$_mm $_hh * * *"
+            [ "$_interval" = "weekly" ] && _spec="$_mm $_hh * * 0"
+            _existing=$(crontab -l 2>/dev/null | grep -v -F "$_cron_marker" || true)
+            if { printf '%s\n' "$_existing"; printf '%s /bin/bash %s %s\n' "$_spec" "$_worker" "$_cron_marker"; } | crontab - 2>/dev/null; then
+              printf 'auto-update enabled (cron, %s at %s).\n  Worker: %s\n' "$_interval" "$_hhmm" "$_worker"
+            else
+              printf 'polymath auto-update: crontab write failed.\n' >&2
+              exit 2
+            fi
+            ;;
+          none)
+            printf 'polymath auto-update: no scheduler found (launchd / systemd --user / crontab).\n' >&2
+            printf '  Either install cron, or run `polymath update --yes` manually.\n' >&2
+            exit 2
+            ;;
+          *)
+            printf 'polymath auto-update: unknown backend %s\n' "$_backend" >&2; exit 2 ;;
+        esac
+        ;;
+
+      disable)
+        _removed=0
+        if [ -f "$_macos_plist" ]; then
+          launchctl unload "$_macos_plist" >/dev/null 2>&1 || true
+          rm -f "$_macos_plist"
+          _removed=$((_removed + 1))
+          printf '  removed: %s\n' "$_macos_plist"
+        fi
+        if [ -f "$_systemd_timer" ] || [ -f "$_systemd_service" ]; then
+          systemctl --user disable --now pair-polymath-auto-update.timer >/dev/null 2>&1 || true
+          rm -f "$_systemd_timer" "$_systemd_service"
+          systemctl --user daemon-reload >/dev/null 2>&1 || true
+          _removed=$((_removed + 1))
+          printf '  removed: pair-polymath-auto-update.{service,timer}\n'
+        fi
+        if command -v crontab >/dev/null 2>&1; then
+          _existing=$(crontab -l 2>/dev/null || true)
+          if printf '%s' "$_existing" | grep -qF "$_cron_marker"; then
+            printf '%s\n' "$_existing" | grep -v -F "$_cron_marker" | crontab - 2>/dev/null || true
+            _removed=$((_removed + 1))
+            printf '  removed: cron entry (%s)\n' "$_cron_marker"
+          fi
+        fi
+        if [ "$_removed" -eq 0 ]; then
+          printf 'auto-update is already disabled.\n'
+        else
+          printf 'auto-update disabled.\n'
+        fi
+        ;;
+
+      status)
+        _state="disabled"
+        _detail=""
+        if [ -f "$_macos_plist" ]; then
+          _state="enabled (launchd)"
+          _detail="$_macos_plist"
+        elif [ -f "$_systemd_timer" ]; then
+          _state="enabled (systemd --user)"
+          _detail="$_systemd_timer"
+        elif command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -qF "$_cron_marker"; then
+          _state="enabled (cron)"
+          _detail="$(crontab -l 2>/dev/null | grep -F "$_cron_marker")"
+        fi
+        printf 'polymath auto-update: %s\n' "$_state"
+        [ -n "$_detail" ] && printf '  %s\n' "$_detail"
+        _log="${PP_HOME:-$HOME/.claude/pair-polymath}/logs/auto-update.log"
+        if [ -s "$_log" ]; then
+          printf '  last run:\n'
+          # Last summary line (OK/FAIL/SKIP) — body lines are 4-space indented
+          # so a leading-non-space filter isolates the summary cleanly.
+          tail -n 200 "$_log" | grep -E '^[0-9]' | tail -n 3 | sed 's/^/    /'
+          printf '  full log: %s\n' "$_log"
+        else
+          printf '  no runs logged yet.\n'
+        fi
+        printf '  detected backend: %s\n' "$_backend"
+        ;;
+
+      help|-h|--help|"")
+        cat <<EOF
+polymath auto-update — Scheduled background pull + idempotent re-install.
+
+Usage:
+  polymath auto-update enable [--interval daily|weekly] [--time HH:MM]
+                                Default: daily at 03:17 local. Picks
+                                launchd (macOS) / systemd --user (Linux) /
+                                cron (fallback) automatically.
+  polymath auto-update disable  Remove the scheduled job (idempotent;
+                                cleans up all backends if more than one
+                                was wired by hand).
+  polymath auto-update status   Show current state + last 3 run summaries.
+
+Notes:
+  - The worker calls \`polymath update --yes\` and logs to
+    ~/.claude/pair-polymath/logs/auto-update.log. Failures do NOT disable
+    the schedule — they show up in the log + 'status' output.
+  - Override the backend with PP_AUTO_UPDATE_BACKEND={launchd|systemd|cron}.
+  - Override the worker log location with PP_AUTO_UPDATE_LOG.
+EOF
+        ;;
+
+      *)
+        printf 'polymath auto-update: unknown subcommand "%s". Try: polymath auto-update help\n' "$_sub" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
@@ -2293,6 +2579,7 @@ Usage:
   polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
   polymath dismiss     Suppression rules (add / list / show / disable / enable / ack)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)
+  polymath auto-update Scheduled background pull (enable / disable / status)
   polymath self-test   End-to-end LLM probe (~\$0.0001 per run)
   polymath version     Print version
   polymath help        This message

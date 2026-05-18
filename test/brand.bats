@@ -28,6 +28,7 @@ teardown() {
 
 @test "brand AC1b: sigil falls back to * on POSIX locale" {
   LANG="POSIX"
+  unset LC_ALL
   export LANG
   result=$(_pp_brand_sigil)
   [ "$result" = '*' ]
@@ -37,6 +38,22 @@ teardown() {
   LANG="en_US.UTF-8"
   PP_BRAND_SIGIL_ASCII=1
   export LANG PP_BRAND_SIGIL_ASCII
+  result=$(_pp_brand_sigil)
+  [ "$result" = '*' ]
+}
+
+@test "brand AC1d: sigil DEFAULTS to ⚛ when LANG unset (Claude Code statusline case)" {
+  # Claude Code strips LANG when spawning the statusline subprocess.
+  # Modern terminals render U+269B fine; default to ⚛.
+  unset LANG LC_ALL LC_CTYPE
+  result=$(_pp_brand_sigil)
+  [ "$result" = '⚛' ]
+}
+
+@test "brand AC1e: LC_ALL=C wins over LANG=en_US.UTF-8 (POSIX precedence)" {
+  LANG="en_US.UTF-8"
+  LC_ALL="C"
+  export LANG LC_ALL
   result=$(_pp_brand_sigil)
   [ "$result" = '*' ]
 }

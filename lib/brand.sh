@@ -24,19 +24,25 @@ fi
 _PP_BRAND_SOURCED=1
 
 # === The polymath sigil ====================================================
-# U+269B ATOM SYMBOL. Broad font support across modern terminals. Falls
-# back to '*' if the terminal is ASCII-only (rare; detected by env LANG).
+# U+269B ATOM SYMBOL. Broad font support across modern terminals.
+# Default-to-UTF-8 polarity: emit ⚛ unless LANG explicitly says C/POSIX
+# (or LC_ALL=C overrides). Claude Code strips LANG from the statusline
+# subprocess environment — defaulting to ⚛ when unset is the correct
+# behavior for the most common case (modern macOS / Linux terminals
+# auto-render UTF-8 even when LANG is missing). User can force fallback
+# with PP_BRAND_SIGIL_ASCII=1 for legacy terminals that can't render U+269B.
 _pp_brand_sigil() {
-  # ASCII-fallback detection: when LANG ends in 'POSIX' or '@C', the
-  # terminal may not render U+269B reliably. Cheap heuristic; users can
-  # override with PP_BRAND_SIGIL_ASCII=1.
   if [ "${PP_BRAND_SIGIL_ASCII:-0}" = "1" ]; then
     printf '%s' '*'
     return 0
   fi
-  case "${LANG:-}" in
-    *.UTF-8|*.utf8|*.UTF8|*UTF-8*|*utf-8*) printf '%s' '⚛' ;;
-    *)                                     printf '%s' '*' ;;
+  # POSIX precedence: LC_ALL wins over LC_CTYPE, which wins over LANG.
+  # Pick the highest-priority value that's set, then test it.
+  local _eff_locale="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+  case "$_eff_locale" in
+    *UTF*|*utf*|*Utf*) printf '%s' '⚛' ;;
+    C|POSIX|C.*|POSIX.*) printf '%s' '*' ;;
+    *)                   printf '%s' '⚛' ;;
   esac
 }
 

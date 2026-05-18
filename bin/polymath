@@ -190,7 +190,17 @@ case "$cmd" in
       pressure_glyph=$(printf '\033[32m✓ GREEN\033[0m')
     fi
 
-    printf '\n\033[1mPair Polymath status\033[0m\n'
+    # v0.5.5 brand: ⚛ sigil header (color-cycled per wall-clock).
+    # Lazy-source brand.sh; fall back to plain header when unavailable.
+    if [ -z "${_PP_BRAND_SOURCED:-}" ]; then
+      # shellcheck disable=SC1091
+      . "$PP_ROOT/lib/brand.sh" 2>/dev/null || true
+    fi
+    if type pp_brand_sigil_cycled >/dev/null 2>&1; then
+      printf '\n%s \033[1mPair Polymath status\033[0m\n' "$(pp_brand_sigil_cycled)"
+    else
+      printf '\n\033[1mPair Polymath status\033[0m\n'
+    fi
     printf '  Plugin root:     %s\n' "$PP_ROOT"
     printf '  Version:         %s\n' "$(cat "$PP_ROOT/VERSION")"
     printf '  Today (%s)\n' "$(date +%Y-%m-%d)"
@@ -1304,12 +1314,30 @@ HELP
     # paused). Budget files preserved by the helper. Spec: docs/v0.5.4-pause-ux-spec.md
     _pp_cache_clear_all "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}" \
       >/dev/null 2>&1 || true
-    printf 'LLM cycle disabled and observation cache cleared. Status-only mode active.\n'
+    # v0.5.5 brand: ⚛ prefix announces "polymath is what just paused."
+    if [ -z "${_PP_BRAND_SOURCED:-}" ]; then
+      # shellcheck disable=SC1091
+      . "$PP_ROOT/lib/brand.sh" 2>/dev/null || true
+    fi
+    if type pp_brand_sigil_plain >/dev/null 2>&1; then
+      printf '%s LLM cycle disabled and observation cache cleared. Status-only mode active.\n' "$(pp_brand_sigil_plain)"
+    else
+      printf 'LLM cycle disabled and observation cache cleared. Status-only mode active.\n'
+    fi
     ;;
 
   enable)
     _pp_set_user_env_var PP_EXTERNAL_LLM 1 || exit 1
-    printf 'LLM cycle enabled. New cycles take effect within 5 min.\n'
+    # v0.5.5 brand: ⚛ prefix confirms enable came from polymath.
+    if [ -z "${_PP_BRAND_SOURCED:-}" ]; then
+      # shellcheck disable=SC1091
+      . "$PP_ROOT/lib/brand.sh" 2>/dev/null || true
+    fi
+    if type pp_brand_sigil_plain >/dev/null 2>&1; then
+      printf '%s LLM cycle enabled. New cycles take effect within 5 min.\n' "$(pp_brand_sigil_plain)"
+    else
+      printf 'LLM cycle enabled. New cycles take effect within 5 min.\n'
+    fi
     ;;
 
   onboard)

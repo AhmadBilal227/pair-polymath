@@ -185,6 +185,17 @@ _pp_eval() {
 }
 
 # === Step 1: Greeting + sanity ===
+# v0.5.5 brand: ASCII banner for first-touch experience. Lazy-source
+# brand.sh; skip silently if unavailable (older checkout).
+if [ -z "${_PP_BRAND_SOURCED:-}" ]; then
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/brand.sh" 2>/dev/null || true
+fi
+if [ "$PP_DRY_RUN" != "1" ] && type pp_brand_banner >/dev/null 2>&1; then
+  printf '\n'
+  pp_brand_banner
+  printf '\n\n'
+fi
 step "Pair Polymath installer (v$(cat "$PP_ROOT/VERSION"))"
 printf '  Plugin root: %s\n' "$PP_ROOT"
 printf '  Claude dir:  %s\n' "$CLAUDE_DIR"

@@ -1,4 +1,4 @@
-# Pair Polymath
+# ⚛ Pair Polymath
 
 **Seven specialist AI lenses watch your Claude Code session and whisper one-line concerns back to Claude before your next prompt.**
 

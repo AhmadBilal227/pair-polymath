@@ -2811,16 +2811,19 @@ else
   _idle_red="${_pp_red_used:-95}"
   _idle_warn="${_pp_warn_used:-80}"
   # v0.5.5 brand: cycle-in-flight constellation. When a polymath LLM cycle
-  # is currently running (mkdir-lock at $PP_LOCK exists + fresh), show the
-  # 4-frame braille loading mark instead of the generic "idle — no fresh
-  # insight" copy. Says "many minds quietly attending" while the cycle is
-  # in flight. Spec: docs/v0.5.5-brand-spec.md. Only fires when active
-  # (paused branch below wins if PP_EXTERNAL_LLM=0).
+  # is currently running (mkdir-lock at $PP_LOCK exists + RECENTLY created),
+  # show the 4-frame braille loading mark instead of the generic idle copy.
+  # Spec: docs/v0.5.5-brand-spec.md. Only fires when active.
+  #
+  # Freshness window is TIGHT (60s, not the cycle-lock stale threshold of
+  # ~600s). A stale lock dir lingering from a prior run must NOT trigger
+  # the visible "thinking..." state — that breaks byte-identity invariants
+  # that compare two sequential statusline invocations (T11 OAR-pending
+  # byte-identity test from v0.5.2 hit this exact regression).
   _pp_cycle_inflight=0
   if [ "${PP_EXTERNAL_LLM:-1}" != "0" ] && [ -d "${PP_LOCK:-/tmp/pp-fetch-nope}" ]; then
     _pp_inflight_age=$(( $(date +%s) - $(pp_mtime "$PP_LOCK" 2>/dev/null || echo 0) ))
-    _pp_inflight_stale=$(_pp_cycle_lock_stale_seconds 2>/dev/null || echo 600)
-    [ "$_pp_inflight_age" -lt "$_pp_inflight_stale" ] && _pp_cycle_inflight=1
+    [ "$_pp_inflight_age" -lt 60 ] && _pp_cycle_inflight=1
   fi
 
   if [ "${PP_EXTERNAL_LLM:-1}" = "0" ]; then

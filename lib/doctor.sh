@@ -876,7 +876,16 @@ pp_doctor_run() {
     --network) do_network=1 ;;
   esac
 
-  printf '\n%sPair Polymath doctor%s\n' "${_DC_DIM}" "${_DC_RESET}"
+  # v0.5.5 brand: ⚛ sigil header. Lazy-source; plain fallback.
+  if [ -z "${_PP_BRAND_SOURCED:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/lib/brand.sh" 2>/dev/null || true
+  fi
+  if type pp_brand_sigil_cycled >/dev/null 2>&1; then
+    printf '\n%s %sPair Polymath doctor%s\n' "$(pp_brand_sigil_cycled)" "${_DC_DIM}" "${_DC_RESET}"
+  else
+    printf '\n%sPair Polymath doctor%s\n' "${_DC_DIM}" "${_DC_RESET}"
+  fi
   printf '%sPlugin root:%s %s\n' "${_DC_DIM}" "${_DC_RESET}" "$PP_ROOT"
   printf '%sClaude dir:%s  %s\n' "${_DC_DIM}" "${_DC_RESET}" "${CLAUDE_DIR:-$HOME/.claude}"
   printf '\n'

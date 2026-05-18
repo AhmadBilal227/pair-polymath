@@ -25,7 +25,9 @@
   # The stale observation must NOT appear in the rendered output.
   ! echo "$out" | grep -qF 'stale observation that is long enough'
   # The idle fallback OR another fresh observation should appear instead.
-  echo "$out" | grep -qE 'idle —|✨|⚠|▸'
+  # v0.5.5 brand: ⚛ now leads advisor lines (replaces ⚠ on mon_valid branch);
+  # constellation braille frames ⠁⠂⠄⡀ lead cycle-in-flight lines.
+  echo "$out" | grep -qE 'idle —|✨|⚠|▸|⚛|⠁|⠂|⠄|⡀'
 }
 
 @test "statusline.sh: freshness — idle fallback when nothing fresh (v0.4 UX)" {

@@ -136,6 +136,12 @@ teardown() { rm -rf "$HOME"; }
       s/\x1b\[[0-9;]*[A-Za-z]//g;
       s/^(?:\x{1FA94}|\x{1FA84}|\x{2728}|\x{1F4AB})(?:\s+cpu\s+\S+)?\s*\n//;
       s/^(?:\x{1FA94}|\x{1FA84}|\x{2728}|\x{1F4AB})\s*//;
+      # v0.5.5 brand: strip wall-clock-cycled visual elements that two
+      # sequential runs naturally differ on (constellation braille frames
+      # ⠁ ⠂ ⠄ ⡀ and the ⚛ atom sigil itself). Content semantics are what
+      # this test checks, not visual-frame identity.
+      s/[\x{2801}\x{2802}\x{2804}\x{2808}]//g;
+      s/\x{269B}//g;
     '
   }
   local _a _b

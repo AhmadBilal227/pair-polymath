@@ -40,6 +40,32 @@ _pp_seed_cache() {
   [ -z "$output" ]
 }
 
+# ----- Task 3: statusline cache-read short-circuit when paused -----
+
+@test "statusline AC2: paused short-circuits cache read (no cached observation rendered)" {
+  PP_EXTERNAL_LLM=0
+  export PP_EXTERNAL_LLM
+  local _sid
+  _sid=$(jq -r '.session_id // "unknown"' < "$PP_ROOT/test/fixtures/stdin-sample.json")
+  _pp_seed_cache "$_sid" "ENGINEERING" "ARCH: leaked|||This is a fake observation body long enough to satisfy validators"
+  run bash -c 'cat "$PP_ROOT/test/fixtures/stdin-sample.json" | bash "$PP_ROOT/bin/statusline.sh"'
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"leaked"* ]]
+  [[ "$output" != *"fake observation body"* ]]
+}
+
+# ----- Task 4: statusline paused fallback branch -----
+
+@test "statusline AC1: paused fallback shows visible glyph + recovery hint" {
+  PP_EXTERNAL_LLM=0
+  export PP_EXTERNAL_LLM
+  run bash -c 'cat "$PP_ROOT/test/fixtures/stdin-sample.json" | bash "$PP_ROOT/bin/statusline.sh"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paused"* ]]
+  [[ "$output" == *"LLM cycle disabled"* ]]
+  [[ "$output" == *"polymath enable to resume"* ]]
+}
+
 @test "inject-hook AC3b: gate is unset/1 leaves the hook proceeding past the gate" {
   # With PP_EXTERNAL_LLM unset or =1, the hook should NOT early-exit at the
   # gate. We verify by patching the script to fail-loud right after the gate

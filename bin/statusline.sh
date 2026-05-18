@@ -2624,6 +2624,13 @@ _pp_probe_start=$lens_slot
 [ "$_pp_probe_start" -ge "$PP_LENS_COUNT" ] && _pp_probe_start=0
 _pp_probe_i=0
 _pp_now=$(date +%s 2>/dev/null)
+# v0.5.4 Change 2: when polymath is paused (PP_EXTERNAL_LLM=0), do NOT read
+# the lens cache. Otherwise a cached observation from before the disable
+# would pre-empt the paused-state fallback at :2746+. Force the probe
+# counter to the loop ceiling so the while-condition is immediately false;
+# mon_topic stays empty; the fallback chain fires the paused branch.
+# Spec: docs/v0.5.4-pause-ux-spec.md Change 2.
+[ "${PP_EXTERNAL_LLM:-1}" = "0" ] && _pp_probe_i="$PP_LENS_COUNT"
 while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
   _pp_probe_idx=$(( (_pp_probe_start + _pp_probe_i) % PP_LENS_COUNT ))
   PP_CACHE_DISPLAY="${PP_CACHE_DIR}/cc-monitor-${session_id}-${PP_LENS_IDS[$_pp_probe_idx]}.txt"
@@ -2753,7 +2760,14 @@ else
   _idle_pct="${_pp_budget_pct:-100}"
   _idle_red="${_pp_red_used:-95}"
   _idle_warn="${_pp_warn_used:-80}"
-  if [ "$_idle_pct" -le "$(( 100 - _idle_red ))" ]; then
+  if [ "${PP_EXTERNAL_LLM:-1}" = "0" ]; then
+    # v0.5.4 Change 1: visible paused state. Highest priority — paused
+    # supersedes budget messages because the user explicitly opted out
+    # via `polymath disable`. Voice + glyph match the existing
+    # paused precedent below ("paused — daily budget near cap").
+    # Spec: docs/v0.5.4-pause-ux-spec.md Change 1.
+    topic_line="${aurora_hue:-}◌${R}  ${DIM_A}paused — LLM cycle disabled (polymath enable to resume)${R}"
+  elif [ "$_idle_pct" -le "$(( 100 - _idle_red ))" ]; then
     # v0.4.1 review-fix (M1, GPT #4): "reached" implied 0%; reword to
     # match actual state. "near cap" + "% headroom" stays self-consistent
     # with the line-1 pip's "% remaining" framing.

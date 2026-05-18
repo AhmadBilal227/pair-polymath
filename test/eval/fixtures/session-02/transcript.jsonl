@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":"We are planning a billing migration. I need the rollout to avoid data loss, surprise spend, and another repeat of the May pricing regression."}}
+{"message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"@CWD@/migrations/20260518_add_usage_events.sql"}}]}}
+{"type":"user","message":{"role":"user","content":"Before implementation, give me the risks that would make this launch fail."}}

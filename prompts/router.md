@@ -10,7 +10,7 @@ PRINCIPLES:
 OUTPUT FORMAT (strict, machine-parsed):
 - NEWLINE-delimited list of lens IDs.
 - Exactly between MIN=${PP_ROUTER_MIN} and MAX=${PP_ROUTER_MAX} lines.
-- Each line: exactly one `id` from the enabled registry below, preserving its casing and punctuation. No commentary, no trailing punctuation.
+- Each line: exactly one ID from the first column of the enabled registry below, preserving its casing and punctuation. Do not include the focus text. No commentary, no trailing punctuation.
 
 EXAMPLE OUTPUT (3 lines, no markdown):
 ENGINEERING
@@ -31,5 +31,5 @@ RECENT CONVERSATION (last ~5 lines, for tie-breaking when signals are ambiguous)
 ${transcript_tail_5}
 [END UNTRUSTED]
 
-ENABLED LENS REGISTRY (one id per line, the only valid output values):
+ENABLED LENS REGISTRY (one entry per line: ID<TAB>routing focus; output only the ID before the tab):
 ${lens_registry}

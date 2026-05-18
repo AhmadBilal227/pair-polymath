@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-session-02",
+  "workspace": {"current_dir": "@CWD@"},
+  "model": {"display_name": "Sonnet 4.6"},
+  "transcript_path": "@TRANSCRIPT@",
+  "cost": {"total_cost_usd": 0.18},
+  "context_window": {"used_percentage": 44, "current_usage": {"input_tokens": 1800, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 150}},
+  "rate_limits": {"five_hour": {"used_percentage": 18, "resets_at": 0}, "seven_day": {"used_percentage": 9, "resets_at": 0}},
+  "cost_breakdown": {"total_duration_ms": 90000},
+  "exceeds_200k_tokens": false
+}

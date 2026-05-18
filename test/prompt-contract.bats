@@ -25,7 +25,7 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *$'ID\tVERSION\tOWNER'* ]]
   [[ "$output" == *$'analyst-primary\t0.5.4.0\tbin/statusline.sh'* ]]
-  [[ "$output" == *$'router\t0.5.4.0\tlib/router.sh'* ]]
+  [[ "$output" == *$'router\t0.5.4.1\tlib/router.sh'* ]]
 }
 
 @test "prompt contracts: versions helper returns compact lineage JSON" {
@@ -35,7 +35,7 @@ teardown() {
     type == "object"
     and ."analyst-primary" == "0.5.4.0"
     and .critique == "0.5.4.0"
-    and .router == "0.5.4.0"
+    and .router == "0.5.4.1"
   ' >/dev/null
 }
 

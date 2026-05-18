@@ -1,0 +1,4 @@
+{
+  "must_pick": ["DATABASE_ENGINEER", "CFO", "PRE_MORTEM"],
+  "nice_to_pick": ["HISTORIAN"]
+}

@@ -226,6 +226,10 @@ for fix in $fixtures; do
   # is consistently enabled for non-dry eval cycles.
   eval_config_dir="$sandbox/.claude/pair-polymath/config"
   mkdir -p "$eval_config_dir"
+  if [ -f "$fix_dir/lenses-enabled.txt" ]; then
+    cp "$fix_dir/lenses-enabled.txt" "$eval_config_dir/lenses-enabled.txt"
+    chmod 600 "$eval_config_dir/lenses-enabled.txt" 2>/dev/null || true
+  fi
   {
     printf 'PP_EVAL_MODE=1\n'
     printf 'PP_EVAL_ROUTER_SHADOW=1\n'

@@ -11,6 +11,7 @@ test/eval/fixtures/session-NN/
 ├── input.json       # Claude Code's statusline stdin format
 ├── transcript.jsonl # Synthetic Claude Code transcript snippet
 ├── cwd-state.txt    # Single-file fake project state (OR a cwd-state/ dir)
+├── lenses-enabled.txt # Optional active lens allowlist for this fixture
 └── notes.md         # Which lens this exercises + the ideal observation
 ```
 
@@ -66,6 +67,12 @@ Free-form. Describe:
 - Which lens(es) should fire (ENGINEERING, SECURITY, etc.)
 - What the ideal observation looks like (English summary)
 - Any gotchas about replay (timing, ordering)
+
+### `lenses-enabled.txt` (optional)
+
+One lens ID per line. When present, the eval driver copies it into the
+sandboxed Pair Polymath config so a fixture can exercise activation presets
+or expanded workforce lenses without changing the developer's real config.
 
 ### Lens personality vocabulary (Phase 2.1+)
 

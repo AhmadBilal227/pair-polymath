@@ -170,6 +170,37 @@ _REAL_IDS=(UX_DESIGN ENGINEERING SECURITY PERF_FINOPS PRODUCT_BIZ COGNITIVE_FLOW
   ! printf '%s' "$output" | grep -qF 'Each line: lowercase'
 }
 
+@test "render: prompt-facing registry includes lens focus but output contract stays ID-only" {
+  mkdir -p "$HOME/.claude/pair-polymath/config"
+  cat > "$HOME/.claude/pair-polymath/config/lenses-enabled.txt" <<'EOF'
+CFO
+PRE_MORTEM
+DATABASE_ENGINEER
+EOF
+  pp_load_lenses >/dev/null
+  _enable CFO PRE_MORTEM DATABASE_ENGINEER
+
+  run _pp_router_emit_registry
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q $'^CFO\tcost of the current technical choice'
+  printf '%s\n' "$output" | grep -q $'^PRE_MORTEM\timagine the current change shipped and failed'
+  printf '%s\n' "$output" | grep -q $'^DATABASE_ENGINEER\tschema design'
+
+  PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  # shellcheck source=../lib/prompt-loader.sh
+  . "$PP_ROOT/lib/prompt-loader.sh"
+  signals_json='{"phase":"planning"}'
+  transcript_tail_5='USER: plan the rollout'
+  lens_registry="$output"
+  PP_ROUTER_MIN=1
+  PP_ROUTER_MAX=3
+  export signals_json transcript_tail_5 lens_registry PP_ROUTER_MIN PP_ROUTER_MAX
+  run pp_render_prompt router
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF 'output only the ID before the tab'
+  printf '%s' "$output" | grep -q $'CFO\tcost of the current technical choice'
+}
+
 @test "pick: GPT-C2 — accepts category-prefixed IDs like 'executive/cfo' (Phase 4 prep)" {
   _enable engineering security 'executive/cfo' 'meta/pre-mortem'
   PP_ROUTER_ENABLE=1 \

@@ -72,6 +72,35 @@ _pp_router_emit_enabled() {
   printf '%s\n' "${PP_LENS_IDS_AVAILABLE:-}" | LC_ALL=C grep -v '^$' || true
 }
 
+# Emit the prompt-facing registry. The machine contract remains ID-only:
+# pp_router_pick_lenses validates against _pp_router_emit_enabled. This richer
+# view only helps the LLM map new workforce lenses to situations.
+_pp_router_emit_registry() {
+  local _id _idx _focus _count
+  while IFS= read -r _id; do
+    [ -z "$_id" ] && continue
+    _focus=""
+    _count="${PP_LENS_COUNT:-0}"
+    case "$_count" in ''|*[!0-9]*) _count=0 ;; esac
+    _idx=0
+    while [ "$_idx" -lt "$_count" ]; do
+      if [ "${PP_LENS_IDS[$_idx]:-}" = "$_id" ]; then
+        _focus="${PP_LENS_FOCUS[$_idx]:-}"
+        break
+      fi
+      _idx=$((_idx + 1))
+    done
+    if [ -n "$_focus" ]; then
+      _focus=$(printf '%s' "$_focus" | tr "$(printf '\t\r\n')" '   ' | cut -c1-220)
+      printf '%s\t%s\n' "$_id" "$_focus"
+    else
+      printf '%s\n' "$_id"
+    fi
+  done <<EOF
+$(_pp_router_emit_enabled)
+EOF
+}
+
 # pp_router_pick_lenses <signals_json> <transcript_filtered> [facts_file]
 #
 # v0.5.1.1 Stage D: optional third arg is the facts-snapshot path. When
@@ -296,9 +325,9 @@ _pp_router_llm_call() {
   local _signals="$1" _tx="$2"
   command -v llm >/dev/null 2>&1 || { printf ''; return 0; }
 
-  # Build the lens registry block (one id per line).
+  # Build the prompt-facing lens registry block (ID + short focus).
   local _registry
-  _registry=$(_pp_router_emit_enabled)
+  _registry=$(_pp_router_emit_registry)
 
   # 5-line tail of the transcript for tie-breaking (I5).
   local _tx_5

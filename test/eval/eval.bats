@@ -85,6 +85,19 @@ teardown() {
   [ "$line_count" -eq 7 ]
 }
 
+@test "eval: fixture lenses-enabled.txt activates expanded workforce lenses" {
+  run bash "$RUN_EVAL" --fixture session-02 --dry-run --runs-dir "$TMP_RUNS"
+  [ "$status" -eq 0 ]
+  run_dir=$(find "$TMP_RUNS" -mindepth 1 -maxdepth 1 -type d | head -1)
+  [ -f "$run_dir/session-02.observations.txt" ]
+  line_count=$(wc -l < "$run_dir/session-02.observations.txt" | tr -d ' ')
+  [ "$line_count" -eq 4 ]
+  cut -d'|' -f1 "$run_dir/session-02.observations.txt" | grep -qxF 'CFO'
+  cut -d'|' -f1 "$run_dir/session-02.observations.txt" | grep -qxF 'PRE_MORTEM'
+  cut -d'|' -f1 "$run_dir/session-02.observations.txt" | grep -qxF 'HISTORIAN'
+  cut -d'|' -f1 "$run_dir/session-02.observations.txt" | grep -qxF 'DATABASE_ENGINEER'
+}
+
 @test "eval: run-eval.sh writes run-summary.json with the documented schema" {
   bash "$RUN_EVAL" --fixture session-01 --dry-run --runs-dir "$TMP_RUNS"
   run_dir=$(find "$TMP_RUNS" -mindepth 1 -maxdepth 1 -type d | head -1)
@@ -140,7 +153,7 @@ ENGINEERING|||||||
 UNKNOWN_LENS|||||||
 EOF
   cat > "$run_dir/trace.jsonl" <<'EOF'
-{"fixture":"custom","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.0","analyst-primary":"0.5.4.0"},"router":{"decision_source":"eval_bypass","picked_count":7},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
+{"fixture":"custom","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.1","analyst-primary":"0.5.4.0"},"router":{"decision_source":"eval_bypass","picked_count":7},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
 EOF
 
   run bash "$TRACE_SCORE" --run manual-trace --runs-dir "$TMP_RUNS" --offline
@@ -148,7 +161,7 @@ EOF
   [ -f "$run_dir/trace-report.json" ]
   jq -e '
     .total_trace_rows == 1
-    and .prompt_versions_seen.router == "0.5.4.0"
+    and .prompt_versions_seen.router == "0.5.4.1"
     and .trace_rows_per_fixture.custom == 1
     and .privacy.all_flags_false == true
     and .privacy.violation_count == 0
@@ -170,7 +183,7 @@ PERF_FINOPS|||||||
 COGNITIVE_FLOW|||||||
 EOF
   cat > "$run_dir/trace.jsonl" <<'EOF'
-{"fixture":"session-01","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.0"},"router":{"decision_source":"eval_bypass","picked_count":7,"shadow_scoring_mode":"scorable_shadow","shadow_picked_lenses":["ENGINEERING","PERF_FINOPS"],"shadow_picked_count":2},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
+{"fixture":"session-01","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.1"},"router":{"decision_source":"eval_bypass","picked_count":7,"shadow_scoring_mode":"scorable_shadow","shadow_picked_lenses":["ENGINEERING","PERF_FINOPS"],"shadow_picked_count":2},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
 EOF
 
   run bash "$TRACE_SCORE" --run manual-router-miss --runs-dir "$TMP_RUNS" --offline
@@ -216,7 +229,7 @@ PERF_FINOPS|||||||
 COGNITIVE_FLOW|||||||
 EOF
   cat > "$run_dir/trace.jsonl" <<'EOF'
-{"fixture":"session-01","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.0"},"router":{"decision_source":"eval_bypass","picked_count":7,"shadow_scoring_mode":"scorable_shadow","shadow_picked_lenses":["ENGINEERING","PERF_FINOPS","COGNITIVE_FLOW"],"shadow_picked_count":3},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
+{"fixture":"session-01","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.1"},"router":{"decision_source":"eval_bypass","picked_count":7,"shadow_scoring_mode":"scorable_shadow","shadow_picked_lenses":["ENGINEERING","PERF_FINOPS","COGNITIVE_FLOW"],"shadow_picked_count":3},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
 EOF
 
   run bash "$TRACE_SCORE" --run manual-router-hit --runs-dir "$TMP_RUNS" --offline

@@ -2777,13 +2777,25 @@ if [ "$slot" -eq 0 ] && [ "$tip_valid" -eq 1 ]; then
   # Body intentionally NOT shown on terminal — goes to Claude via hook
   body_line=""
 elif [ "$mon_valid" -eq 1 ]; then
-  if [ $((tick % 2)) -eq 0 ]; then warn_hue=$SOFT_CRIMSON; else warn_hue=$SOFT_AMBER; fi
   # v0.4 freshness: prepend pip (✨ fresh, ◌ aged, blank middle) and
   # suffix the age label so the user knows whether this observation is
   # current or stale-ish. (UX advisory: insight-freshness invisible.)
   _age_suffix=""
   [ -n "$mon_age_label" ] && _age_suffix=" ${DIM_A}(${mon_age_label})${R}"
-  topic_line="${warn_hue}⚠${R}  ${mon_fresh_pip}${BOLD}${SOFT_CRIMSON}${mon_topic}${R}${_age_suffix}"
+  # v0.5.5 brand wire: prefix with `⚛` colored by the lens that spoke
+  # (the "lens leaves its signature" idea from the spec). Lens id =
+  # PP_LENS_IDS[lens_slot] — set by the probe loop above. The original
+  # warning `⚠` glyph (used 2024-25) is retained as fallback when the
+  # brand helpers aren't sourced.
+  if type pp_brand_sigil_for_lens >/dev/null 2>&1 \
+      && [ -n "${PP_LENS_IDS[$lens_slot]:-}" ]; then
+    _pp_brand_prefix="$(pp_brand_sigil_for_lens "${PP_LENS_IDS[$lens_slot]}")"
+    topic_line="${_pp_brand_prefix}  ${mon_fresh_pip}${BOLD}${mon_topic}${R}${_age_suffix}"
+  else
+    # Legacy fallback: original ⚠ + crimson topic (pre-v0.5.5).
+    if [ $((tick % 2)) -eq 0 ]; then warn_hue=$SOFT_CRIMSON; else warn_hue=$SOFT_AMBER; fi
+    topic_line="${warn_hue}⚠${R}  ${mon_fresh_pip}${BOLD}${SOFT_CRIMSON}${mon_topic}${R}${_age_suffix}"
+  fi
   body_line=""
 elif [ "$tip_valid" -eq 1 ]; then
   topic_line="${aurora_hue}▸${R}  ${BOLD}${CYAN_SOFT}${tip_topic}${R}"

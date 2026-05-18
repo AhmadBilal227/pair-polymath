@@ -214,6 +214,11 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/oar.sh" 2>/dev/null || true
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/hallucination.sh" 2>/dev/null || true
+# v0.5.5 brand identity (⚛ sigil + constellation loading mark). Sourced
+# unconditionally; helpers no-op cheaply when not invoked. Spec:
+# docs/v0.5.5-brand-spec.md.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/brand.sh" 2>/dev/null || true
 # v0.5 Phase 3: dismiss subsystem (project-constraints rendering for analyst
 # prompts). Sourced unconditionally — the render call short-circuits cheaply
 # when no rules exist (single stat + write of empty cache).
@@ -2798,8 +2803,15 @@ else
     # supersedes budget messages because the user explicitly opted out
     # via `polymath disable`. Voice + glyph match the existing
     # paused precedent below ("paused — daily budget near cap").
-    # Spec: docs/v0.5.4-pause-ux-spec.md Change 1.
-    topic_line="${aurora_hue:-}◌${R}  ${DIM_A}paused — LLM cycle disabled (polymath enable to resume)${R}"
+    # v0.5.5: ⚛ brand sigil prefix announces "polymath is what's paused"
+    # (not the user's whole terminal). Sigil cycled in DIM_GRAY to match
+    # the quiet paused voice. Spec: docs/v0.5.5-brand-spec.md.
+    if type pp_brand_sigil_plain >/dev/null 2>&1; then
+      _pp_brand_paused="$(pp_brand_sigil_plain) "
+    else
+      _pp_brand_paused=""
+    fi
+    topic_line="${aurora_hue:-}◌${R} ${DIM_A}${_pp_brand_paused}paused — LLM cycle disabled (polymath enable to resume)${R}"
   elif [ "$_idle_pct" -le "$(( 100 - _idle_red ))" ]; then
     # v0.4.1 review-fix (M1, GPT #4): "reached" implied 0%; reword to
     # match actual state. "near cap" + "% headroom" stays self-consistent

@@ -3,6 +3,51 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.5.0] — 2026-05-18
+
+The **brand identity release.** Codifies pair-polymath's emerging visual vocabulary into a coherent terminal brand. Two marks introduced: `⚛` (the polymath sigil — atom, many specialists orbiting one work) and `⠁ ⠂ ⠄ ⡀` (the constellation — 4-frame braille loading mark). Voice: respectful pair-programmer, not notification system.
+
+### Added
+
+- `lib/brand.sh` — palette + sigil + constellation helpers. Single source of truth for brand glyphs/hues. Lens-coded hue palette (UX→PURPLE, ENG→AMBER, SECURITY→CRIMSON, PERF→GREEN, PRODUCT_BIZ→CYAN, FOUNDER→BLUE, COGNITIVE→GRAY).
+- `docs/brand.md` — brand book documenting glyphs, palette, voice, when-to-use / when-NOT-to-use, layout policy.
+- `pp_brand_sigil_for_lens` — sigil rendered in a specific lens's hue.
+- `pp_brand_sigil_cycled` — wall-clock-rotating hue for idle/info contexts.
+- `pp_brand_loading` — current constellation frame.
+- `pp_brand_banner` — ASCII filled-block banner for `bin/install.sh` first-touch (oh-my-logo-inspired splash).
+- `test/brand.bats` — 10 tests pinning sigil fallback, hue palette, frame cycling, statusline integration, banner emission.
+
+### Changed
+
+- `bin/statusline.sh` paused line — adds `⚛` prefix announcing "polymath is what's paused" (not the user's whole terminal).
+- Brand sigil falls back to `*` on POSIX/non-UTF-8 locales (cheap heuristic; `PP_BRAND_SIGIL_ASCII=1` to force).
+
+### Decisions made + reviewed
+
+This release went through a multi-reviewer pass (ui-designer subagent + WebSearch for industry refs). Six cuts applied from the design taste pass:
+
+- **Don't run `⚛` and `🪄` together on line 1.** Sigil swap deferred to v0.5.6 after dogfooding. v0.5.5 introduces `⚛` only in NEW surfaces.
+- **Palette accessibility fix.** STRATEGIC_FOUNDER moved from SOFT_PURPLE (shared with UX_DESIGN — deuteranopia confusion) to SOFT_BLUE.
+- **4-frame constellation, not 8.** "Presence not buzzing."
+- **No 3-line statusline opt-in.** Statusline is ambient, not a dashboard.
+- **No OSC 8 clickable sigil.** Novelty, not identity.
+- **Subagent statusline brand defaults to monochrome `⚛`.** Avoids 7-row strobing color bar.
+
+### Test plan
+
+- `bats test/brand.bats` — 10/10 green
+- `bats test/pause-ux.bats` — 10/10 green (regression guard)
+- `bats test/v0.5.1-byte-identity.bats` — 3/3 green (default PP_EXTERNAL_LLM=1 unchanged)
+
+### Non-goals (explicitly deferred to v0.5.6+)
+
+- Swapping 🪄 → ⚛ on line 1 (after dogfood)
+- `exceeds_200k_tokens` / `thinking.enabled` brand signals
+- Lens-colored subagent statusline rows (monochrome ships in v0.5.5; lens-color reconsidered post-feedback)
+- OSC 8 hyperlinks on the sigil
+- `polymath update` + `polymath onboard` constellation integration (helpers shipped; call-site wiring next release)
+- README hero `⚛` next to title (separate docs-only PR; not coupled to runtime)
+
 ## [0.5.4.0] — 2026-05-18
 
 The **pause UX fix release**. `polymath disable` now actually pauses pair-polymath visibly across all three read paths — not just blocks new LLM cycles from starting. Pre-v0.5.4 behavior was incoherent: disable would stop the LLM cycle, but statusline kept rotating stale cached observations AND the prompt-injection hook kept feeding stale advisories into Claude's context on every UserPromptSubmit. The user-visible "pause" wasn't inert on the load-bearing surface (Claude's behavior).

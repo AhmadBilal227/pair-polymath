@@ -7,6 +7,12 @@ setup() {
   export PP_MEMORY_DIR="$SANDBOX/.claude/pair-polymath/memory"
   # shellcheck disable=SC1091
   . "$PP_ROOT/lib/memory/schema.sh"
+  # v0.5.5 fix: schema.sh lazy-sources lib/project-identity.sh which defines
+  # pp_project_id. When defined, pp_memory_project_hash short-circuits to
+  # project_id BEFORE creating .salt — breaking these salt-path tests that
+  # predate project-identity. Unset the function here so the salt branch
+  # runs as the tests intend. The salt path is what these tests validate.
+  unset -f pp_project_id 2>/dev/null || true
 }
 teardown() { rm -rf "$SANDBOX"; }
 

@@ -1299,14 +1299,21 @@ SHIM
     local _out
     if [ "$_i" -lt 3 ]; then _out=acted; else _out=ignored; fi
     jq -nc --arg ts "$_now_iso" --arg sid "s-$_i" --arg o "$_out" '
-      {session_id:$sid,lens:"SECURITY",hash:("h-" + $sid),inject_ts:$ts,
+      {schema_version:2,
+       session_id:$sid,lens:"SECURITY",hash:("h-" + $sid),inject_ts:$ts,
        labeled_at:$ts,outcome:$o,
-       evidence_id:null,confidence:"no_signal_in_window",identity:$sid}' \
+       evidence_id:null,confidence:"no_signal_in_window",identity:$sid,
+       prompt_versions:{"analyst-primary":"0.5.4.0","critique":"0.5.4.0"}}' \
       >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
   done
   run bash "$PP_ROOT/bin/polymath" history --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.by_lens[0].wilson_lower_95 != null' >/dev/null
+  printf '%s' "$output" | jq -e '
+    .prompt_versions_seen["analyst-primary"] == "0.5.4.0"
+    and .prompt_versions_seen.critique == "0.5.4.0"
+    and .missing_prompt_versions_count == 0
+  ' >/dev/null
 }
 
 @test "polymath history --lens SECURITY: filters output to one lens" {

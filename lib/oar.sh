@@ -941,6 +941,7 @@ pp_oar_label_pending() {
   local _line _sid _lens _hash _inj_ts _scan _attempts _id
   local _inj_epoch _upper
   local _cited_paths _cited_symbols _body
+  local _prompt_versions_json
   local _outcome _evid_id _conf _err
   local _cwd _p _contained
   local _rc _acted_out _ref_out _rule
@@ -1018,6 +1019,11 @@ pp_oar_label_pending() {
                     | jq -r '.cited_paths // [] | .[]?' 2>/dev/null)
     _cited_symbols=$(printf '%s' "$_line" \
                     | jq -r '.cited_symbols // [] | .[]?' 2>/dev/null)
+    _prompt_versions_json=$(printf '%s' "$_line" \
+                    | jq -c 'if (.prompt_versions | type) == "object" then .prompt_versions else {} end' 2>/dev/null \
+                    || printf '{}')
+    printf '%s' "$_prompt_versions_json" | jq -e 'type == "object"' >/dev/null 2>&1 \
+      || _prompt_versions_json="{}"
 
     _outcome="ignored"
     _evid_id="null"
@@ -1218,6 +1224,7 @@ EOF
       --arg conf "$_conf" --arg identity "${_id:-}" \
       --arg body "$_body" \
       --arg silent_reason "$_silent_reason" \
+      --argjson prompt_versions "$_prompt_versions_json" \
       --argjson schema "${PP_OAR_SCHEMA_VERSION:-2}" \
       '{schema_version:$schema,
         session_id:$sid,lens:$lens,hash:$h,inject_ts:$ts,
@@ -1225,6 +1232,7 @@ EOF
         evidence_id:(if $evid=="null" or $evid=="" then null else $evid end),
         confidence:$conf,
         silent_reason:$silent_reason,
+        prompt_versions:$prompt_versions,
         identity:(if $identity=="" then null else $identity end),
         evidence:(if $body=="" then null else $body end)}' \
       2>/dev/null) || _label_blob=""

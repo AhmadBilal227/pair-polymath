@@ -1334,6 +1334,31 @@ EOF
   [ "$_val" = "" ]
 }
 
+@test "labeler v2: labeled row preserves pending prompt_versions" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s-lineage","lens":"ENGINEERING","hash":"h-lineage","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[],"prompt_versions":{"analyst-primary":"9.9.9","critique":"8.8.8"}}
+EOF
+  PP_OAR_ENABLE=1 pp_oar_label_pending
+  jq -e '
+    (.prompt_versions | type) == "object"
+    and .prompt_versions["analyst-primary"] == "9.9.9"
+    and .prompt_versions.critique == "8.8.8"
+  ' "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+}
+
+@test "labeler v2: legacy row without prompt_versions still labels with empty lineage object" {
+  _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
+  . "$PP_ROOT/lib/oar.sh"
+  cat > "$PP_CACHE_DIR/oar-pending.jsonl" <<EOF
+{"session_id":"s-no-lineage","lens":"SECURITY","hash":"h-no-lineage","inject_ts":"2026-05-15T00:00:00Z","scan_at_epoch":1,"attempts":0,"status":"pending","body":"x","cited_paths":[],"cited_symbols":[]}
+EOF
+  PP_OAR_ENABLE=1 pp_oar_label_pending
+  jq -e '(.prompt_versions | type) == "object" and (.prompt_versions | length) == 0' \
+    "$PP_CACHE_DIR/oar-labeled.jsonl" >/dev/null
+}
+
 @test "labeler v2: pending row with outcome=silent passes through without crash" {
   _pp_have_hash_tool || skip "no sha256/openssl/md5 on PATH"
   . "$PP_ROOT/lib/oar.sh"

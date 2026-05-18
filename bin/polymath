@@ -865,6 +865,17 @@ HELP
           acted_pct:      (if ($eligible | length) == 0 then 0 else ((map(select(.outcome == "acted"))       | length) / ($eligible | length)) end),
           referenced_pct: (if ($eligible | length) == 0 then 0 else ((map(select(.outcome == "referenced"))  | length) / ($eligible | length)) end),
           derived_a_plus_r: (if ($eligible | length) == 0 then 0 else ((map(select(.outcome == "acted" or .outcome == "referenced")) | length) / ($eligible | length)) end),
+          prompt_versions_seen: (map(.prompt_versions // {}) | reduce .[] as $pv ({}; . * $pv)),
+          missing_prompt_versions_count: (
+            map(select(
+              ((.schema_version // 1) >= 2)
+              and ((.prompt_versions // null) as $pv
+                | if ($pv | type) != "object" then true
+                  else (($pv["analyst-primary"] | type != "string") or ($pv["critique"] | type != "string"))
+                  end
+              )
+            )) | length
+          ),
           by_lens: $per_lens
         }')
 

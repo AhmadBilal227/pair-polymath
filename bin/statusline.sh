@@ -200,6 +200,8 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/prompt-loader.sh"
 # shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/prompt-contract.sh" 2>/dev/null || true
+# shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/metrics.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/citations.sh"
@@ -2392,14 +2394,9 @@ EOF
         # summaries, observation bodies, or payload previews.
         if [ "${PP_TRACE_ENABLE:-0}" = "1" ] && [ "${PP_TRACE_FORCE_DISABLE:-0}" != "1" ]; then
           _pp_trace_prompt_versions="{}"
-          _pp_trace_prompt_versions=$(find "$PP_ROOT/prompts/manifests" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null \
-            | LC_ALL=C sort \
-            | while IFS= read -r _pp_trace_manifest_file; do
-                [ -z "$_pp_trace_manifest_file" ] && continue
-                jq -c 'select(.id and .version) | {key:.id, value:.version}' \
-                  "$_pp_trace_manifest_file" 2>/dev/null
-              done \
-            | jq -sc 'from_entries' 2>/dev/null || printf '{}')
+          if command -v pp_prompt_contract_versions_json >/dev/null 2>&1; then
+            _pp_trace_prompt_versions=$(pp_prompt_contract_versions_json 2>/dev/null || printf '{}')
+          fi
           printf '%s' "$_pp_trace_prompt_versions" | jq -e 'type == "object"' >/dev/null 2>&1 \
             || _pp_trace_prompt_versions="{}"
 

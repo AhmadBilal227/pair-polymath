@@ -251,6 +251,33 @@ $(_pp_prompt_contract_names)
 EOF
 }
 
+pp_prompt_contract_versions_json() {
+  # Compact prompt lineage map for telemetry/OAR rows. Fail open: callers use
+  # this on hooks and statusline paths, so bad or missing manifests must not
+  # block runtime behavior.
+  if ! command -v jq >/dev/null 2>&1; then
+    printf '{}\n'
+    return 0
+  fi
+  local _dir
+  _dir=$(_pp_prompt_contract_manifest_dir)
+  if [ ! -d "$_dir" ]; then
+    printf '{}\n'
+    return 0
+  fi
+  find "$_dir" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null \
+    | LC_ALL=C sort \
+    | while IFS= read -r _manifest; do
+        [ -z "$_manifest" ] && continue
+        jq -c '
+          select((.id | type == "string") and (.version | type == "string"))
+          | {key: .id, value: .version}
+        ' "$_manifest" 2>/dev/null
+      done \
+    | jq -sc 'from_entries' 2>/dev/null \
+    || printf '{}\n'
+}
+
 pp_prompt_contract_show() {
   local _name="${1:-}"
   if [ -z "$_name" ]; then

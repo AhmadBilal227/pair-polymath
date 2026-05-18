@@ -321,6 +321,44 @@ _pp_doctor_oar_enable() {
   [[ "$output" == *"non-degenerate"* ]]
 }
 
+@test "doctor #21: oar quality YELLOW when v2 rows miss prompt lineage" {
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i _out
+  for _i in $(seq 1 20); do
+    _out="ignored"
+    [ "$_i" -eq 19 ] && _out="acted"
+    [ "$_i" -eq 20 ] && _out="referenced"
+    jq -nc --arg sid "s$_i" --arg out "$_out" \
+      '{schema_version:2,session_id:$sid,outcome:$out}' \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"missing prompt lineage"* ]]
+  [[ "$output" == *"prompt improvement loops cannot attribute outcomes"* ]]
+}
+
+@test "doctor #21: oar quality GREEN when v2 rows have prompt lineage" {
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i _out
+  for _i in $(seq 1 20); do
+    _out="ignored"
+    [ "$_i" -eq 19 ] && _out="acted"
+    [ "$_i" -eq 20 ] && _out="referenced"
+    jq -nc --arg sid "s$_i" --arg out "$_out" \
+      '{schema_version:2,session_id:$sid,outcome:$out,
+        prompt_versions:{"analyst-primary":"0.5.4.0","critique":"0.5.4.0"}}' \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"20 rows"* ]]
+  [[ "$output" == *"ignored=18"* ]]
+  [[ "$output" == *"non-degenerate"* ]]
+}
+
 # ----- post-review hardening (GPT-5 + spec-reviewer convergent findings) -----
 # The sentinel must not silently report "healthy" when the data pipeline
 # behind it is broken. These tests pin the two failure paths that would

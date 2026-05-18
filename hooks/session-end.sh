@@ -34,6 +34,8 @@ _session_id=$(pp_sanitize_session_id "$_session_id")
 # cited_symbols in the pending row (C2 fix path A from plan addendum).
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/citations.sh" 2>/dev/null || true
+# shellcheck disable=SC1091
+. "$PP_ROOT/lib/prompt-contract.sh" 2>/dev/null || true
 # GPT review #2: surface silent degradation if the citations lib failed to
 # source. Without this, missing helper → empty cite arrays silently → OAR
 # labeler's referenced-detection rate gets biased toward zero exactly the
@@ -41,6 +43,13 @@ _session_id=$(pp_sanitize_session_id "$_session_id")
 if ! command -v pp_extract_citations_from_text >/dev/null 2>&1; then
   printf 'pair-polymath session-end: pp_extract_citations_from_text unavailable; cite arrays will be empty\n' >&2
 fi
+
+_prompt_versions_json="{}"
+if command -v pp_prompt_contract_versions_json >/dev/null 2>&1; then
+  _prompt_versions_json=$(pp_prompt_contract_versions_json 2>/dev/null || printf '{}')
+fi
+printf '%s' "$_prompt_versions_json" | jq -e 'type == "object"' >/dev/null 2>&1 \
+  || _prompt_versions_json="{}"
 
 _now=$(date +%s)
 _cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
@@ -181,7 +190,8 @@ find "$_cache_dir" -maxdepth 1 \
       --arg body "$_body" \
       --argjson cited_paths "$_cited_paths_json" \
       --argjson cited_symbols "$_cited_symbols_json" \
-      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: $body, cited_paths: $cited_paths, cited_symbols: $cited_symbols}' \
+      --argjson prompt_versions "$_prompt_versions_json" \
+      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: $body, cited_paths: $cited_paths, cited_symbols: $cited_symbols, prompt_versions: $prompt_versions}' \
       >> "$_pending_file" 2>/dev/null; then
       printf 'pair-polymath session-end: failed to append pending row for lens=%s (check %s permissions)\n' \
         "$_lens" "$_pending_file" >&2
@@ -220,7 +230,8 @@ find "$_cache_dir" -maxdepth 1 \
       --arg inject_ts "$_inject_iso" \
       --argjson scan_at "$_inject_epoch" \
       --arg reason "$_reason" \
-      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: "", cited_paths: [], cited_symbols: [], outcome: "silent", silent_reason: $reason}' \
+      --argjson prompt_versions "$_prompt_versions_json" \
+      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: "", cited_paths: [], cited_symbols: [], outcome: "silent", silent_reason: $reason, prompt_versions: $prompt_versions}' \
       >> "$_pending_file" 2>/dev/null; then
       printf 'pair-polymath session-end: failed to append silent pending row for lens=%s (check %s permissions)\n' \
         "$_lens" "$_pending_file" >&2

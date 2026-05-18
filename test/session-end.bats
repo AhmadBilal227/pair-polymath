@@ -92,6 +92,21 @@ teardown() { rm -rf "$HOME"; }
     and has("inject_ts") and has("scan_at_epoch")
     and has("attempts") and has("status")
     and has("body") and has("cited_paths") and has("cited_symbols")
+    and has("prompt_versions")
+  ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
+}
+
+@test "session-end: pending row carries prompt contract lineage" {
+  printf 'ENG: trace lineage|||The pp_oar_label_pending function in lib/oar.sh needs lineage.\n' \
+    > "$PP_CACHE_DIR/cc-monitor-s-lineage-ENGINEERING.txt"
+  printf 'hash-lineage' > "$PP_CACHE_DIR/cc-monitor-injected-hash-s-lineage-ENGINEERING.txt"
+  export PP_OAR_ENABLE=1
+  run bash -c "printf '{\"session_id\":\"s-lineage\"}' | bash '$PP_ROOT/hooks/session-end.sh'"
+  [ "$status" -eq 0 ]
+  jq -e '
+    (.prompt_versions | type) == "object"
+    and .prompt_versions["analyst-primary"] == "0.5.4.0"
+    and .prompt_versions.critique == "0.5.4.0"
   ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
 }
 
@@ -163,6 +178,7 @@ EOF
     and (.cited_symbols | length) == 0
     and .status == "pending"
     and .attempts == 0
+    and .prompt_versions["analyst-primary"] == "0.5.4.0"
     and (.scan_at_epoch | type) == "number"
     and (.hash | length) > 0
   ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null

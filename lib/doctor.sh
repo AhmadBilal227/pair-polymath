@@ -614,6 +614,28 @@ doctor_check_oar_quality() {
     _pp_doctor_yellow "OAR quality" "ALL ${_valid} labeled rows are 'ignored' — referenced detection may be broken (see polymath history)"
     return 1
   fi
+
+  local _lineage_counts _v2_rows _missing_lineage
+  _lineage_counts=$(jq -s -r '
+      [.[] | select(type=="object" and has("outcome") and ((.schema_version // 1) >= 2))] as $v2
+      | ($v2 | length) as $total
+      | ($v2 | map(select(
+          (.prompt_versions // null) as $pv
+          | if ($pv | type) != "object" then false
+            else (($pv["analyst-primary"] | type == "string") and ($pv["critique"] | type == "string"))
+            end
+        )) | length) as $complete
+      | "\($total)\t\($total - $complete)"
+    ' "$_labeled" 2>/dev/null)
+  _v2_rows=$(printf '%s' "$_lineage_counts" | cut -f1)
+  _missing_lineage=$(printf '%s' "$_lineage_counts" | cut -f2)
+  case "$_v2_rows" in ''|*[!0-9]*) _v2_rows=0 ;; esac
+  case "$_missing_lineage" in ''|*[!0-9]*) _missing_lineage=0 ;; esac
+  if [ "$_v2_rows" -ge 20 ] && [ "$_missing_lineage" -gt 0 ]; then
+    _pp_doctor_yellow "OAR quality" "${_missing_lineage}/${_v2_rows} v2 labeled rows missing prompt lineage — prompt improvement loops cannot attribute outcomes"
+    return 1
+  fi
+
   _pp_doctor_green "OAR quality" "${_valid} rows; ignored=${_ignored} (non-degenerate)"
   return 0
 }

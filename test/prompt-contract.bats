@@ -28,6 +28,17 @@ teardown() {
   [[ "$output" == *$'router\t0.5.4.0\tlib/router.sh'* ]]
 }
 
+@test "prompt contracts: versions helper returns compact lineage JSON" {
+  run pp_prompt_contract_versions_json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    type == "object"
+    and ."analyst-primary" == "0.5.4.0"
+    and .critique == "0.5.4.0"
+    and .router == "0.5.4.0"
+  ' >/dev/null
+}
+
 @test "prompt contracts: show prints one manifest as JSON" {
   run pp_prompt_contract_show router
   [ "$status" -eq 0 ]

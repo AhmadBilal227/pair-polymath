@@ -17,7 +17,7 @@ teardown() {
   unset PP_LENS_MAX
 }
 
-@test "loader: loads all 7 built-in lenses" {
+@test "loader: preserves legacy 7-lens active set when no selection file exists" {
   pp_load_lenses
   [ "$PP_LENS_COUNT" -eq 7 ]
 }
@@ -27,6 +27,64 @@ teardown() {
   [ "${PP_LENS_IDS[0]}" = "UX_DESIGN" ]
   [ "${PP_LENS_IDS[1]}" = "ENGINEERING" ]
   [ "${PP_LENS_IDS[6]}" = "COGNITIVE_FLOW" ]
+}
+
+@test "loader: selection file activates new foothold lenses explicitly" {
+  mkdir -p "$HOME/.claude/pair-polymath/config"
+  cat > "$HOME/.claude/pair-polymath/config/lenses-enabled.txt" <<'EOF'
+UX_DESIGN
+CFO
+PRE_MORTEM
+DATABASE_ENGINEER
+EOF
+  pp_load_lenses
+  [ "$PP_LENS_COUNT" -eq 4 ]
+  [ "${PP_LENS_IDS[0]}" = "UX_DESIGN" ]
+  [ "${PP_LENS_IDS[1]}" = "CFO" ]
+  [ "${PP_LENS_IDS[2]}" = "PRE_MORTEM" ]
+  [ "${PP_LENS_IDS[3]}" = "DATABASE_ENGINEER" ]
+}
+
+@test "loader: selection file filters after user override wins" {
+  mkdir -p "$HOME/.claude/pair-polymath/config" "$HOME/.claude/pair-polymath/lenses"
+  printf '%s\n' "UX_DESIGN" > "$HOME/.claude/pair-polymath/config/lenses-enabled.txt"
+  cat > "$HOME/.claude/pair-polymath/lenses/01-ux-design.json" <<'JSON'
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["SELECTED_OVERRIDE"],
+  "focus": "selected override focus string",
+  "color_hex": "#ff0000",
+  "enabled": true,
+  "extras": {}
+}
+JSON
+  pp_load_lenses
+  [ "$PP_LENS_COUNT" -eq 1 ]
+  [ "${PP_LENS_IDS[0]}" = "UX_DESIGN" ]
+  [ "${PP_LENS_FOCUS[0]}" = "selected override focus string" ]
+  [ "${PP_LENS_HATS[0]}" = "SELECTED_OVERRIDE" ]
+}
+
+@test "loader: selected disabled override suppresses the lens" {
+  mkdir -p "$HOME/.claude/pair-polymath/config" "$HOME/.claude/pair-polymath/lenses"
+  printf '%s\n' "UX_DESIGN" > "$HOME/.claude/pair-polymath/config/lenses-enabled.txt"
+  cat > "$HOME/.claude/pair-polymath/lenses/01-ux-design.json" <<'JSON'
+{
+  "version": 1,
+  "id": "UX_DESIGN",
+  "display_order": 1,
+  "hats": ["UX"],
+  "focus": "disabled selected override",
+  "color_hex": "#ff0000",
+  "enabled": false,
+  "extras": {}
+}
+JSON
+  run pp_load_lenses
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no lenses loaded"* ]]
 }
 
 @test "loader: each lens has non-empty hats + focus + color" {
@@ -174,7 +232,7 @@ JSON
 }
 JSON
   pp_load_lenses
-  # ZZ_LEGACY appears at the tail (display_order 200, > all built-ins)
+  # ZZ_LEGACY appears at the tail (display_order 200, > default active built-ins)
   last=$((PP_LENS_COUNT - 1))
   [ "${PP_LENS_IDS[$last]}" = "ZZ_LEGACY" ]
   # Empty system_prompt_addition + examples — but loader must NOT have failed
@@ -184,7 +242,7 @@ JSON
 
 @test "loader: silent_reasons array parsed into PP_LENS_SILENT_REASONS (\\x1f-joined)" {
   pp_load_lenses
-  # All 7 built-in lenses MUST declare silent_reasons (closed-enum invariant).
+  # All active built-in lenses MUST declare silent_reasons (closed-enum invariant).
   for i in $(seq 0 $((PP_LENS_COUNT - 1))); do
     [ -n "${PP_LENS_SILENT_REASONS[$i]}" ] \
       || { echo "lens ${PP_LENS_IDS[$i]} missing silent_reasons"; return 1; }
@@ -222,7 +280,7 @@ JSON
   "focus": "f", "color_hex": "#222222", "enabled": true }
 JSON
   pp_load_lenses
-  # Both new lenses appear at the tail (after the 7 built-ins, all display_order 1-7).
+  # Both new lenses appear at the tail (after the default 7 active built-ins).
   # AA_APPLE sorts before ZZ_BANANA by id within the tied display_order=100.
   [ "${PP_LENS_IDS[7]}" = "AA_APPLE" ]
   [ "${PP_LENS_IDS[8]}" = "ZZ_BANANA" ]

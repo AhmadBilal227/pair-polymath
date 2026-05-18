@@ -7,6 +7,11 @@
 # built-ins. Sort order: display_order ascending, id ascending on ties.
 # Hard cap: PP_LENS_MAX (default 16) — prevents a stuffed user dir from
 # turning a statusline refresh into a parallel-LLM cost bomb.
+#
+# Active-set selection: if $PP_STATE_DIR/config/lenses-enabled.txt exists,
+# it is treated as an allowlist of lens IDs (one ID per line). If it does
+# not exist, legacy installs preserve the original seven built-in lenses
+# while still allowing user-created lenses from $PP_STATE_DIR/lenses.
 
 # Populates these globals:
 #   PP_LENS_COUNT                   — integer
@@ -24,6 +29,10 @@ pp_load_lenses() {
   local builtin_dir="$PP_ROOT/lenses"
   local user_root="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
   local user_dir="$user_root/lenses"
+  local enabled_file="$user_root/config/lenses-enabled.txt"
+  local legacy_builtin_ids=" UX_DESIGN ENGINEERING SECURITY PERF_FINOPS PRODUCT_BIZ STRATEGIC_FOUNDER COGNITIVE_FLOW "
+  local active_filter=0
+  [ -f "$enabled_file" ] && active_filter=1
   local max="${PP_LENS_MAX:-16}"
   local tmp
   tmp=$(mktemp)
@@ -118,6 +127,25 @@ pp_load_lenses() {
   while IFS=$'\x1f' read -r order id hats focus color enabled sys_b64 ex_b64 silent_b64 silent_reasons_b64 elig_kind elig_globs_b64 src; do
     [ -z "$id" ] && continue
     [ "$enabled" = "false" ] && continue
+    if [ "$active_filter" = "1" ]; then
+      # Allowlist is exact-match, full-line only. Blank/comment lines are
+      # naturally ignored because they will never match a lens ID.
+      if ! LC_ALL=C grep -qxF "$id" "$enabled_file" 2>/dev/null; then
+        continue
+      fi
+    else
+      # Preserve pre-activation behavior for existing installs: the five
+      # activation-foothold built-ins are available but not active until a
+      # preset writes lenses-enabled.txt. User lenses still load as before.
+      case "$src" in
+        "$builtin_dir"/*)
+          case "$legacy_builtin_ids" in
+            *" $id "*) ;;
+            *) continue ;;
+          esac
+          ;;
+      esac
+    fi
     if [ "$loaded" -ge "$max" ]; then
       printf 'pp_load_lenses: lens cap (%s) reached; ignoring remainder\n' "$max" >&2
       break

@@ -318,6 +318,29 @@ run_llm() {
   fi
 }
 
+_pp_cycle_lock_stale_seconds() {
+  local _configured="${PP_CYCLE_LOCK_STALE_S:-}"
+  case "$_configured" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s' "$_configured"; return 0 ;;
+  esac
+
+  local _lens_count="${PP_LENS_COUNT:-7}"
+  local _interval="${PP_PARALLEL_INTERVAL_S:-300}"
+  case "$_lens_count" in ''|*[!0-9]*|0) _lens_count=7 ;; esac
+  case "$_interval" in ''|*[!0-9]*|0) _interval=300 ;; esac
+
+  # Bounded cycle workload:
+  # planner 30s + escalated analyst lane 25s+60s + critique 30s +
+  # one sequential retry per lens at 45s + shell/OAR cleanup slack.
+  local _workload_floor=$((30 + 85 + 30 + (45 * _lens_count) + 60))
+  local _interval_floor=$((_interval * 2))
+  local _stale_s="$_workload_floor"
+  [ "$_stale_s" -lt "$_interval_floor" ] && _stale_s="$_interval_floor"
+  [ "$_stale_s" -lt 900 ] && _stale_s=900
+  printf '%s' "$_stale_s"
+}
+
 # budget_inc + budget_reserve live in lib/budget.sh (sourced at top of file).
 
 # --- Extract JSON fields (single jq call, portable while-read loop) ---
@@ -743,12 +766,15 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] \
     && [ "${PP_EXTERNAL_LLM:-1}" = "1" ] \
     && [ "$parallel_age" -gt "$PP_PARALLEL_INTERVAL_S" ]; then
   mon_lock_age=$(($(date +%s) - $(pp_mtime "$PP_LOCK" || echo 0)))
+  mon_lock_stale_s=$(_pp_cycle_lock_stale_seconds)
   # Atomic acquire of cycle lock: mkdir succeeds for exactly one caller.
-  # If a stale lock dir (>5 min) blocks us, force-take it once.
+  # If a stale lock dir blocks us, force-take it once. The stale threshold is
+  # workload-derived, not the cycle interval: a legitimate cycle can exceed
+  # 300s when critique triggers several sequential 45s retries.
   acquired=0
   if mkdir "$PP_LOCK" 2>/dev/null; then
     acquired=1
-  elif [ "$mon_lock_age" -gt 300 ]; then
+  elif [ "$mon_lock_age" -gt "$mon_lock_stale_s" ]; then
     rm -rf "$PP_LOCK" 2>/dev/null
     mkdir "$PP_LOCK" 2>/dev/null && acquired=1
   fi

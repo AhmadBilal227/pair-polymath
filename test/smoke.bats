@@ -54,3 +54,69 @@
   run bash -c "echo 'not-json' | bash '${BATS_TEST_DIRNAME}/../bin/statusline.sh'"
   [ "$status" -eq 0 ]
 }
+
+@test "statusline.sh: cycle lock is not reclaimed before derived workload TTL" {
+  HOME="$(mktemp -d)"
+  export HOME
+  CLAUDE_DIR="$HOME/.claude"
+  PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export CLAUDE_DIR PP_CACHE_DIR
+  PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  export PP_ROOT
+
+  fakebin="$HOME/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/bin/sh\nprintf "SILENT\\n"\n' > "$fakebin/llm"
+  chmod +x "$fakebin/llm"
+
+  tx="$HOME/transcript.jsonl"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"hello"}}' > "$tx"
+  sid="bats-lock-ttl-$$"
+  lock="/tmp/pp-fetch-${sid}.lock"
+  rm -rf "$lock"
+  mkdir "$lock"
+  touch -d "10 minutes ago" "$lock" 2>/dev/null \
+    || touch -A -001000 "$lock" 2>/dev/null \
+    || skip "no portable mtime backdate"
+
+  run env PATH="$fakebin:$PATH" PP_EVAL_MODE=1 bash -c \
+    'printf "{\"session_id\":\"%s\",\"workspace\":{\"current_dir\":\"%s\"},\"model\":{\"display_name\":\"S\"},\"transcript_path\":\"%s\",\"cost\":{\"total_cost_usd\":0.0}}\n" "$0" "$1" "$2" | bash "$PP_ROOT/bin/statusline.sh" >/dev/null 2>&1' \
+    "$sid" "$HOME" "$tx"
+  [ "$status" -eq 0 ]
+  [ -d "$lock" ]
+  rm -rf "$lock" "$HOME"
+}
+
+@test "statusline.sh: PP_CYCLE_LOCK_STALE_S override can reclaim stale cycle lock" {
+  HOME="$(mktemp -d)"
+  export HOME
+  CLAUDE_DIR="$HOME/.claude"
+  PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  mkdir -p "$PP_CACHE_DIR"
+  export CLAUDE_DIR PP_CACHE_DIR
+  PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  export PP_ROOT
+
+  fakebin="$HOME/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/bin/sh\nprintf "SILENT\\n"\n' > "$fakebin/llm"
+  chmod +x "$fakebin/llm"
+
+  tx="$HOME/transcript.jsonl"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"hello"}}' > "$tx"
+  sid="bats-lock-override-$$"
+  lock="/tmp/pp-fetch-${sid}.lock"
+  rm -rf "$lock"
+  mkdir "$lock"
+  touch -d "10 seconds ago" "$lock" 2>/dev/null \
+    || touch -A -000010 "$lock" 2>/dev/null \
+    || skip "no portable mtime backdate"
+
+  run env PATH="$fakebin:$PATH" PP_EVAL_MODE=1 PP_CYCLE_LOCK_STALE_S=1 bash -c \
+    'printf "{\"session_id\":\"%s\",\"workspace\":{\"current_dir\":\"%s\"},\"model\":{\"display_name\":\"S\"},\"transcript_path\":\"%s\",\"cost\":{\"total_cost_usd\":0.0}}\n" "$0" "$1" "$2" | bash "$PP_ROOT/bin/statusline.sh" >/dev/null 2>&1' \
+    "$sid" "$HOME" "$tx"
+  [ "$status" -eq 0 ]
+  [ ! -d "$lock" ]
+  rm -rf "$lock" "$HOME"
+}

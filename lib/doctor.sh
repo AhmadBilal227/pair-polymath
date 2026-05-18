@@ -718,6 +718,39 @@ doctor_check_oar_quality() {
   return 0
 }
 
+doctor_check_statusline_refresh_interval() {
+  # v0.5.5 fix — flag missing refreshInterval in settings.json.
+  #
+  # Symptom this catches: idle Claude Code sessions never re-run the
+  # statusline. Per the Claude Code docs, statusline only runs on
+  # specific events (new assistant message, /compact, permission mode
+  # change, vim mode toggle) unless refreshInterval is set. Without it,
+  # `polymath disable` doesn't propagate to idle sessions until the
+  # user activates them — confusing pause experience.
+  #
+  # Fix the user can run: jq '.statusLine.refreshInterval = 1' on their
+  # settings.json. Future polymath installs already get refreshInterval=2
+  # from the installer (bin/install.sh:794).
+  local _settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
+  if [ ! -f "$_settings" ]; then
+    # Other checks already flag missing settings.json; don't double-report.
+    _pp_doctor_green "statusline refresh" "skipped (no settings.json)"
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    _pp_doctor_yellow "statusline refresh" "jq missing — cannot verify refreshInterval"
+    return 1
+  fi
+  local _interval
+  _interval=$(jq -r '.statusLine.refreshInterval // empty' "$_settings" 2>/dev/null)
+  if [ -z "$_interval" ]; then
+    _pp_doctor_yellow "statusline refresh" "refreshInterval missing — idle sessions won't pick up polymath disable/enable. Fix: jq '.statusLine.refreshInterval = 1' $_settings | sponge $_settings  (or use a tmp file + mv)"
+    return 1
+  fi
+  _pp_doctor_green "statusline refresh" "refreshInterval=${_interval}s (idle sessions refresh on a timer)"
+  return 0
+}
+
 doctor_check_drift_count() {
   # v0.5.1.1 Stage B (Task 13) — drift_count > 0 invariant alarm.
   #
@@ -856,7 +889,8 @@ pp_doctor_run() {
                 doctor_check_coreutils doctor_check_budget_pressure \
                 doctor_check_cache_permissions doctor_check_dismiss_libs \
                 doctor_check_retry_router_health doctor_check_install_drift \
-                doctor_check_oar_quality doctor_check_drift_count doctor_check_statusline_smoke"
+                doctor_check_oar_quality doctor_check_drift_count \
+                doctor_check_statusline_refresh_interval doctor_check_statusline_smoke"
   [ "$do_network" -eq 1 ] && checks="$checks doctor_check_network"
 
   local check rc

@@ -1,0 +1,26 @@
+{
+  "id": "escalation-investigation",
+  "version": "0.5.4.0",
+  "owner": "bin/statusline.sh",
+  "description": "Pre-investigation prompt that asks a struggling lens for one file or grep probe.",
+  "template": "prompts/escalation-investigation.md",
+  "input_variables": [
+    "lens_focus",
+    "lens_group"
+  ],
+  "output_schema": {
+    "format": "Exactly two lines: FILE: <path or NONE> and GREP: <pattern or NONE>",
+    "parser": "bin/statusline.sh escalation parser"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template and lens registry fields.",
+    "untrusted_inputs": [
+      "grounded facts passed as the user message",
+      "git status and cwd-derived path candidates"
+    ]
+  },
+  "eval_suites": [
+    "test/retry-router.bats",
+    "test/eval/eval.bats"
+  ]
+}

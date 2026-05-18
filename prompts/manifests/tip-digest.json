@@ -1,0 +1,24 @@
+{
+  "id": "tip-digest",
+  "version": "0.5.4.0",
+  "owner": "bin/statusline.sh",
+  "description": "Optional learning digest prompt for matching project context to HN and ArXiv items.",
+  "template": "prompts/tip-digest.md",
+  "input_variables": [],
+  "output_schema": {
+    "format": "Exactly five lines in LENS: hook|||body shape",
+    "parser": "bin/statusline.sh tip digest renderer"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template and digest output shape.",
+    "untrusted_inputs": [
+      "project context",
+      "recent work summary",
+      "external HN and ArXiv titles"
+    ]
+  },
+  "eval_suites": [
+    "test/eval/eval.bats",
+    "test/privacy-log.bats"
+  ]
+}

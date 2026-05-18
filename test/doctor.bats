@@ -136,10 +136,12 @@ teardown() {
   [ "$?" -eq 0 ]
 }
 
-@test "doctor: prompts present (built-in 6)" {
+@test "doctor: prompts present (built-in 9) and contracts lint" {
   run bash "$PP_ROOT/bin/polymath" doctor
   [[ "$output" == *"prompts"* ]]
-  [[ "$output" == *"6/6 built-in present"* ]]
+  [[ "$output" == *"9/9 built-in present"* ]]
+  [[ "$output" == *"prompt contracts"* ]]
+  [[ "$output" == *"9/9 manifests lint clean"* ]]
 }
 
 @test "doctor: smoke fixture runs to exit 0" {

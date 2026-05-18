@@ -1,0 +1,23 @@
+{
+  "id": "pattern-extraction",
+  "version": "0.5.4.0",
+  "owner": "lib/memory/patterns.sh",
+  "description": "Clusters recent observations into recurring memory patterns.",
+  "template": "prompts/pattern-extraction.md",
+  "input_variables": [],
+  "output_schema": {
+    "format": "ONE JSON object with a patterns array",
+    "parser": "lib/memory/patterns.sh JSON validator"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template and pattern JSON schema.",
+    "untrusted_inputs": [
+      "recent observation body fields",
+      "recent observation hook and topic fields"
+    ]
+  },
+  "eval_suites": [
+    "test/memory/patterns.bats",
+    "test/memory/redact.bats"
+  ]
+}

@@ -386,6 +386,45 @@ USAGE
     esac
     ;;
 
+  prompts)
+    # v0.5.4 — prompt contract inventory, manifest display, and lint.
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/prompt-contract.sh"
+    _pp_prompts_sub="${1:-help}"
+    case "$_pp_prompts_sub" in
+      list)
+        pp_prompt_contract_list
+        ;;
+      show)
+        [ -n "${2:-}" ] || { printf 'polymath prompts show: prompt id required\n' >&2; exit 2; }
+        pp_prompt_contract_show "$2"
+        ;;
+      lint)
+        if [ -n "${2:-}" ]; then
+          pp_prompt_contract_lint "$2"
+        else
+          pp_prompt_contract_lint
+        fi
+        ;;
+      help|-h|--help|"")
+        cat <<'USAGE'
+Usage: polymath prompts <command> [args]
+
+Commands:
+  polymath prompts list          list prompt ids, versions, and owners
+  polymath prompts show <id>     print one prompt manifest as JSON
+  polymath prompts lint [id]     validate all prompt contracts or one prompt
+USAGE
+        [ -z "${1:-}" ] && exit 2 || exit 0
+        ;;
+      *)
+        printf 'polymath prompts: unknown subcommand "%s". Try: polymath prompts help\n' "$_pp_prompts_sub" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   retry-router)
     # v0.5.1 — operator surface for the cost-aware retry router.
     # Subcommands: status (default) | clear-flag | shadow-summary
@@ -2032,6 +2071,7 @@ Usage:
   polymath oar-label   Manual catchup labeler (--all-due [--limit N])
   polymath retry-router   v0.5.1 cost-router state (status / shadow-summary / clear-flag)
   polymath lens-gates  v0.5.1.1 planner-grounding kill-switches (status / enable / disable)
+  polymath prompts     Prompt contracts (list / show / lint)
   polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
   polymath dismiss     Suppression rules (add / list / show / disable / enable / ack)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)

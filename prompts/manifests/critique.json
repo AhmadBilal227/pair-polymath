@@ -1,0 +1,27 @@
+{
+  "id": "critique",
+  "version": "0.5.4.0",
+  "owner": "bin/statusline.sh",
+  "description": "Post-analyst pass/drop judge for grounding, concreteness, and redundancy.",
+  "template": "prompts/critique.md",
+  "input_variables": [
+    "PP_LENS_COUNT"
+  ],
+  "output_schema": {
+    "format": "Exactly one verdict line per lens: lensN: PASS or lensN: DROP -- reason",
+    "parser": "bin/statusline.sh critique verdict parser"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template and citation-check rules.",
+    "untrusted_inputs": [
+      "lens observations",
+      "grounded facts",
+      "valid path and symbol allowlists"
+    ]
+  },
+  "eval_suites": [
+    "test/citation-extraction.bats",
+    "test/grounding.bats",
+    "test/v0.5.1.1-empty-allowlist-mirror.bats"
+  ]
+}

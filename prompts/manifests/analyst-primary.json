@@ -1,0 +1,33 @@
+{
+  "id": "analyst-primary",
+  "version": "0.5.4.0",
+  "owner": "bin/statusline.sh",
+  "description": "Primary per-lens analyst prompt that emits one terse observation or SILENT.",
+  "template": "prompts/analyst-primary.md",
+  "input_variables": [
+    "MEMORY_BLOCK",
+    "lens_examples",
+    "lens_silent_example",
+    "lens_system_prompt_addition",
+    "project_constraints",
+    "relevance_directive"
+  ],
+  "output_schema": {
+    "format": "ONE line: HAT: hook|||body, or exactly SILENT",
+    "parser": "bin/statusline.sh analyst-output parser"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template, built-in lens metadata, and validated user lens metadata.",
+    "untrusted_inputs": [
+      "grounded facts passed as the user message",
+      "project memory constraints",
+      "recent observations",
+      "tool summaries and transcript-derived context"
+    ]
+  },
+  "eval_suites": [
+    "test/prompt-loader.bats",
+    "test/eval/eval.bats",
+    "test/silent-v2.bats"
+  ]
+}

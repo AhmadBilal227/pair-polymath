@@ -1,0 +1,30 @@
+{
+  "id": "router",
+  "version": "0.5.4.0",
+  "owner": "lib/router.sh",
+  "description": "Meta-lens that selects which enabled lenses should fire for the current cycle.",
+  "template": "prompts/router.md",
+  "input_variables": [
+    "PP_ROUTER_MAX",
+    "PP_ROUTER_MIN",
+    "lens_registry",
+    "signals_json",
+    "transcript_tail_5"
+  ],
+  "output_schema": {
+    "format": "Newline-delimited lens IDs, between PP_ROUTER_MIN and PP_ROUTER_MAX lines",
+    "parser": "lib/router.sh router-output validator"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template, router constraints, and enabled lens registry.",
+    "untrusted_inputs": [
+      "signals JSON derived from local transcript and tool state",
+      "recent conversation tail"
+    ]
+  },
+  "eval_suites": [
+    "test/router.bats",
+    "test/router-signals.bats",
+    "test/router-metrics.bats"
+  ]
+}

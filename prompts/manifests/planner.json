@@ -1,0 +1,25 @@
+{
+  "id": "planner",
+  "version": "0.5.4.0",
+  "owner": "bin/statusline.sh",
+  "description": "Selects one existing file path that would clarify the current activity.",
+  "template": "prompts/planner.md",
+  "input_variables": [],
+  "output_schema": {
+    "format": "Exactly one file path from provided context, or NONE",
+    "parser": "bin/statusline.sh planner path validator"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template and path-selection rule.",
+    "untrusted_inputs": [
+      "git status",
+      "recently changed files",
+      "cwd listing",
+      "recent tool calls"
+    ]
+  },
+  "eval_suites": [
+    "test/eval/eval.bats",
+    "test/privacy-log.bats"
+  ]
+}

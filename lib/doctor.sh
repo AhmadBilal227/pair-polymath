@@ -182,7 +182,8 @@ doctor_check_cache_writable() {
 }
 
 doctor_check_budget_file() {
-  local f="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/pp-budget-$(date +%Y%m%d).txt"
+  local f
+  f="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/pp-budget-$(date +%Y%m%d).txt"
   if [ ! -f "$f" ]; then
     _pp_doctor_yellow "budget tracker" "no entry yet today (will be created on first cycle)"
     return 1
@@ -212,18 +213,35 @@ doctor_check_lenses() {
 }
 
 doctor_check_prompts() {
-  local expected="planner analyst-primary analyst-retry critique escalation-investigation tip-digest"
+  local expected="planner analyst-primary analyst-retry critique escalation-investigation tip-digest router pattern-extraction eviction-summary"
   local missing=""
   local p
   for p in $expected; do
     [ -f "$PP_ROOT/prompts/$p.md" ] || missing="$missing $p"
   done
   if [ -z "$missing" ]; then
-    _pp_doctor_green "prompts" "6/6 built-in present"
+    _pp_doctor_green "prompts" "9/9 built-in present"
     return 0
   fi
   _pp_doctor_red "prompts" "missing:$missing"
   return 2
+}
+
+doctor_check_prompt_contracts() {
+  if [ ! -r "$PP_ROOT/lib/prompt-contract.sh" ]; then
+    _pp_doctor_red "prompt contracts" "lib/prompt-contract.sh missing"
+    return 2
+  fi
+  if ! (
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/prompt-contract.sh" 2>/dev/null
+    PP_PROMPT_CONTRACT_QUIET=1 pp_prompt_contract_lint --quiet
+  ) >/dev/null 2>&1; then
+    _pp_doctor_red "prompt contracts" "lint failed; run: polymath prompts lint"
+    return 2
+  fi
+  _pp_doctor_green "prompt contracts" "9/9 manifests lint clean"
+  return 0
 }
 
 doctor_check_transcript_libs() {
@@ -303,9 +321,11 @@ doctor_check_router_libs() {
       printf '%s' "$_rendered" | grep -qF 'debugging' || exit 2
       printf '%s' "$_rendered" | grep -qF 'ENGINEERING' || exit 3
       # Probe (c): forced-output round-trips real UPPERCASE_UNDERSCORE ID.
-      PP_LENS_IDS_AVAILABLE="ENGINEERING"$'\n'"SECURITY" \
-        PP_ROUTER_FORCE_OUTPUT="ENGINEERING" \
-        _picked=$(pp_router_pick_lenses "$_signals" "probe")
+      PP_LENS_IDS_AVAILABLE="ENGINEERING"$'\n'"SECURITY"
+      PP_ROUTER_FORCE_OUTPUT="ENGINEERING"
+      export PP_LENS_IDS_AVAILABLE PP_ROUTER_FORCE_OUTPUT
+      _picked=$(pp_router_pick_lenses "$_signals" "probe")
+      unset PP_LENS_IDS_AVAILABLE PP_ROUTER_FORCE_OUTPUT
       printf '%s' "$_picked" | grep -qxF 'ENGINEERING' || exit 4
       printf 'ok'
     }
@@ -732,7 +752,7 @@ pp_doctor_run() {
   local checks="doctor_check_bash doctor_check_jq doctor_check_llm doctor_check_openai_key \
                 doctor_check_settings_json doctor_check_statusline_wired doctor_check_hooks_wired \
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
-                doctor_check_prompts doctor_check_transcript_libs doctor_check_router_libs \
+                doctor_check_prompts doctor_check_prompt_contracts doctor_check_transcript_libs doctor_check_router_libs \
                 doctor_check_coreutils doctor_check_budget_pressure \
                 doctor_check_cache_permissions doctor_check_dismiss_libs \
                 doctor_check_retry_router_health doctor_check_install_drift \

@@ -1,0 +1,23 @@
+{
+  "id": "eviction-summary",
+  "version": "0.5.4.0",
+  "owner": "lib/memory/evict.sh",
+  "description": "Summarizes evicted low-activation observations into one durable memory pattern.",
+  "template": "prompts/eviction-summary.md",
+  "input_variables": [],
+  "output_schema": {
+    "format": "ONE JSON object with title, evidence_obs_ids, lens_ids, confidence, type, evicted_count",
+    "parser": "lib/memory/evict.sh JSON validator"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template and eviction JSON schema.",
+    "untrusted_inputs": [
+      "observation body fields from memory storage",
+      "observation hook and topic fields from memory storage"
+    ]
+  },
+  "eval_suites": [
+    "test/memory/evict.bats",
+    "test/memory/redact.bats"
+  ]
+}

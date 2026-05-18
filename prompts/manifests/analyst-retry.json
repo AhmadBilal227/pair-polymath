@@ -1,0 +1,29 @@
+{
+  "id": "analyst-retry",
+  "version": "0.5.4.0",
+  "owner": "bin/statusline.sh",
+  "description": "Retry prompt for a lens whose first observation was dropped by critique.",
+  "template": "prompts/analyst-retry.md",
+  "input_variables": [
+    "drop_reason",
+    "rlens_focus",
+    "rlens_group",
+    "rlens_hats"
+  ],
+  "output_schema": {
+    "format": "ONE line: HAT: hook|||body, or exactly SILENT",
+    "parser": "bin/statusline.sh retry-output parser"
+  },
+  "security_boundary": {
+    "trusted_instructions": "Prompt template and validated lens registry fields.",
+    "untrusted_inputs": [
+      "critique drop reason",
+      "grounded facts passed as the user message"
+    ]
+  },
+  "eval_suites": [
+    "test/prompt-loader.bats",
+    "test/retry-router.bats",
+    "test/eval/eval.bats"
+  ]
+}

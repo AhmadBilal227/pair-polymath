@@ -51,6 +51,7 @@ teardown() {
   run bash "$RUN_EVAL" --help
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'Replays each fixture'
+  echo "$output" | grep -q -- '--allow-errors'
 }
 
 @test "eval: score.sh --help exits 0 and prints usage" {
@@ -183,6 +184,28 @@ EOF
   ' "$run_dir/trace-report.json" >/dev/null
 }
 
+@test "eval: trace-score.sh reports router expectations without trace as unscorable" {
+  run_dir="$TMP_RUNS/manual-no-trace"
+  mkdir -p "$run_dir"
+  printf 'manual-no-trace\n' > "$TMP_RUNS/latest"
+  cat > "$run_dir/session-01.observations.txt" <<'EOF'
+ENGINEERING|||||||
+PERF_FINOPS|||||||
+COGNITIVE_FLOW|||||||
+EOF
+
+  run bash "$TRACE_SCORE" --run manual-no-trace --runs-dir "$TMP_RUNS" --offline
+  [ "$status" -eq 0 ]
+  jq -e '
+    .total_trace_rows == 0
+    and .router_target_count == 0
+    and .router_miss_count == 0
+    and .router_target_recall == null
+    and .router_expected_missing_count == 0
+    and .unscorable_router_rows == 1
+  ' "$run_dir/trace-report.json" >/dev/null
+}
+
 @test "eval: trace-score.sh reports perfect router shadow recall" {
   run_dir="$TMP_RUNS/manual-router-hit"
   mkdir -p "$run_dir"
@@ -228,6 +251,23 @@ EOF
   # so each lens should be missing=1.
   missing_total=$(jq '[.per_lens | to_entries[] | .value.missing] | add' "$run_dir/score-report.json")
   [ "$missing_total" -eq 7 ]
+}
+
+@test "eval: score.sh treats no-golden silent rows as unscored, not missing" {
+  run_dir="$TMP_RUNS/manual-no-golden"
+  mkdir -p "$run_dir"
+  printf 'manual-no-golden\n' > "$TMP_RUNS/latest"
+  cat > "$run_dir/custom-no-golden.observations.txt" <<'EOF'
+ENGINEERING|||||||
+EOF
+
+  run bash "$SCORE" --offline --runs-dir "$TMP_RUNS"
+  [ "$status" -eq 0 ]
+  jq -e '
+    .fixtures[0].lenses.ENGINEERING.verdict == "unscored"
+    and .per_lens.ENGINEERING.unscored == 1
+    and .per_lens.ENGINEERING.missing == 0
+  ' "$run_dir/score-report.json" >/dev/null
 }
 
 @test "eval: PP_EVAL_MODE emits exactly PP_LENS_COUNT lines from bin/statusline.sh" {

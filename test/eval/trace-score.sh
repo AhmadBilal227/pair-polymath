@@ -65,6 +65,15 @@ if [ ! -s "$trace_input" ]; then
   done
 fi
 
+run_fixtures_tsv="$_tmp_dir/run-fixtures.txt"
+: > "$run_fixtures_tsv"
+for obs_file in "$run_dir"/*.observations.txt; do
+  [ -f "$obs_file" ] || continue
+  basename "$obs_file" .observations.txt >> "$run_fixtures_tsv"
+done
+jq -r '.fixture // empty' "$trace_input" 2>/dev/null >> "$run_fixtures_tsv" || true
+run_fixtures=$(LC_ALL=C sort -u "$run_fixtures_tsv" | sed '/^$/d')
+
 missing_tsv="$_tmp_dir/missing-goldens.tsv"
 : > "$missing_tsv"
 for obs_file in "$run_dir"/*.observations.txt; do
@@ -88,7 +97,6 @@ missing_total=$(printf '%s' "$missing_json" | jq '[.[]] | add // 0')
 
 router_expectations="$_tmp_dir/router-expectations.jsonl"
 : > "$router_expectations"
-router_fixtures=$(jq -r '.fixture // empty' "$trace_input" 2>/dev/null | LC_ALL=C sort -u)
 while IFS= read -r fix_name; do
   [ -n "$fix_name" ] || continue
   expected_file="$_fixtures_dir/$fix_name/router.expected.json"
@@ -106,7 +114,7 @@ while IFS= read -r fix_name; do
       >> "$router_expectations"
   fi
 done <<EOF
-$router_fixtures
+$run_fixtures
 EOF
 
 trace_summary=$(jq -sc '
@@ -161,7 +169,20 @@ router_summary=$(jq -sc --slurpfile expected "$router_expectations" '
         target_count: (($exp.must_pick // []) | length),
         misses: (($exp.must_pick // []) | map(select(. as $target | ($picked | index($target)) == null)))
       };
-  (map(row_eval)) as $rows
+  (map(row_eval)) as $trace_rows
+  | ($trace_rows | map(.fixture) | unique) as $traced_fixtures
+  | (
+      $expectations
+      | map(select((.exists == true) and (.fixture as $fixture | ($traced_fixtures | index($fixture)) == null)))
+      | map({
+          fixture: .fixture,
+          expected_exists: true,
+          scorable: false,
+          target_count: ((.must_pick // []) | length),
+          misses: []
+        })
+    ) as $missing_trace_rows
+  | ($trace_rows + $missing_trace_rows) as $rows
   | ($rows | map(select(.expected_exists and (.scorable | not))) | length) as $unscorable
   | ($rows | map(select(.expected_exists and .scorable))) as $scored
   | ($scored | map(.target_count) | add // 0) as $target_total
@@ -176,7 +197,7 @@ router_summary=$(jq -sc --slurpfile expected "$router_expectations" '
         | map({key: .[0].fixture, value: (map(.misses[]) | unique)})
         | from_entries
       ),
-      router_expected_missing_count: ($rows | map(select(.expected_exists | not)) | length),
+      router_expected_missing_count: ($expectations | map(select(.exists | not)) | length),
       unscorable_router_rows: $unscorable
     }
 ' "$trace_input")

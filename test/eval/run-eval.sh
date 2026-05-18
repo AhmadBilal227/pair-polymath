@@ -14,6 +14,7 @@
 #                      an OpenAI key. Each lens emits an empty observation row.
 #   --runs-dir <path>  Override the run output directory (default
 #                      test/eval/runs). Used by bats tests.
+#   --allow-errors     Write latest and exit 0 even if fixture replay errors.
 #   --help             This message.
 #
 # Output schema (run-summary.json):
@@ -36,6 +37,7 @@ _runs_dir="$_eval_dir/runs"
 target_fixture=""
 run_all=1
 dry_run=0
+allow_errors=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -53,6 +55,9 @@ while [ $# -gt 0 ]; do
     --runs-dir)
       shift
       _runs_dir="${1:-$_runs_dir}"
+      ;;
+    --allow-errors)
+      allow_errors=1
       ;;
     --help|-h)
       sed -n '2,25p' "$0"
@@ -114,6 +119,7 @@ mkdir -p "$run_dir"
 fixtures_processed=0
 total_observations=0
 total_trace_rows=0
+total_errors=0
 errors_json="{"
 errors_first=1
 trace_rows_json="{"
@@ -178,14 +184,14 @@ for fix in $fixtures; do
       else . end)
     ' "$input_json" > "$input_resolved" 2>/dev/null || {
       printf 'run-eval.sh: failed to rewrite placeholders in %s\n' "$input_json" >&2
-      return 1
+      exit 1
     }
   else
     jq --arg t "$transcript" '
       walk(if type == "string" then gsub("@TRANSCRIPT@"; $t) else . end)
     ' "$input_json" > "$input_resolved" 2>/dev/null || {
       printf 'run-eval.sh: failed to rewrite placeholders in %s\n' "$input_json" >&2
-      return 1
+      exit 1
     }
   fi
 
@@ -199,7 +205,7 @@ for fix in $fixtures; do
   if ! jq --arg sid "$fix_session" '.session_id = $sid' "$input_resolved" > "${input_resolved}.tmp" 2>/dev/null; then
     printf 'run-eval.sh: failed to set session_id in %s\n' "$input_resolved" >&2
     rm -f "${input_resolved}.tmp"
-    return 1
+    exit 1
   fi
   mv "${input_resolved}.tmp" "$input_resolved"
 
@@ -290,6 +296,7 @@ for fix in $fixtures; do
   [ "$rc" -ne 0 ] && fix_err=1
   [ -s "$err_file" ] && fix_err=$((fix_err + 1))
   [ "$trace_tag_err" -ne 0 ] && fix_err=$((fix_err + 1))
+  total_errors=$((total_errors + fix_err))
 
   if [ "$errors_first" = "1" ]; then
     errors_first=0
@@ -332,9 +339,17 @@ cat > "$summary_tmp" <<EOF
 EOF
 mv "$summary_tmp" "$summary_path"
 
-# Also stamp the latest run dir for convenience (so score.sh --latest works).
+# Also stamp the latest run dir for convenience, but only for clean replays.
+# A broken eval run should remain inspectable without becoming the default
+# input to score.sh/trace-score.sh.
 latest_link="$_runs_dir/latest"
-printf '%s\n' "$run_ts" > "${latest_link}.tmp.$$" && mv "${latest_link}.tmp.$$" "$latest_link"
+if [ "$total_errors" -eq 0 ] || [ "$allow_errors" = "1" ]; then
+  printf '%s\n' "$run_ts" > "${latest_link}.tmp.$$" && mv "${latest_link}.tmp.$$" "$latest_link"
+fi
 
 printf 'run-eval.sh: %d fixture(s) processed → %s\n' "$fixtures_processed" "$run_dir"
 printf 'run-eval.sh: total observations: %d\n' "$total_observations"
+if [ "$total_errors" -gt 0 ]; then
+  printf 'run-eval.sh: replay errors: %d (latest not advanced; use --allow-errors to override)\n' "$total_errors" >&2
+  [ "$allow_errors" = "1" ] || exit 1
+fi

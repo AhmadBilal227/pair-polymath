@@ -207,13 +207,15 @@ for obs_file in $obs_files; do
     [ -f "$golden_file" ] && golden=$(head -1 "$golden_file" 2>/dev/null)
 
     verdict="missing"
-    if [ -z "$obs_full" ]; then
-      verdict="missing"
-      bump_counter "$lens" "missing"
-    elif [ -z "$golden" ]; then
-      # No golden — record as unscored (don't penalize).
+    if [ -z "$golden" ]; then
+      # No golden — record as unscored (don't penalize), even when the
+      # lens stayed silent. Missing goldens are a fixture coverage gap,
+      # not evidence that the analyst missed an expected observation.
       verdict="unscored"
       bump_counter "$lens" "unscored"
+    elif [ -z "$obs_full" ]; then
+      verdict="missing"
+      bump_counter "$lens" "missing"
     else
       verdict=$(score_obs "$obs_full" "$golden")
       bump_counter "$lens" "$verdict"

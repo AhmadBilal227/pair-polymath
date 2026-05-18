@@ -24,7 +24,8 @@ bash test/eval/score.sh --offline
 bash test/eval/trace-score.sh --offline
 
 # Inspect the per-lens tallies
-jq '.per_lens' test/eval/runs/latest/score-report.json   # 'latest' is a pointer file
+latest=$(cat test/eval/runs/latest)
+jq '.per_lens' "test/eval/runs/$latest/score-report.json"
 ```
 
 ## What `PP_EVAL_MODE=1` does to `bin/statusline.sh`
@@ -65,6 +66,11 @@ Fixtures may add `router.expected.json`:
 `router.shadow_picked_lenses` and reports `router_target_recall`,
 `router_miss_count`, and `router_misses_by_fixture`. Missing expectation files
 are advisory, not fatal.
+
+Router shadow recall needs a non-dry eval replay. `--dry-run` intentionally
+sets `PP_EXTERNAL_LLM=0`, so no live cycle runs and no trace row is emitted;
+`trace-score.sh` reports fixtures with `router.expected.json` but no trace row
+as unscorable instead of silently treating them as passing.
 
 ## Schema
 

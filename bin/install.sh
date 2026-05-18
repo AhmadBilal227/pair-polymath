@@ -829,6 +829,18 @@ else
   fi
 
   mv "$tmp" "$SETTINGS_FILE"
+  if ! jq -e \
+      --arg hook_user "$HOOK_USER_CMD" \
+      --arg hook_post "$HOOK_POST_CMD" \
+      --arg hook_session_end "$HOOK_SESSION_END_CMD" '
+        ([.hooks.UserPromptSubmit[]?.hooks[]?.command | select(. == $hook_user)] | length) == 1
+        and ([.hooks.PostToolUse[]?.hooks[]?.command | select(. == $hook_post)] | length) == 1
+        and ([.hooks.SessionEnd[]?.hooks[]?.command | select(. == $hook_session_end)] | length) == 1
+      ' "$SETTINGS_FILE" >/dev/null 2>&1; then
+    err "settings.json hook verification failed — expected exactly one Pair Polymath hook in UserPromptSubmit, PostToolUse, and SessionEnd."
+    audit_log "settings-verify" "jq hook verification → $SETTINGS_FILE" 1 "missing or duplicate Pair Polymath hook"
+    exit 1
+  fi
   if [ "$install_statusline" = "1" ]; then
     ok "settings.json updated (statusLine + 3 hooks)"
     audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "statusLine + 3 hooks"

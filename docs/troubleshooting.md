@@ -95,7 +95,13 @@ You have a statusLine pointing at another tool (ccusage, etc.). The installer as
 
 ## `✗ hooks wired — missing or pointing elsewhere`
 
-The `UserPromptSubmit` hook (`inject-monitor-insight.sh`) and/or `PostToolUse` hook (`cache-test-result.sh`) aren't installed. Re-run `./bin/install.sh`.
+One or more Pair Polymath hooks are not installed or point at an old path. Re-run `./bin/install.sh`.
+
+When `PP_OAR_ENABLE=1`, `SessionEnd` is required too; without it, OAR never queues `oar-pending.jsonl` rows and the advice-quality feedback loop is starved.
+
+## `⚠ OAR quality — appears starved`
+
+Doctor found injected observations but no pending OAR rows. Re-run `./bin/install.sh` so `SessionEnd` is registered, then start a new Claude Code session.
 
 ## `✗ lenses — registry empty`
 

@@ -52,19 +52,51 @@ teardown() {
   local sl_path="$PP_ROOT/bin/statusline.sh"
   local user_hook="$PP_ROOT/hooks/inject-monitor-insight.sh"
   local post_hook="$PP_ROOT/hooks/cache-test-result.sh"
-  jq -n --arg sl "bash '$sl_path'" --arg uh "$user_hook" --arg ph "$post_hook" '{
+  local session_hook="$PP_ROOT/hooks/session-end.sh"
+  jq -n --arg sl "bash '$sl_path'" --arg uh "$user_hook" --arg ph "$post_hook" --arg sh "$session_hook" '{
     statusLine: {command: $sl},
+    hooks: {
+      UserPromptSubmit: [{matcher:"*", hooks:[{type:"command", command:$uh, timeout:3}]}],
+      PostToolUse:       [{matcher:"Bash", hooks:[{type:"command", command:$ph, timeout:3}]}],
+      SessionEnd:        [{matcher:"", hooks:[{type:"command", command:$sh, timeout:3}]}]
+    }
+  }' > "$CLAUDE_DIR/settings.json"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"hooks wired"* ]]
+  [[ "$output" == *"UserPromptSubmit + PostToolUse + SessionEnd"* ]]
+  # H1 fix: statusLine wired should be green when path resolves correctly
+  [[ "$output" == *"statusLine wired"* ]]
+  [[ "$output" == *"→"* ]]
+}
+
+@test "doctor: SessionEnd missing is yellow while OAR disabled" {
+  local user_hook="$PP_ROOT/hooks/inject-monitor-insight.sh"
+  local post_hook="$PP_ROOT/hooks/cache-test-result.sh"
+  jq -n --arg uh "$user_hook" --arg ph "$post_hook" '{
     hooks: {
       UserPromptSubmit: [{matcher:"*", hooks:[{type:"command", command:$uh, timeout:3}]}],
       PostToolUse:       [{matcher:"Bash", hooks:[{type:"command", command:$ph, timeout:3}]}]
     }
   }' > "$CLAUDE_DIR/settings.json"
-  run bash "$PP_ROOT/bin/polymath" doctor
-  [[ "$output" == *"hooks wired"* ]]
-  [[ "$output" == *"UserPromptSubmit + PostToolUse"* ]]
-  # H1 fix: statusLine wired should be green when path resolves correctly
-  [[ "$output" == *"statusLine wired"* ]]
-  [[ "$output" == *"→"* ]]
+  PP_OAR_ENABLE=0 run doctor_check_hooks_wired
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"SessionEnd missing"* ]]
+  [[ "$output" == *"OAR disabled"* ]]
+}
+
+@test "doctor: SessionEnd missing is red while OAR enabled" {
+  local user_hook="$PP_ROOT/hooks/inject-monitor-insight.sh"
+  local post_hook="$PP_ROOT/hooks/cache-test-result.sh"
+  jq -n --arg uh "$user_hook" --arg ph "$post_hook" '{
+    hooks: {
+      UserPromptSubmit: [{matcher:"*", hooks:[{type:"command", command:$uh, timeout:3}]}],
+      PostToolUse:       [{matcher:"Bash", hooks:[{type:"command", command:$ph, timeout:3}]}]
+    }
+  }' > "$CLAUDE_DIR/settings.json"
+  PP_OAR_ENABLE=1 run doctor_check_hooks_wired
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"SessionEnd=0"* ]]
+  [[ "$output" == *"re-run installer"* ]]
 }
 
 @test "doctor: H1 — yellow statusLine returns non-zero contribution (not silently green)" {
@@ -262,6 +294,19 @@ _pp_doctor_oar_enable() {
   run bash "$PP_ROOT/bin/polymath" doctor
   [[ "$output" == *"OAR quality"* ]]
   [[ "$output" == *"no labeled data yet"* ]]
+}
+
+@test "doctor #21: oar quality YELLOW when injected observations exist but OAR has no pending rows" {
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  printf 'hash-a\n' > "$PP_CACHE_DIR/cc-monitor-injected-hash-s1-ENGINEERING.txt"
+  printf 'hash-b\n' > "$PP_CACHE_DIR/cc-monitor-injected-hash-s1-SECURITY.txt"
+  printf '{"session_id":"old","outcome":"ignored"}\n' > "$PP_CACHE_DIR/oar-labeled.jsonl"
+  : > "$PP_CACHE_DIR/oar-pending.jsonl"
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"appears starved"* ]]
+  [[ "$output" == *"verify SessionEnd hook wiring"* ]]
 }
 
 @test "doctor #21: oar quality green when fewer than 20 labeled rows" {

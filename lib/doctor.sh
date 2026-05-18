@@ -142,11 +142,12 @@ doctor_check_hooks_wired() {
 
   # Strict-match: hook command must resolve to OUR script under $PP_ROOT/hooks/,
   # not just any file with that basename (review fix H2).
-  local want_user want_post
+  local want_user want_post want_session
   want_user=$(cd "$PP_ROOT" 2>/dev/null && realpath "hooks/inject-monitor-insight.sh" 2>/dev/null)
   want_post=$(cd "$PP_ROOT" 2>/dev/null && realpath "hooks/cache-test-result.sh" 2>/dev/null)
+  want_session=$(cd "$PP_ROOT" 2>/dev/null && realpath "hooks/session-end.sh" 2>/dev/null)
 
-  local user_match=0 post_match=0
+  local user_match=0 post_match=0 session_match=0
   local cmd extracted resolved
   while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
@@ -162,11 +163,23 @@ doctor_check_hooks_wired() {
     [ -n "$want_post" ] && [ "$resolved" = "$want_post" ] && post_match=1
   done < <(jq -r '.hooks?.PostToolUse[]?.hooks[]?.command // empty' "$settings" 2>/dev/null)
 
-  if [ "$user_match" -eq 1 ] && [ "$post_match" -eq 1 ]; then
-    _pp_doctor_green "hooks wired" "UserPromptSubmit + PostToolUse → \$PP_ROOT/hooks"
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    extracted=$(_pp_doctor_extract_path "$cmd")
+    resolved=$(realpath "$extracted" 2>/dev/null)
+    [ -n "$want_session" ] && [ "$resolved" = "$want_session" ] && session_match=1
+  done < <(jq -r '.hooks?.SessionEnd[]?.hooks[]?.command // empty' "$settings" 2>/dev/null)
+
+  if [ "$user_match" -eq 1 ] && [ "$post_match" -eq 1 ] && [ "$session_match" -eq 1 ]; then
+    _pp_doctor_green "hooks wired" "UserPromptSubmit + PostToolUse + SessionEnd → \$PP_ROOT/hooks"
     return 0
   fi
-  _pp_doctor_red "hooks wired" "missing or pointing elsewhere (UserPromptSubmit=$user_match PostToolUse=$post_match); re-run installer"
+  if [ "$user_match" -eq 1 ] && [ "$post_match" -eq 1 ] && [ "$session_match" -eq 0 ] \
+      && [ "${PP_OAR_ENABLE:-0}" != "1" ]; then
+    _pp_doctor_yellow "hooks wired" "SessionEnd missing; OAR disabled, but re-run installer before enabling OAR"
+    return 1
+  fi
+  _pp_doctor_red "hooks wired" "missing or pointing elsewhere (UserPromptSubmit=$user_match PostToolUse=$post_match SessionEnd=$session_match); re-run installer"
   return 2
 }
 
@@ -554,7 +567,23 @@ doctor_check_oar_quality() {
     return 0
   fi
 
-  local _labeled="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
+  local _cache_dir="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}"
+  local _labeled="${_cache_dir}/oar-labeled.jsonl"
+  local _pending="${_cache_dir}/oar-pending.jsonl"
+  local _injected_count _pending_rows _labeled_rows
+  _injected_count=$(find "$_cache_dir" -maxdepth 1 -type f -name 'cc-monitor-injected-hash-*' 2>/dev/null | wc -l | tr -d ' ')
+  _pending_rows=0
+  [ -f "$_pending" ] && _pending_rows=$(wc -l < "$_pending" 2>/dev/null | tr -d ' ')
+  _labeled_rows=0
+  [ -f "$_labeled" ] && _labeled_rows=$(wc -l < "$_labeled" 2>/dev/null | tr -d ' ')
+  case "$_injected_count" in ''|*[!0-9]*) _injected_count=0 ;; esac
+  case "$_pending_rows" in ''|*[!0-9]*) _pending_rows=0 ;; esac
+  case "$_labeled_rows" in ''|*[!0-9]*) _labeled_rows=0 ;; esac
+  if [ "$_injected_count" -gt 0 ] && [ "$_pending_rows" -eq 0 ] && [ "$_labeled_rows" -lt "$_injected_count" ]; then
+    _pp_doctor_yellow "OAR quality" "appears starved: ${_injected_count} injected observations, ${_pending_rows} pending rows, ${_labeled_rows} labeled rows — verify SessionEnd hook wiring"
+    return 1
+  fi
+
   if [ ! -f "$_labeled" ]; then
     _pp_doctor_green "OAR quality" "no labeled data yet"
     return 0

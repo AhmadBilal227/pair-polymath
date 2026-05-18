@@ -2202,6 +2202,7 @@ Usage:
   polymath cost        Show estimated USD spend (--since, --by-lens, --json)
   polymath kpi         Rolling cost / retry / phase summary (--window Nd, --json)
   polymath history     OAR observation outcomes — per-lens acted% (--window, --lens, --outcome, --json)
+  polymath oar         OAR bootstrap tools (bootstrap scan/report)
   polymath oar-label   Manual catchup labeler (--all-due [--limit N])
   polymath retry-router   v0.5.1 cost-router state (status / shadow-summary / clear-flag)
   polymath lens-gates  v0.5.1.1 planner-grounding kill-switches (status / enable / disable)

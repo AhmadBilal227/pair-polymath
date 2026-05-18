@@ -3,6 +3,32 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.4.0] — 2026-05-18
+
+The **pause UX fix release**. `polymath disable` now actually pauses pair-polymath visibly across all three read paths — not just blocks new LLM cycles from starting. Pre-v0.5.4 behavior was incoherent: disable would stop the LLM cycle, but statusline kept rotating stale cached observations AND the prompt-injection hook kept feeding stale advisories into Claude's context on every UserPromptSubmit. The user-visible "pause" wasn't inert on the load-bearing surface (Claude's behavior).
+
+### Four changes
+
+- **Change 1: visible paused branch in statusline line-2.** New top-priority branch in the idle-fallback chain at `bin/statusline.sh`. Voice + glyph match the existing `paused — daily budget near cap` precedent. Copy: `◌  paused — LLM cycle disabled (polymath enable to resume)`.
+- **Change 2: statusline cache-read short-circuit when paused.** Without this, a cached lens observation pre-empts Change 1's paused fallback. The user explicitly opted out; the cache is inert from their perspective.
+- **Change 3: `hooks/inject-monitor-insight.sh` early-exit when paused.** The load-bearing fix: Claude no longer sees the cached advisories on every prompt while paused.
+- **Change 4: `polymath disable` clears cache atomically.** Extracted `_pp_cache_clear_all` helper in `bin/polymath` (also used by the existing `cache clear all` subcommand). Budget files preserved by the helper.
+
+### F9 bug fix (config/default.env)
+
+`PP_EXTERNAL_LLM` used bare assignment which clobbered parent-shell exports. Now uses parameter-expansion default `${PP_EXTERNAL_LLM:-1}` matching `PP_MEMORY_ENABLE`'s F9 pattern. Without this, `PP_EXTERNAL_LLM=0 polymath status` was silently a no-op.
+
+### Acceptance criteria
+
+All 6 ACs from `docs/v0.5.4-pause-ux-spec.md` covered by `test/pause-ux.bats` (8 tests). Byte-identity preserved with default `PP_EXTERNAL_LLM=1` — `test/v0.5.1-byte-identity.bats` 3/3 still green.
+
+### Non-goals (deferred)
+
+- No `polymath pause` subcommand (reuse `polymath disable` semantic)
+- No new kill-switch (bugfix, not a feature)
+- No OAR `outcome=paused` enum value (paused → zero cycles → existing `dispatched_count=0` covers it)
+- No schema bumps (verdict / OAR / KPI / metrics all stay at v2)
+
 ## [0.5.2.1] — 2026-05-17 — internal task label: v0.5.1.1
 
 The **planner / grounding fix release**. Persona work was the wrong target — the 26-cycle data showed 63-81% of DROPs were plumbing artifacts: lenses cited symbols not in the validator's allowlist, lenses fanned out into cycles with no in-scope surface, and SILENT was getting scored as DROP instead of as a legitimate non-observation. v0.5.1.1 fixes the plumbing; persona work moves to v0.5.1.2.

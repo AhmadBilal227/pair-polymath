@@ -129,11 +129,30 @@ Normal at start of day. The first lens cycle will create `~/.claude/cache/pp-bud
 
 Known: `--yes` skips the installer re-run by design (install.sh has interactive prompts). After pull, if `bin/install.sh` was touched, re-run it manually. See `polymath update --help`.
 
+## "Installer finished but onboarding did not run"
+
+This is expected under `./bin/install.sh --yes` and `--non-interactive`: the installer prints the command instead of launching another prompt flow.
+
+```bash
+bash ./bin/polymath onboard --from-install
+```
+
+`./bin/install.sh --dry-run` never invokes onboarding and makes no filesystem changes.
+
+## "New built-in lenses are not loaded"
+
+The five activation foothold lenses are available but not active on legacy installs until a preset writes `$PP_STATE_DIR/config/lenses-enabled.txt`. Run `polymath onboard`, or write the lens IDs you want into that file, one per line. Delete the file to return to the legacy 7-lens active set.
+
+## "Onboarding rejected my custom lens"
+
+The wizard rejects custom IDs that collide with built-ins, malformed IDs, shell-style expansion syntax like `${OPENAI_API_KEY}`, and prompt-injection-shaped focus text such as "ignore previous instructions." Pick a unique ID like `API_REVIEW` and describe the review topic as data, not instructions.
+
 ## "Custom lens isn't being picked up"
 
 - `polymath status` lens count should be 8 (built-in 7 + your 1).
 - File must be valid JSON: `jq empty ~/.claude/pair-polymath/lenses/your-lens.json`.
 - `id` field must be unique; matching a built-in id makes your file REPLACE the built-in (intentional override).
+- If `$PP_STATE_DIR/config/lenses-enabled.txt` exists, your custom ID must be listed there.
 - Hard cap `PP_LENS_MAX=16` — beyond that, extras are silently dropped.
 
 ## `✗ network probe failed` (--network only)

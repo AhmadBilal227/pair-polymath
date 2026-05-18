@@ -40,6 +40,13 @@ teardown() {
   [ "$(grep -c '^PP_ONBOARD_PRESET=' "$user_env")" -eq 1 ]
 }
 
+@test "onboard --yes: doctor report does not make successful config apply fail" {
+  run bash "$PP_ROOT/bin/polymath" onboard --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Activation settings written"* ]]
+  [[ "$output" == *"Pair Polymath doctor"* ]]
+}
+
 @test "onboard interactive: role, preset, conservative cost, and roast fun mode apply" {
   input=$(printf '2\n2\n3\n1\nn\ny\n6\ny\ny\n')
   run bash -c 'printf "%s" "$1" | bash "$PP_ROOT/bin/polymath" onboard --no-doctor 2>&1' _ "$input"

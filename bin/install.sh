@@ -35,6 +35,7 @@ Flags:
                         - jq/llm install: yes
                         - existing statusLine conflict: keep theirs
                         - OpenAI key prompt: skip (configure later with llm keys set openai)
+                        - activation onboarding: print command for later
   --no-sudo             Refuse to invoke sudo. Useful for unprivileged or
                         rootless environments. If a dep install needs sudo,
                         print the exact command + exit 1.
@@ -835,6 +836,39 @@ else
     ok "settings.json updated (3 hooks; existing statusLine preserved)"
     audit_log "settings-merge" "jq merge → $SETTINGS_FILE" 0 "3 hooks only"
   fi
+fi
+
+# === Step 7: Activation onboarding handoff ===
+ONBOARD_CMD="bash '${PP_ROOT}/bin/polymath' onboard --from-install"
+step "Activation onboarding"
+if [ "$PP_DRY_RUN" = "1" ]; then
+  printf '  [DRY-RUN] Would offer activation onboarding: %s\n' "$ONBOARD_CMD"
+  audit_log "onboarding-handoff" "$ONBOARD_CMD" 0 "dry-run"
+elif [ "$PP_YES" = "1" ]; then
+  printf '  Run activation onboarding later:\n'
+  printf '    %s\n' "$ONBOARD_CMD"
+  audit_log "onboarding-handoff" "$ONBOARD_CMD" 0 "printed under --yes"
+else
+  prompt "Run activation onboarding now? [Y/n]"
+  read_ans
+  case "${ans:-Y}" in
+    [Yy]*|"")
+      if bash "$PP_ROOT/bin/polymath" onboard --from-install; then
+        ok "activation onboarding complete"
+        audit_log "onboarding-handoff" "$ONBOARD_CMD" 0 "completed"
+      else
+        err "activation onboarding failed; settings.json was already installed."
+        err "Re-run later: $ONBOARD_CMD"
+        audit_log "onboarding-handoff" "$ONBOARD_CMD" 1 "failed"
+        exit 1
+      fi
+      ;;
+    *)
+      printf '  Skipped. Run later:\n'
+      printf '    %s\n' "$ONBOARD_CMD"
+      audit_log "onboarding-handoff" "$ONBOARD_CMD" 0 "declined"
+      ;;
+  esac
 fi
 
 # === Done ===

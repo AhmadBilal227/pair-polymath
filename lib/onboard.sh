@@ -420,6 +420,7 @@ $custom_id"
   printf '  Config: %s\n' "${PP_USER_CONFIG:-${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}/config/user.env}"
   printf '  Lenses: %s/config/lenses-enabled.txt\n' "${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
   if [ "$_doctor" = "1" ] && command -v pp_doctor_run >/dev/null 2>&1; then
-    pp_doctor_run
+    pp_doctor_run || true
   fi
+  return 0
 }

@@ -10,6 +10,7 @@ Flags:
                         - jq/llm install: yes
                         - existing statusLine conflict: keep theirs
                         - OpenAI key prompt: skip (configure later with llm keys set openai)
+                        - activation onboarding: print command for later
   --no-sudo             Refuse to invoke sudo. Useful for unprivileged or
                         rootless environments. If a dep install needs sudo,
                         print the exact command + exit 1.

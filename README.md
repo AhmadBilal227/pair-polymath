@@ -31,7 +31,15 @@ cd pair-polymath
 ./bin/install.sh
 ```
 
-Needs a TTY (API key prompt). Detects `jq` + `llm` (≥0.20) and walks you through installing what's missing. Backs up `$CLAUDE_DIR/settings.json` (default `~/.claude/settings.json`) before merging in our statusLine + 3 hooks atomically. Restart Claude Code; first cycle runs within ~5 minutes of activity.
+Needs a TTY (API key prompt). Detects `jq` + `llm` (≥0.20) and walks you through installing what's missing. Backs up `$CLAUDE_DIR/settings.json` (default `~/.claude/settings.json`) before merging in our statusLine + 3 hooks atomically.
+
+After a successful install, Pair Polymath offers activation onboarding:
+
+```bash
+bash ./bin/polymath onboard --from-install
+```
+
+Onboarding lets you choose role, project phase, active lens preset, cost profile, optional custom lens, and display-only fun mode. `./bin/install.sh --yes` prints the onboarding command instead of prompting. Restart Claude Code after install; first cycle runs within ~5 minutes of activity.
 
 Verify: `bash ./bin/polymath doctor` (22 health checks). Uninstall: `./bin/uninstall.sh`.
 
@@ -55,9 +63,12 @@ What leaves per cycle: ~5 KB transcript tail, `git status` + last 5 commit subje
 | Thing | Where |
 |---|---|
 | Daily cap / intervals / model choice | `$PP_USER_CONFIG` (default `$CLAUDE_DIR/pair-polymath/config/user.env`) |
+| Guided setup | `polymath onboard` |
+| Active lens preset | `$PP_STATE_DIR/config/lenses-enabled.txt` or `polymath onboard` |
 | Add a new lens | `$PP_STATE_DIR/lenses/08-mylens.json` ([schema](docs/customization.md)) |
 | Override the analyst prompt | `$PP_STATE_DIR/prompts/analyst-primary.md` |
 | Disable advisor (status-only) | `polymath disable` |
+| Display-only fun mode | `polymath fun status` / `polymath fun on` / `polymath fun style mentor` |
 | Inspect lens-gates kill-switches | `polymath lens-gates status` |
 
 ## How it's different

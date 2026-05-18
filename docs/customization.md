@@ -2,6 +2,34 @@
 
 All knobs live in `config/default.env`. To override, copy any line to `$PP_USER_CONFIG` (default `$CLAUDE_DIR/pair-polymath/config/user.env`, with `CLAUDE_DIR` defaulting to `~/.claude`) and edit. Variables are sourced default-first, then user-second — so user.env always wins.
 
+## Activation onboarding
+
+Run `polymath onboard` to write a first-run profile without editing files. It asks for role, project phase, active lens preset, cost profile, optional deterministic custom lens, and display-only fun mode. `polymath onboard --yes` applies the balanced defaults non-interactively.
+
+Onboarding presets write `$PP_STATE_DIR/config/lenses-enabled.txt`. If this file is absent, Pair Polymath preserves the legacy 7-lens active set. If it exists, only listed lens IDs load after normal built-in/user override dedupe. Delete the file to return to legacy behavior.
+
+Built-in presets:
+
+| Preset | Intended use |
+|---|---|
+| `balanced` | Legacy 7-lens active set. |
+| `solo-founder` | Engineering, security, product, founder strategy, flow, CFO, pre-mortem. |
+| `dev-team` | Engineering, security, perf/FinOps, database, pre-mortem, devil's advocate. |
+| `product-launch` | UX, product/biz, security, CFO, pre-mortem, cognitive flow. |
+| `security-hardened` | Security-heavy engineering review with database and pre-mortem lenses. |
+| `deep-review` | All 12 built-ins; higher cost/noise, use intentionally. |
+
+Fun mode is display-only. It can render in `polymath fun status` and the statusline, but it is never inserted into `UserPromptSubmit` or analyst prompts. Signals come from safe local state such as git dirty/staged state, last test status, budget pressure, context pressure, router phase, and idle age.
+
+| Var | Default | Controls |
+|---|---|---|
+| `PP_FUN_MODE` | `0` | `1` enables display-only commentary. |
+| `PP_FUN_STYLE` | `mentor` | `gentle`, `hype`, `dry`, `mentor`, `founder`, or `roast`. |
+| `PP_FUN_INTENSITY` | `1` | `1..3`; currently reserved for future copy variants. |
+| `PP_FUN_ALLOW_ROAST` | `0` | Required for `roast`; jokes target workflow/process only. |
+| `PP_FUN_COOLDOWN_S` | `300` | Minimum seconds between statusline fun messages per session. |
+| `PP_FUN_MAX_CHARS` | `120` | Max rendered message length, clamped by the renderer. |
+
 ## Cap / interval
 
 | Var | Default | Controls |

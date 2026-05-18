@@ -112,12 +112,22 @@ _pp_normalize_install_output() {
   run bash "$PP_ROOT/bin/install.sh" --dry-run --yes
   [ "$status" -eq 0 ]
   [[ "$output" == *"[DRY-RUN]"* ]]
+  [[ "$output" == *"onboard --from-install"* ]]
   [[ "$output" == *"dry-run complete"* ]]
 }
 
 @test "install --dry-run: completes successfully (exit 0)" {
   run bash "$PP_ROOT/bin/install.sh" --dry-run --yes
   [ "$status" -eq 0 ]
+}
+
+@test "install --dry-run: does not invoke activation onboarding" {
+  run bash "$PP_ROOT/bin/install.sh" --dry-run --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Would offer activation onboarding"* ]]
+  [[ "$output" == *"onboard --from-install"* ]]
+  [[ "$output" != *"Pair Polymath activation setup"* ]]
+  [[ "$output" != *"Activation settings written"* ]]
 }
 
 # ============================================================
@@ -144,6 +154,14 @@ _pp_normalize_install_output() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Skipping OpenAI key prompt"* ]] \
     || [[ "$output" == *"already configured"* ]]
+}
+
+@test "install --yes: prints onboarding command but does not invoke onboarding" {
+  run bash -c "bash '$PP_ROOT/bin/install.sh' --yes --no-sudo </dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"onboard --from-install"* ]]
+  [[ "$output" != *"Pair Polymath activation setup"* ]]
+  [[ "$output" != *"Activation settings written"* ]]
 }
 
 @test "install --yes: preserves existing statusLine when one is present" {
@@ -338,8 +356,10 @@ APT
   settings="$HOME/.claude/settings.json"
   ups_count=$(jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command | select(test("inject-monitor-insight"))] | length' "$settings")
   ptu_count=$(jq '[.hooks.PostToolUse[]?.hooks[]?.command      | select(test("cache-test-result"))] | length' "$settings")
+  session_count=$(jq '[.hooks.SessionEnd[]?.hooks[]?.command | select(test("session-end"))] | length' "$settings")
   [ "$ups_count" = "1" ]
   [ "$ptu_count" = "1" ]
+  [ "$session_count" = "1" ]
 }
 
 # ============================================================

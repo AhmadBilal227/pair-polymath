@@ -104,7 +104,9 @@ jobs:
           echo "$out" | grep -q 'Pair Polymath doctor'
           echo "$out" | grep -q 'jq'
           echo "$out" | grep -q 'lenses'
-          echo "$out" | grep -q '6/6 built-in present'
+          # Asserts the prompts-row is healthy without pinning the count
+          # (new prompts ship with feature waves; pinning N/N drifts).
+          echo "$out" | grep -qE 'prompts — [0-9]+/[0-9]+ built-in present'
           echo "$out" | grep -q 'Summary:'
           echo "$out" | grep -E 'statusLine wired.*(→|PP_ROOT)' >/dev/null \
             || (echo "doctor did not detect our statusLine" && exit 1)

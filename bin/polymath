@@ -103,6 +103,27 @@ _pp_set_user_env_var() {
   return 0
 }
 
+# _pp_cache_clear_all <cache_dir>
+# Truncates lens + tip + injection-idempotency caches in cache_dir.
+# Preserves budget files and re-chmods them + the directory to mode 600/700.
+# Canonical truncation path — called by `cache clear all` subcommand AND by
+# `polymath disable` (v0.5.4) so visible pause state is immediate.
+_pp_cache_clear_all() {
+  local _pp_cache_dir="${1:-}"
+  [ -z "$_pp_cache_dir" ] && return 1
+  [ -d "$_pp_cache_dir" ] || return 0
+  find "$_pp_cache_dir" -maxdepth 1 \
+    \( -name 'cc-monitor-*.txt' -o -name 'cc-tips*' \) \
+    -type f ! -name 'cc-monitor-budget-*' -exec rm -f {} \; 2>/dev/null
+  find "$_pp_cache_dir" -maxdepth 1 \
+    \( -name 'cc-monitor-injected-hash-*' -o -name 'cc-monitor-injected-time-*' \) \
+    -type f -exec rm -f {} \; 2>/dev/null
+  find "$_pp_cache_dir" -maxdepth 1 \
+    \( -name 'pp-budget-*' -o -name 'cc-monitor-budget-*' \) \
+    -type f -exec chmod 600 {} \; 2>/dev/null
+  chmod 700 "$_pp_cache_dir" 2>/dev/null || true
+}
+
 cmd="${1:-status}"
 
 case "$cmd" in
@@ -293,24 +314,11 @@ case "$cmd" in
             ;;
           all|"")
             # Preserve budget files (date-stamped, inert, needed for daily cap).
-            # v0.4.3 cumulative-review fixes:
-            #   - GPT-3: chmod 600 the preserved budget files so doctor #17
-            #     doesn't stay yellow forever after `cache clear` (legacy
-            #     pre-v0.4.2 budget files were created at 644).
-            #   - GPT-4: also sweep the per-lens idempotency hash/time files
-            #     so injection suppression state doesn't outlive the lens
-            #     observations that produced it.
-            find "$_pp_cache_dir" -maxdepth 1 \
-              \( -name 'cc-monitor-*.txt' -o -name 'cc-tips*' \) \
-              -type f ! -name 'cc-monitor-budget-*' -exec rm -f {} \; 2>/dev/null
-            find "$_pp_cache_dir" -maxdepth 1 \
-              \( -name 'cc-monitor-injected-hash-*' -o -name 'cc-monitor-injected-time-*' \) \
-              -type f -exec rm -f {} \; 2>/dev/null
-            # Chmod surviving budget files to the privacy invariant.
-            find "$_pp_cache_dir" -maxdepth 1 \
-              \( -name 'pp-budget-*' -o -name 'cc-monitor-budget-*' \) \
-              -type f -exec chmod 600 {} \; 2>/dev/null
-            chmod 700 "$_pp_cache_dir" 2>/dev/null || true
+            # v0.5.4: body extracted into _pp_cache_clear_all (defined ~line 105)
+            # so `polymath disable` reuses the canonical truncation path. The
+            # helper handles: rm lens+tip+idempotency files, chmod 600 budget
+            # files (v0.4.3 GPT-3 fix), chmod 700 the dir.
+            _pp_cache_clear_all "$_pp_cache_dir"
             printf 'polymath: cleared lens + tip + idempotency caches in %s (budget files preserved and locked to 600)\n' "$_pp_cache_dir"
             ;;
           *)

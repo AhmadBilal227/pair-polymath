@@ -10,6 +10,16 @@ set -u
 # owner-only — they're per-session metadata about which lenses fired.
 umask 077
 
+# v0.5.4 Change 3: honor PP_EXTERNAL_LLM=0 (polymath disable). When paused,
+# emit nothing — cached observations from before the disable must NOT be
+# injected into Claude's context. The user opted out; this is the read-path
+# that actually matters (Claude's prompt context), not just statusline UX.
+# `polymath enable` (PP_EXTERNAL_LLM=1) restores injection on the next prompt.
+# Spec: docs/v0.5.4-pause-ux-spec.md Change 3.
+if [ "${PP_EXTERNAL_LLM:-1}" = "0" ]; then
+  exit 0
+fi
+
 input=$(cat 2>/dev/null || echo '{}')
 session_id=$(echo "$input" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$session_id" ] && exit 0

@@ -2648,6 +2648,11 @@ _pp_now=$(date +%s 2>/dev/null)
 # counter to the loop ceiling so the while-condition is immediately false;
 # mon_topic stays empty; the fallback chain fires the paused branch.
 # Spec: docs/v0.5.4-pause-ux-spec.md Change 2.
+#
+# GPT-5 post-review fix: defend against unset PP_LENS_COUNT (the
+# arithmetic `[ -lt ]` would error with "integer expression expected").
+# Default to 0 when unset/empty.
+: "${PP_LENS_COUNT:=0}"
 [ "${PP_EXTERNAL_LLM:-1}" = "0" ] && _pp_probe_i="$PP_LENS_COUNT"
 while [ "$_pp_probe_i" -lt "$PP_LENS_COUNT" ]; do
   _pp_probe_idx=$(( (_pp_probe_start + _pp_probe_i) % PP_LENS_COUNT ))

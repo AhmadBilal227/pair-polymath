@@ -114,6 +114,18 @@ _pp_cache_clear_all() {
   local _pp_cache_dir="${1:-}"
   [ -z "$_pp_cache_dir" ] && return 1
   [ -d "$_pp_cache_dir" ] || return 0
+  # v0.5.4 post-review (GPT-5): defensive guard against accidental
+  # misconfiguration of PP_CACHE_DIR. The path MUST contain '/cache'
+  # as a component, otherwise the find -exec rm pattern below could
+  # delete files outside the intended cache scope.
+  case "$_pp_cache_dir" in
+    */cache|*/cache/*) : ;;
+    *)
+      printf 'polymath: refusing to clear %s — path must contain /cache\n' \
+        "$_pp_cache_dir" >&2
+      return 1
+      ;;
+  esac
   find "$_pp_cache_dir" -maxdepth 1 \
     \( -name 'cc-monitor-*.txt' -o -name 'cc-tips*' \) \
     -type f ! -name 'cc-monitor-budget-*' -exec rm -f {} \; 2>/dev/null
@@ -944,6 +956,78 @@ HELP
       printf '\n  → For dismiss rules:   polymath dismiss list\n'
       printf '  → Catch up labeling:  polymath oar-label --all-due\n\n'
     fi
+    ;;
+
+  oar)
+    shift
+    _oar_sub="${1:-}"
+    case "$_oar_sub" in
+      bootstrap)
+        shift
+        _ob_cmd="${1:-report}"
+        shift || true
+        _ob_dir=""
+        _ob_json=0
+        _ob_all_projects=0
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --dir)
+              [ -n "${2:-}" ] || { printf 'polymath oar bootstrap: --dir requires a path\n' >&2; exit 2; }
+              _ob_dir="$2"; shift 2 ;;
+            --json) _ob_json=1; shift ;;
+            --all-projects) _ob_all_projects=1; shift ;;
+            -h|--help)
+              cat <<HELP
+polymath oar bootstrap — Historical advisory bootstrap dataset
+
+Usage:
+  polymath oar bootstrap scan [--dir PATH]
+  polymath oar bootstrap report [--json] [--all-projects]
+
+Bootstrap rows are stored separately from live OAR at:
+  \$PP_STATE_DIR/oar/bootstrap-labeled.jsonl
+HELP
+              exit 0
+              ;;
+            *) printf 'polymath oar bootstrap: unknown flag %s\n' "$1" >&2; exit 2 ;;
+          esac
+        done
+        # shellcheck source=lib/oar-bootstrap.sh disable=SC1091
+        . "$PP_ROOT/lib/oar-bootstrap.sh"
+        case "$_ob_cmd" in
+          scan)
+            if [ -n "$_ob_dir" ]; then
+              pp_oar_bootstrap_scan "$_ob_dir"
+            else
+              pp_oar_bootstrap_scan
+            fi
+            ;;
+          report)
+            pp_oar_bootstrap_report "$_ob_json" "$_ob_all_projects"
+            ;;
+          *)
+            printf 'polymath oar bootstrap: unknown subcommand %s\n' "$_ob_cmd" >&2
+            printf '  Try: polymath oar bootstrap scan | report\n' >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      -h|--help|"")
+        cat <<HELP
+polymath oar — Observation/action-rate tools
+
+Usage:
+  polymath oar bootstrap scan [--dir PATH]
+  polymath oar bootstrap report [--json] [--all-projects]
+  polymath oar-label --all-due
+HELP
+        ;;
+      *)
+        printf 'polymath oar: unknown subcommand %s\n' "$_oar_sub" >&2
+        printf '  Try: polymath oar bootstrap scan | report\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
 
   oar-label)

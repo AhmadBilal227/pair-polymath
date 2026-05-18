@@ -107,6 +107,8 @@ teardown() {
     .fixture == "session-01"
     and .mode.eval_mode == true
     and .router.decision_source == "eval_bypass"
+    and .router.shadow_scoring_mode == "scorable_shadow"
+    and (.router.shadow_picked_lenses | type == "array")
     and .prompt_versions["analyst-primary"] == "0.5.4.0"
     and .privacy.raw_transcript_archived == false
   ' "$run_dir/trace.jsonl" >/dev/null
@@ -150,9 +152,57 @@ EOF
     and .privacy.all_flags_false == true
     and .privacy.violation_count == 0
     and .router_scoring_mode == "unscorable_eval_bypass"
+    and .router_expected_missing_count == 1
     and .picked_count_vs_lens_count.mismatched_rows == 0
     and .missing_golden_count_by_fixture.custom == 2
     and .missing_golden_total == 2
+  ' "$run_dir/trace-report.json" >/dev/null
+}
+
+@test "eval: trace-score.sh reports router shadow misses against expectations" {
+  run_dir="$TMP_RUNS/manual-router-miss"
+  mkdir -p "$run_dir"
+  printf 'manual-router-miss\n' > "$TMP_RUNS/latest"
+  cat > "$run_dir/session-01.observations.txt" <<'EOF'
+ENGINEERING|||||||
+PERF_FINOPS|||||||
+COGNITIVE_FLOW|||||||
+EOF
+  cat > "$run_dir/trace.jsonl" <<'EOF'
+{"fixture":"session-01","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.0"},"router":{"decision_source":"eval_bypass","picked_count":7,"shadow_scoring_mode":"scorable_shadow","shadow_picked_lenses":["ENGINEERING","PERF_FINOPS"],"shadow_picked_count":2},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
+EOF
+
+  run bash "$TRACE_SCORE" --run manual-router-miss --runs-dir "$TMP_RUNS" --offline
+  [ "$status" -eq 0 ]
+  jq -e '
+    .router_target_count == 3
+    and .router_miss_count == 1
+    and (.router_target_recall > 0.66 and .router_target_recall < 0.67)
+    and (.router_misses_by_fixture["session-01"] | index("COGNITIVE_FLOW") != null)
+    and .unscorable_router_rows == 0
+  ' "$run_dir/trace-report.json" >/dev/null
+}
+
+@test "eval: trace-score.sh reports perfect router shadow recall" {
+  run_dir="$TMP_RUNS/manual-router-hit"
+  mkdir -p "$run_dir"
+  printf 'manual-router-hit\n' > "$TMP_RUNS/latest"
+  cat > "$run_dir/session-01.observations.txt" <<'EOF'
+ENGINEERING|||||||
+PERF_FINOPS|||||||
+COGNITIVE_FLOW|||||||
+EOF
+  cat > "$run_dir/trace.jsonl" <<'EOF'
+{"fixture":"session-01","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.0"},"router":{"decision_source":"eval_bypass","picked_count":7,"shadow_scoring_mode":"scorable_shadow","shadow_picked_lenses":["ENGINEERING","PERF_FINOPS","COGNITIVE_FLOW"],"shadow_picked_count":3},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
+EOF
+
+  run bash "$TRACE_SCORE" --run manual-router-hit --runs-dir "$TMP_RUNS" --offline
+  [ "$status" -eq 0 ]
+  jq -e '
+    .router_target_count == 3
+    and .router_miss_count == 0
+    and .router_target_recall == 1
+    and (.router_misses_by_fixture["session-01"] | length) == 0
   ' "$run_dir/trace-report.json" >/dev/null
 }
 

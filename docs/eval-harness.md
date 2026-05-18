@@ -19,6 +19,10 @@ bash test/eval/run-eval.sh --all --dry-run
 # and emits a stub report; --cheap uses gpt-5-mini if you do want scoring.
 bash test/eval/score.sh --offline
 
+# Score bounded trace metadata, including eval-router shadow recall when a
+# fixture declares router.expected.json.
+bash test/eval/trace-score.sh --offline
+
 # Inspect the per-lens tallies
 jq '.per_lens' test/eval/runs/latest/score-report.json   # 'latest' is a pointer file
 ```
@@ -36,6 +40,31 @@ jq '.per_lens' test/eval/runs/latest/score-report.json   # 'latest' is a pointer
 
 When `PP_EVAL_MODE` is unset (the normal case), the file behaves identically
 to v0.2.0 — no eval-mode code path runs.
+
+## Router Shadow Recall
+
+Eval mode still fans out to every enabled lens so prompt/lens quality can be
+scored without router false negatives hiding observations. When
+`PP_EVAL_ROUTER_SHADOW=1`, the statusline also runs the router once in shadow
+and writes only bounded metadata to `trace.jsonl`:
+
+- `router.decision_source` remains `eval_bypass` for the real fan-out.
+- `router.shadow_picked_lenses` records the router's shadow pick set.
+- `router.shadow_scoring_mode` is `scorable_shadow` when shadow scoring ran.
+
+Fixtures may add `router.expected.json`:
+
+```json
+{
+  "must_pick": ["ENGINEERING", "PERF_FINOPS"],
+  "nice_to_pick": ["COGNITIVE_FLOW"]
+}
+```
+
+`test/eval/trace-score.sh` compares `must_pick` against
+`router.shadow_picked_lenses` and reports `router_target_recall`,
+`router_miss_count`, and `router_misses_by_fixture`. Missing expectation files
+are advisory, not fatal.
 
 ## Schema
 

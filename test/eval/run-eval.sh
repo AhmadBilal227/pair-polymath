@@ -222,6 +222,7 @@ for fix in $fixtures; do
   mkdir -p "$eval_config_dir"
   {
     printf 'PP_EVAL_MODE=1\n'
+    printf 'PP_EVAL_ROUTER_SHADOW=1\n'
     printf 'PP_TRACE_ENABLE=1\n'
     printf 'PP_EXTERNAL_LLM=%s\n' "$external_llm"
     printf 'PP_PARALLEL_INTERVAL_S=1\n'

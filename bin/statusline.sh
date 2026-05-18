@@ -1296,6 +1296,15 @@ GROUND
         PP_LENS_IDS_AVAILABLE=$(printf '%s\n' "${PP_LENS_IDS[@]}")
         export PP_LENS_IDS_AVAILABLE
         _pp_router_picked=$(pp_router_pick_lenses "$_pp_router_signals" "${transcript_filtered:-}" "${_pp_facts_file:-}" 2>/dev/null)
+        _pp_eval_router_shadow_picked=""
+        _pp_eval_router_shadow_mode="disabled"
+        if [ "${PP_EVAL_MODE:-0}" = "1" ] && [ "${PP_EVAL_ROUTER_SHADOW:-0}" = "1" ]; then
+          _pp_eval_router_shadow_mode="scorable_shadow"
+          _pp_eval_router_shadow_picked=$(
+            PP_EVAL_MODE=0 pp_router_pick_lenses "$_pp_router_signals" "${transcript_filtered:-}" "${_pp_facts_file:-}" 2>/dev/null \
+              || printf ''
+          )
+        fi
         # Build not-picked set (newline-delimited) for surprise inject.
         _pp_router_not_picked=""
         for _l in "${PP_LENS_IDS[@]}"; do
@@ -2421,6 +2430,13 @@ EOF
           printf '%s' "$_pp_trace_picked_lenses" | jq -e 'type == "array"' >/dev/null 2>&1 \
             || _pp_trace_picked_lenses="[]"
 
+          _pp_trace_shadow_picked_lenses=$(printf '%s' "${_pp_eval_router_shadow_picked:-}" \
+            | jq -Rsc 'split("\n") | map(select(length > 0))' 2>/dev/null || printf '[]')
+          printf '%s' "$_pp_trace_shadow_picked_lenses" | jq -e 'type == "array"' >/dev/null 2>&1 \
+            || _pp_trace_shadow_picked_lenses="[]"
+          _pp_trace_shadow_picked_count=$(printf '%s\n' "${_pp_eval_router_shadow_picked:-}" | grep -c . 2>/dev/null || true)
+          case "$_pp_trace_shadow_picked_count" in ''|*[!0-9]*) _pp_trace_shadow_picked_count=0 ;; esac
+
           _pp_trace_router_min="${PP_ROUTER_MIN:-1}"
           _pp_trace_router_max="${PP_ROUTER_MAX:-3}"
           case "$_pp_trace_router_min" in ''|*[!0-9]*) _pp_trace_router_min=1 ;; esac
@@ -2444,10 +2460,13 @@ EOF
             --argjson prompt_versions "$_pp_trace_prompt_versions" \
             --argjson router_signals "$_pp_trace_router_signals" \
             --argjson picked_lenses "$_pp_trace_picked_lenses" \
+            --argjson shadow_picked_lenses "$_pp_trace_shadow_picked_lenses" \
             --argjson router_min "$_pp_trace_router_min" \
             --argjson router_max "$_pp_trace_router_max" \
             --argjson eval_mode "$_pp_trace_eval_mode" \
             --arg decision_source "$_pp_trace_decision_source" \
+            --arg shadow_scoring_mode "${_pp_eval_router_shadow_mode:-disabled}" \
+            --argjson shadow_picked_count "$_pp_trace_shadow_picked_count" \
             --argjson lens_count "${PP_LENS_COUNT:-0}" \
             --argjson picked_count "${_pp_kpi_picked_count:-0}" \
             --argjson cost_usd "${_pp_kpi_cost_usd:-0}" \
@@ -2476,7 +2495,10 @@ EOF
                 decision_source: $decision_source,
                 signals: $router_signals,
                 picked_lenses: $picked_lenses,
-                picked_count: $picked_count
+                picked_count: $picked_count,
+                shadow_scoring_mode: $shadow_scoring_mode,
+                shadow_picked_lenses: $shadow_picked_lenses,
+                shadow_picked_count: $shadow_picked_count
               },
               cycle: {
                 lens_count: $lens_count,

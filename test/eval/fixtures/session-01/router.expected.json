@@ -1,0 +1,4 @@
+{
+  "must_pick": ["ENGINEERING", "PERF_FINOPS", "COGNITIVE_FLOW"],
+  "nice_to_pick": []
+}

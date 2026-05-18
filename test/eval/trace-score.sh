@@ -19,6 +19,7 @@ set -e -u
 _eval_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _runs_dir="$_eval_dir/runs"
 _golden_dir="$_eval_dir/golden"
+_fixtures_dir="$_eval_dir/fixtures"
 target_run=""
 offline=0
 
@@ -85,6 +86,29 @@ missing_json=$(jq -Rn '
 ' "$missing_tsv")
 missing_total=$(printf '%s' "$missing_json" | jq '[.[]] | add // 0')
 
+router_expectations="$_tmp_dir/router-expectations.jsonl"
+: > "$router_expectations"
+router_fixtures=$(jq -r '.fixture // empty' "$trace_input" 2>/dev/null | LC_ALL=C sort -u)
+while IFS= read -r fix_name; do
+  [ -n "$fix_name" ] || continue
+  expected_file="$_fixtures_dir/$fix_name/router.expected.json"
+  if [ -f "$expected_file" ] && jq empty "$expected_file" >/dev/null 2>&1; then
+    jq -c --arg fixture "$fix_name" '
+      {
+        fixture: $fixture,
+        exists: true,
+        must_pick: ((.must_pick // []) | map(select(type == "string"))),
+        nice_to_pick: ((.nice_to_pick // []) | map(select(type == "string")))
+      }
+    ' "$expected_file" >> "$router_expectations"
+  else
+    jq -nc --arg fixture "$fix_name" '{fixture: $fixture, exists: false, must_pick: [], nice_to_pick: []}' \
+      >> "$router_expectations"
+  fi
+done <<EOF
+$router_fixtures
+EOF
+
 trace_summary=$(jq -sc '
   def privacy_ok:
     (.privacy.raw_transcript_archived == false)
@@ -121,6 +145,42 @@ trace_summary=$(jq -sc '
   }
 ' "$trace_input")
 
+router_summary=$(jq -sc --slurpfile expected "$router_expectations" '
+  ($expected // []) as $expectations
+  | def exp_for($fixture):
+      ($expectations | map(select(.fixture == $fixture)) | .[0] // {exists:false,must_pick:[]});
+  def row_eval:
+    . as $row
+    | ($row.fixture // "unknown") as $fixture
+    | exp_for($fixture) as $exp
+    | ($row.router.shadow_picked_lenses // []) as $picked
+    | {
+        fixture: $fixture,
+        expected_exists: ($exp.exists == true),
+        scorable: (($exp.exists == true) and ($row.router.shadow_scoring_mode == "scorable_shadow") and (($picked | type) == "array")),
+        target_count: (($exp.must_pick // []) | length),
+        misses: (($exp.must_pick // []) | map(select(. as $target | ($picked | index($target)) == null)))
+      };
+  (map(row_eval)) as $rows
+  | ($rows | map(select(.expected_exists and (.scorable | not))) | length) as $unscorable
+  | ($rows | map(select(.expected_exists and .scorable))) as $scored
+  | ($scored | map(.target_count) | add // 0) as $target_total
+  | ($scored | map(.misses | length) | add // 0) as $miss_total
+  | {
+      router_target_recall: (if $target_total == 0 then null else (($target_total - $miss_total) / $target_total) end),
+      router_target_count: $target_total,
+      router_miss_count: $miss_total,
+      router_misses_by_fixture: (
+        $scored
+        | group_by(.fixture)
+        | map({key: .[0].fixture, value: (map(.misses[]) | unique)})
+        | from_entries
+      ),
+      router_expected_missing_count: ($rows | map(select(.expected_exists | not)) | length),
+      unscorable_router_rows: $unscorable
+    }
+' "$trace_input")
+
 generated_at=$(date -u +%Y%m%dT%H%M%SZ)
 report_path="$run_dir/trace-report.json"
 report_tmp="${report_path}.tmp.$$"
@@ -129,13 +189,14 @@ jq -n \
   --arg generated_at "$generated_at" \
   --argjson offline "$offline" \
   --argjson trace "$trace_summary" \
+  --argjson router "$router_summary" \
   --argjson missing "$missing_json" \
   --argjson missing_total "$missing_total" \
   '{
     run_ts: $run_ts,
     generated_at: $generated_at,
     offline: $offline
-  } + $trace + {
+  } + $trace + $router + {
     missing_golden_count_by_fixture: $missing,
     missing_golden_total: $missing_total
   }' > "$report_tmp"

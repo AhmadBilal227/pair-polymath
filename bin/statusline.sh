@@ -636,7 +636,14 @@ mkdir -p "$_pp_cache_root" 2>/dev/null
 chmod 700 "$_pp_cache_root" 2>/dev/null || true
 
 cache_age=$(($(date +%s) - $(pp_mtime "$TIP_CACHE" || echo 0)))
+# v0.5.4 Change 3b (post-review CRITICAL fix): when polymath is paused,
+# do NOT spawn the tip-fetch background job. Otherwise `polymath disable`
+# (which truncates the tip cache via _pp_cache_clear_all) would trigger
+# a fresh fetch on the very next 2s statusline tick — including a real
+# `llm` call further down. That's the opposite of "status-only mode."
+# Spec: docs/v0.5.4-pause-ux-spec.md Change 3 (caught by code-review).
 if [ "$_pp_tip_cache_enabled" = "1" ] \
+    && [ "${PP_EXTERNAL_LLM:-1}" != "0" ] \
     && { [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; }; then
   # Atomic lock primitive (Ralph R2 H3). The previous
   # `[ ! -f "$LOCK" ] && touch "$LOCK"` was a check-then-touch TOCTOU race —
@@ -2453,10 +2460,19 @@ EOF
 
           _pp_trace_session_sha8=$(printf '%s' "$session_id" | _pp_sha8)
           _pp_trace_cwd_sha8=$(printf '%s' "${cwd:-}" | _pp_sha8)
+          _pp_trace_project_id=""
+          _pp_trace_project_root_sha8=""
+          if command -v pp_project_identity_json >/dev/null 2>&1; then
+            _pp_trace_project_identity=$(pp_project_identity_json "${cwd:-$PWD}" 2>/dev/null || printf '{}')
+            _pp_trace_project_id=$(printf '%s' "$_pp_trace_project_identity" | jq -r '.project_id // empty' 2>/dev/null)
+            _pp_trace_project_root_sha8=$(printf '%s' "$_pp_trace_project_identity" | jq -r '.project_root_sha8 // empty' 2>/dev/null)
+          fi
           _pp_trace_blob=$(jq -nc \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg session_sha8 "$_pp_trace_session_sha8" \
             --arg cwd_sha8 "$_pp_trace_cwd_sha8" \
+            --arg project_id "$_pp_trace_project_id" \
+            --arg project_root_sha8 "$_pp_trace_project_root_sha8" \
             --argjson prompt_versions "$_pp_trace_prompt_versions" \
             --argjson router_signals "$_pp_trace_router_signals" \
             --argjson picked_lenses "$_pp_trace_picked_lenses" \
@@ -2485,6 +2501,8 @@ EOF
               ts: $ts,
               session_sha8: $session_sha8,
               cwd_sha8: $cwd_sha8,
+              project_id: (if $project_id == "" then null else $project_id end),
+              project_root_sha8: (if $project_root_sha8 == "" then null else $project_root_sha8 end),
               mode: {
                 eval_mode: $eval_mode
               },
@@ -2705,6 +2723,16 @@ tip_valid=0
 mon_valid=0
 [ -n "$tip_topic" ] && [ ${#tip_topic} -ge 20 ] && tip_valid=1
 [ -n "$mon_topic" ] && [ ${#mon_topic} -ge 20 ] && mon_valid=1
+# v0.5.4 Change 1b (post-review CRITICAL fix): when paused, force BOTH
+# tip_valid AND mon_valid to 0 so the line-2 rendering chain falls
+# through to the paused-fallback branch. Change 2's _pp_probe_i clamp
+# only suppressed mon_topic; a fresh tip_topic could still pre-empt
+# the paused branch. Spec: docs/v0.5.4-pause-ux-spec.md Change 1
+# (caught by code-review).
+if [ "${PP_EXTERNAL_LLM:-1}" = "0" ]; then
+  tip_valid=0
+  mon_valid=0
+fi
 
 topic_line=""
 body_line=""

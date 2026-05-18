@@ -96,6 +96,34 @@ _pp_seed_cache() {
   [[ "$output" == *"polymath enable to resume"* ]]
 }
 
+@test "statusline AC2b: paused suppresses fresh TIP cache (regression guard)" {
+  # Code-reviewer CRITICAL: pre-fix, a fresh cc-tips cache could pre-empt
+  # the paused fallback because tip_valid was still 1. The post-review fix
+  # forces both tip_valid + mon_valid to 0 when paused. Pin it.
+  PP_EXTERNAL_LLM=0
+  export PP_EXTERNAL_LLM
+  # Seed a tip cache. TIP_CACHE path resolution lives in lib/config.sh;
+  # the project-keyed dir lives under PP_CACHE_DIR. Drop a tip file in
+  # the most-likely location (project-specific subdir) AND in the top
+  # cache dir; statusline picks whichever it resolves to.
+  printf 'BRIGHT idea — a stale tip that must not appear when paused\n' > "$PP_CACHE_DIR/cc-tips.txt"
+  run bash -c 'cat "$PP_ROOT/test/fixtures/stdin-sample.json" | bash "$PP_ROOT/bin/statusline.sh"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paused"* ]]
+  [[ "$output" == *"LLM cycle disabled"* ]]
+  [[ "$output" != *"BRIGHT idea"* ]]
+}
+
+@test "statusline AC3c: paused suppresses tip-fetch (no llm spawn when disabled)" {
+  # Code-reviewer CRITICAL: pre-fix, polymath disable cleared the tip
+  # cache; next statusline tick saw empty cache and spawned a background
+  # llm call. That's the OPPOSITE of pause. Verify the gate now prevents
+  # this by inspecting the source for the PP_EXTERNAL_LLM guard ON the
+  # tip-fetch entry.
+  grep -qE 'PP_EXTERNAL_LLM.*!= "0".*\\$|tip_cache_enabled.*PP_EXTERNAL_LLM' "$PP_ROOT/bin/statusline.sh" || \
+    grep -B2 'mkdir "\$TIP_LOCK_DIR"' "$PP_ROOT/bin/statusline.sh" | grep -q 'PP_EXTERNAL_LLM'
+}
+
 @test "inject-hook AC3b: gate is unset/1 leaves the hook proceeding past the gate" {
   # With PP_EXTERNAL_LLM unset or =1, the hook should NOT early-exit at the
   # gate. We verify by patching the script to fail-loud right after the gate

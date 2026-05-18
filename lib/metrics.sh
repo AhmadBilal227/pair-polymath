@@ -506,6 +506,53 @@ pp_kpi_emit_cycle() {
   printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
 }
 
+# === v0.5.4 trace cycle emitter ==============================================
+# pp_trace_emit_cycle JSON_BLOB
+#
+# Appends one bounded JSON object to trace-cycle.jsonl when PP_TRACE_ENABLE=1.
+# Trace rows are for offline harness/debugging only: callers must pass compact
+# metadata, not prompt payloads or transcript previews. This transport still
+# guards shape and size so a caller bug cannot turn the trace into an archive.
+#
+# Activation rules:
+#   1. PP_TRACE_FORCE_DISABLE=1 -> always skip.
+#   2. PP_TRACE_ENABLE=1        -> emit.
+#   3. otherwise                -> skip.
+#
+# Privacy/size behavior:
+#   - accepts only valid JSON objects
+#   - drops rows over PP_TRACE_ROW_MAX_CHARS (default 8192)
+#   - rotates at PP_TRACE_MAX_BYTES or PP_LOG_MAX_BYTES
+#   - chmods dir/file to owner-only
+#   - fails open; telemetry never blocks a statusline cycle
+pp_trace_emit_cycle() {
+  [ "${PP_TRACE_FORCE_DISABLE:-0}" = "1" ] && return 0
+  [ "${PP_TRACE_ENABLE:-0}" = "1" ] || return 0
+  local _raw="${1:-}"
+  [ -n "$_raw" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  local _blob
+  _blob=$(printf '%s' "$_raw" | jq -c 'select(type == "object")' 2>/dev/null) || return 0
+  [ -n "$_blob" ] || return 0
+
+  local _row_max="${PP_TRACE_ROW_MAX_CHARS:-8192}"
+  case "$_row_max" in ''|*[!0-9]*) _row_max=8192 ;; esac
+  local _bytes
+  _bytes=$(printf '%s' "$_blob" | LC_ALL=C wc -c | tr -d ' ')
+  case "$_bytes" in ''|*[!0-9]*) _bytes=0 ;; esac
+  [ "$_bytes" -gt "$_row_max" ] && return 0
+
+  local _file="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/trace-cycle.jsonl"
+  local _max="${PP_TRACE_MAX_BYTES:-${PP_LOG_MAX_BYTES:-10485760}}"
+  case "$_max" in ''|*[!0-9]*) _max=10485760 ;; esac
+  mkdir -p "$(dirname "$_file")" 2>/dev/null || return 0
+  chmod 700 "$(dirname "$_file")" 2>/dev/null || true
+  _pp_rotate_jsonl "$_file" "$_max"
+  printf '%s\n' "$_blob" >> "$_file" 2>/dev/null || true
+  chmod 600 "$_file" 2>/dev/null || true
+}
+
 # === v0.5.1.1 Task 12 (Stage C): per-lens KPI accumulators ==================
 # pp_kpi_emit_cycle stays pure transport; this helper just clamps the
 # would_be_ineligible_count to [0, PASS_COUNT] so caller bugs can't corrupt

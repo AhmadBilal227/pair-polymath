@@ -2384,7 +2384,114 @@ EOF
                   '. + {schema_version: $sv, by_lens: $bylens}' 2>/dev/null \
           || printf '%s' "$_pp_kpi_blob")
       fi
-      [ -n "$_pp_kpi_blob" ] && pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
+      if [ -n "$_pp_kpi_blob" ]; then
+        # === v0.5.4: bounded trace capture ================================
+        # Trace rows are intentionally separate from the privacy log. They
+        # are historical, so they must contain only enums/counts/hashes and
+        # prompt versions — never transcript text, grounded facts, tool
+        # summaries, observation bodies, or payload previews.
+        if [ "${PP_TRACE_ENABLE:-0}" = "1" ] && [ "${PP_TRACE_FORCE_DISABLE:-0}" != "1" ]; then
+          _pp_trace_prompt_versions="{}"
+          _pp_trace_prompt_versions=$(find "$PP_ROOT/prompts/manifests" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null \
+            | LC_ALL=C sort \
+            | while IFS= read -r _pp_trace_manifest_file; do
+                [ -z "$_pp_trace_manifest_file" ] && continue
+                jq -c 'select(.id and .version) | {key:.id, value:.version}' \
+                  "$_pp_trace_manifest_file" 2>/dev/null
+              done \
+            | jq -sc 'from_entries' 2>/dev/null || printf '{}')
+          printf '%s' "$_pp_trace_prompt_versions" | jq -e 'type == "object"' >/dev/null 2>&1 \
+            || _pp_trace_prompt_versions="{}"
+
+          _pp_trace_router_signals=$(printf '%s' "${_pp_router_signals:-}" | jq -cs '
+            (.[0] // {}) as $s
+            | {
+                phase: ($s.phase // "unknown"),
+                phase_source: ($s.phase_source // "unknown"),
+                confidence: ($s.confidence // "unknown"),
+                outcome: ($s.outcome // "unknown"),
+                tone: ($s.tone // "unknown"),
+                session_age_min: ($s.session_age_min // 0),
+                budget_remaining_pct: ($s.budget_remaining_pct // 100),
+                last_test_failed: ($s.last_test_failed // false),
+                recent_edit_density: ($s.recent_edit_density // 0)
+              }' 2>/dev/null || printf '{}')
+          printf '%s' "$_pp_trace_router_signals" | jq -e 'type == "object"' >/dev/null 2>&1 \
+            || _pp_trace_router_signals="{}"
+
+          _pp_trace_picked_lenses=$(printf '%s' "${_pp_router_picked:-}" \
+            | jq -Rsc 'split("\n") | map(select(length > 0))' 2>/dev/null || printf '[]')
+          printf '%s' "$_pp_trace_picked_lenses" | jq -e 'type == "array"' >/dev/null 2>&1 \
+            || _pp_trace_picked_lenses="[]"
+
+          _pp_trace_router_min="${PP_ROUTER_MIN:-1}"
+          _pp_trace_router_max="${PP_ROUTER_MAX:-3}"
+          case "$_pp_trace_router_min" in ''|*[!0-9]*) _pp_trace_router_min=1 ;; esac
+          case "$_pp_trace_router_max" in ''|*[!0-9]*) _pp_trace_router_max=3 ;; esac
+
+          _pp_trace_session_sha8=$(printf '%s' "$session_id" | _pp_sha8)
+          _pp_trace_cwd_sha8=$(printf '%s' "${cwd:-}" | _pp_sha8)
+          _pp_trace_blob=$(jq -nc \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg session_sha8 "$_pp_trace_session_sha8" \
+            --arg cwd_sha8 "$_pp_trace_cwd_sha8" \
+            --argjson prompt_versions "$_pp_trace_prompt_versions" \
+            --argjson router_signals "$_pp_trace_router_signals" \
+            --argjson picked_lenses "$_pp_trace_picked_lenses" \
+            --argjson router_min "$_pp_trace_router_min" \
+            --argjson router_max "$_pp_trace_router_max" \
+            --argjson lens_count "${PP_LENS_COUNT:-0}" \
+            --argjson picked_count "${_pp_kpi_picked_count:-0}" \
+            --argjson cost_usd "${_pp_kpi_cost_usd:-0}" \
+            --argjson retry_count "${_pp_kpi_retry_count:-0}" \
+            --argjson retry_accepted "${_pp_kpi_retry_accepted:-0}" \
+            --argjson retry_acceptance_rate "${_pp_kpi_accept_rate:-0}" \
+            --argjson inv_count "${_pp_kpi_inv_count:-0}" \
+            --argjson verdict_total_drops "${_pp_kpi_drops:-0}" \
+            --argjson halluc_pre_drop_rate "${_pp_kpi_halluc_pre_rate:-0}" \
+            --argjson halluc_post_would_drop_rate "${_pp_kpi_halluc_post_rate:-0}" \
+            --arg cycle_outcome "${_pp_kpi_outcome:-success}" \
+            --argjson eligible "${_pp_kpi_eligible:-0}" \
+            --argjson slo_breach "${_pp_kpi_slo_breach:-0}" \
+            '{
+              schema_version: 1,
+              ts: $ts,
+              session_sha8: $session_sha8,
+              cwd_sha8: $cwd_sha8,
+              prompt_versions: $prompt_versions,
+              router: {
+                min: $router_min,
+                max: $router_max,
+                signals: $router_signals,
+                picked_lenses: $picked_lenses,
+                picked_count: $picked_count
+              },
+              cycle: {
+                lens_count: $lens_count,
+                eligible: $eligible,
+                cost_usd: $cost_usd,
+                retry_count: $retry_count,
+                retry_accepted: $retry_accepted,
+                retry_acceptance_rate: $retry_acceptance_rate,
+                inv_count: $inv_count,
+                verdict_total_drops: $verdict_total_drops,
+                halluc_pre_drop_rate: $halluc_pre_drop_rate,
+                halluc_post_would_drop_rate: $halluc_post_would_drop_rate,
+                cycle_outcome: $cycle_outcome,
+                slo_breach: $slo_breach
+              },
+              privacy: {
+                raw_transcript_archived: false,
+                grounded_facts_archived: false,
+                observation_bodies_archived: false,
+                payload_previews_archived: false
+              }
+            }' 2>/dev/null || printf '')
+          [ -n "$_pp_trace_blob" ] && pp_trace_emit_cycle "$_pp_trace_blob" 2>/dev/null || true
+        fi
+
+        pp_kpi_emit_cycle "$_pp_kpi_blob" 2>/dev/null || true
+      fi
 
       # === B2 (v0.5.1): auto-rollback SLO check =============================
       # After the KPI line for THIS cycle is written, evaluate the rolling

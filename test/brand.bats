@@ -130,3 +130,23 @@ teardown() {
   line_count=$(printf '%s\n' "$result" | grep -c '█')
   [ "$line_count" -ge 5 ]
 }
+
+@test "brand AC6: constellation fires in statusline when cycle is in-flight" {
+  # Wire test: simulate a fresh cycle lock (mkdir at PP_LOCK), then
+  # invoke statusline and assert the constellation frame appears.
+  # The session_id determines PP_LOCK path: /tmp/pp-fetch-${session_id}.lock
+  local _sid
+  _sid=$(jq -r '.session_id // "unknown"' < "$PP_ROOT/test/fixtures/stdin-sample.json")
+  local _lock="/tmp/pp-fetch-${_sid}.lock"
+  rm -rf "$_lock" 2>/dev/null
+  mkdir "$_lock"
+  trap 'rm -rf "$_lock" 2>/dev/null || true' EXIT
+  unset PP_EXTERNAL_LLM
+  run bash -c 'cat "$PP_ROOT/test/fixtures/stdin-sample.json" | bash "$PP_ROOT/bin/statusline.sh"'
+  [ "$status" -eq 0 ]
+  # Constellation glyph OR "thinking" copy should appear.
+  [[ "$output" == *"thinking"* ]] || \
+    [[ "$output" == *"⠁"* ]] || [[ "$output" == *"⠂"* ]] || \
+    [[ "$output" == *"⠄"* ]] || [[ "$output" == *"⡀"* ]]
+  rm -rf "$_lock"
+}

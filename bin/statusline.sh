@@ -2798,6 +2798,19 @@ else
   _idle_pct="${_pp_budget_pct:-100}"
   _idle_red="${_pp_red_used:-95}"
   _idle_warn="${_pp_warn_used:-80}"
+  # v0.5.5 brand: cycle-in-flight constellation. When a polymath LLM cycle
+  # is currently running (mkdir-lock at $PP_LOCK exists + fresh), show the
+  # 4-frame braille loading mark instead of the generic "idle — no fresh
+  # insight" copy. Says "many minds quietly attending" while the cycle is
+  # in flight. Spec: docs/v0.5.5-brand-spec.md. Only fires when active
+  # (paused branch below wins if PP_EXTERNAL_LLM=0).
+  _pp_cycle_inflight=0
+  if [ "${PP_EXTERNAL_LLM:-1}" != "0" ] && [ -d "${PP_LOCK:-/tmp/pp-fetch-nope}" ]; then
+    _pp_inflight_age=$(( $(date +%s) - $(pp_mtime "$PP_LOCK" 2>/dev/null || echo 0) ))
+    _pp_inflight_stale=$(_pp_cycle_lock_stale_seconds 2>/dev/null || echo 600)
+    [ "$_pp_inflight_age" -lt "$_pp_inflight_stale" ] && _pp_cycle_inflight=1
+  fi
+
   if [ "${PP_EXTERNAL_LLM:-1}" = "0" ]; then
     # v0.5.4 Change 1: visible paused state. Highest priority — paused
     # supersedes budget messages because the user explicitly opted out
@@ -2812,6 +2825,16 @@ else
       _pp_brand_paused=""
     fi
     topic_line="${aurora_hue:-}◌${R} ${DIM_A}${_pp_brand_paused}paused — LLM cycle disabled (polymath enable to resume)${R}"
+  elif [ "$_pp_cycle_inflight" = "1" ] && type pp_brand_loading >/dev/null 2>&1; then
+    # v0.5.5 constellation: cycle is running, no observation surfaced yet.
+    # 4-frame braille (⠁ ⠂ ⠄ ⡀), 1s per frame, wall-clock cycled.
+    _pp_brand_frame="$(pp_brand_loading)"
+    if type pp_brand_sigil_cycled >/dev/null 2>&1; then
+      _pp_brand_atom="$(pp_brand_sigil_cycled)"
+    else
+      _pp_brand_atom=""
+    fi
+    topic_line="${aurora_hue:-}${_pp_brand_frame}${R} ${DIM_A}${_pp_brand_atom} thinking — lens cycle in flight${R}"
   elif [ "$_idle_pct" -le "$(( 100 - _idle_red ))" ]; then
     # v0.4.1 review-fix (M1, GPT #4): "reached" implied 0%; reword to
     # match actual state. "near cap" + "% headroom" stays self-consistent

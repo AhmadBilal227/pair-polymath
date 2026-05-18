@@ -10,6 +10,7 @@ setup() {
   REPO_ROOT="$(cd "$EVAL_DIR/../.." && pwd)"
   RUN_EVAL="$EVAL_DIR/run-eval.sh"
   SCORE="$EVAL_DIR/score.sh"
+  TRACE_SCORE="$EVAL_DIR/trace-score.sh"
   # Isolated runs dir per test so concurrent bats workers don't race.
   TMP_RUNS=$(mktemp -d "${TMPDIR:-/tmp}/pp-eval-bats.XXXXXX")
 }
@@ -42,6 +43,10 @@ teardown() {
   [ -x "$SCORE" ]
 }
 
+@test "eval: trace-score.sh exists and is executable" {
+  [ -x "$TRACE_SCORE" ]
+}
+
 @test "eval: run-eval.sh --help exits 0 and prints usage" {
   run bash "$RUN_EVAL" --help
   [ "$status" -eq 0 ]
@@ -52,6 +57,12 @@ teardown() {
   run bash "$SCORE" --help
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'eval scorer'
+}
+
+@test "eval: trace-score.sh --help exits 0 and prints usage" {
+  run bash "$TRACE_SCORE" --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'deterministic eval trace reporter'
 }
 
 @test "eval: run-eval.sh --dry-run --all completes cleanly" {
@@ -78,8 +89,30 @@ teardown() {
   run_dir=$(find "$TMP_RUNS" -mindepth 1 -maxdepth 1 -type d | head -1)
   [ -f "$run_dir/run-summary.json" ]
   # Top-level keys
-  jq -e '.run_ts and .fixtures_processed and .errors_per_fixture and .total_observations' \
+  jq -e '.run_ts and .fixtures_processed and .errors_per_fixture and .total_observations
+         and .trace_rows_per_fixture and (.total_trace_rows != null)' \
     "$run_dir/run-summary.json"
+}
+
+@test "eval: run-eval.sh preserves trace rows when a cycle runs" {
+  fakebin=$(mktemp -d "${TMPDIR:-/tmp}/pp-eval-fakebin.XXXXXX")
+  printf '#!/bin/sh\nprintf "SILENT\\n"\n' > "$fakebin/llm"
+  chmod +x "$fakebin/llm"
+
+  PATH="$fakebin:$PATH" bash "$RUN_EVAL" --fixture session-01 --runs-dir "$TMP_RUNS"
+  run_dir=$(find "$TMP_RUNS" -mindepth 1 -maxdepth 1 -type d | head -1)
+  [ -f "$run_dir/session-01.trace.jsonl" ]
+  [ -f "$run_dir/trace.jsonl" ]
+  jq -e '
+    .fixture == "session-01"
+    and .mode.eval_mode == true
+    and .router.decision_source == "eval_bypass"
+    and .prompt_versions["analyst-primary"] == "0.5.4.0"
+    and .privacy.raw_transcript_archived == false
+  ' "$run_dir/trace.jsonl" >/dev/null
+  jq -e '.trace_rows_per_fixture["session-01"] >= 1 and .total_trace_rows >= 1' \
+    "$run_dir/run-summary.json" >/dev/null
+  rm -rf "$fakebin"
 }
 
 @test "eval: run-eval.sh rejects unknown flag" {
@@ -93,6 +126,34 @@ teardown() {
   [ "$status" -eq 0 ]
   run_dir=$(find "$TMP_RUNS" -mindepth 1 -maxdepth 1 -type d | head -1)
   [ -f "$run_dir/score-report.json" ]
+}
+
+@test "eval: trace-score.sh reports prompt versions, privacy, eval bypass, and missing goldens" {
+  run_dir="$TMP_RUNS/manual-trace"
+  mkdir -p "$run_dir"
+  printf 'manual-trace\n' > "$TMP_RUNS/latest"
+  cat > "$run_dir/custom.observations.txt" <<'EOF'
+ENGINEERING|||||||
+UNKNOWN_LENS|||||||
+EOF
+  cat > "$run_dir/trace.jsonl" <<'EOF'
+{"fixture":"custom","mode":{"eval_mode":true},"prompt_versions":{"router":"0.5.4.0","analyst-primary":"0.5.4.0"},"router":{"decision_source":"eval_bypass","picked_count":7},"cycle":{"lens_count":7},"privacy":{"raw_transcript_archived":false,"grounded_facts_archived":false,"observation_bodies_archived":false,"payload_previews_archived":false}}
+EOF
+
+  run bash "$TRACE_SCORE" --run manual-trace --runs-dir "$TMP_RUNS" --offline
+  [ "$status" -eq 0 ]
+  [ -f "$run_dir/trace-report.json" ]
+  jq -e '
+    .total_trace_rows == 1
+    and .prompt_versions_seen.router == "0.5.4.0"
+    and .trace_rows_per_fixture.custom == 1
+    and .privacy.all_flags_false == true
+    and .privacy.violation_count == 0
+    and .router_scoring_mode == "unscorable_eval_bypass"
+    and .picked_count_vs_lens_count.mismatched_rows == 0
+    and .missing_golden_count_by_fixture.custom == 2
+    and .missing_golden_total == 2
+  ' "$run_dir/trace-report.json" >/dev/null
 }
 
 @test "eval: score-report.json has the documented schema" {
@@ -134,12 +195,12 @@ EOF
     PP_EVAL_MODE=1 PP_EXTERNAL_LLM=0 PP_PARALLEL_INTERVAL_S=1 PP_IDLE_THRESHOLD_S=999999 \
     bash -c "bash '$REPO_ROOT/bin/statusline.sh' < '$sandbox/input.json'"
   [ "$status" -eq 0 ]
-  # Read the expected lens count from the registry directly (count .json
-  # files in lenses/). Sourcing lib/lens-loader.sh inside `bash -c` was
-  # fragile cross-platform — set -u + PP_ROOT scoping made $PP_LENS_COUNT
-  # empty on Ubuntu bash 5 even when statusline.sh's own copy worked
-  # fine. Counting files is a more direct surrogate for the same value.
-  expected_count=$(find "$REPO_ROOT/lenses" -maxdepth 1 -name "*.json" -type f 2>/dev/null | wc -l | tr -d ' ')
+  # Count the enabled lens set, not every lens file. Activation added
+  # foothold lenses that are available but not part of the default legacy
+  # active set unless lenses-enabled.txt selects them.
+  expected_count=$(HOME="$sandbox" CLAUDE_DIR="$sandbox/.claude" \
+    PP_CACHE_DIR="$sandbox/.claude/cache" PP_STATE_DIR="$sandbox/.claude/pair-polymath" \
+    bash -c '. "$1/lib/config.sh"; . "$1/lib/lens-loader.sh"; pp_load_lenses >/dev/null || exit 1; printf "%s\n" "$PP_LENS_COUNT"' _ "$REPO_ROOT")
   line_count=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
   if [ "$line_count" -ne "$expected_count" ]; then
     printf 'line_count=%s expected_count=%s output:\n%s\n' "$line_count" "$expected_count" "$output" >&2

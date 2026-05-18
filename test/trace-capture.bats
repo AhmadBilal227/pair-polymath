@@ -91,7 +91,9 @@ EOF
     .schema_version == 1
     and (.session_sha8 | test("^[0-9a-f]{8}$"))
     and (.cwd_sha8 | test("^[0-9a-f]{8}$"))
+    and .mode.eval_mode == true
     and .prompt_versions["analyst-primary"] == "0.5.4.0"
+    and .router.decision_source == "eval_bypass"
     and (.router.signals | type == "object")
     and (.router.picked_lenses | type == "array")
     and (.cycle.lens_count >= 1)

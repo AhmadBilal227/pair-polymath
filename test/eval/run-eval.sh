@@ -3,8 +3,9 @@
 #
 # Replays each fixture under test/eval/fixtures/ through bin/statusline.sh with
 # PP_EVAL_MODE=1 and captures the raw lens observations to
-# test/eval/runs/<ts>/<fixture>.observations.txt. Emits a JSON run-summary at
-# test/eval/runs/<ts>/run-summary.json.
+# test/eval/runs/<ts>/<fixture>.observations.txt. When the cycle runs, also
+# preserves bounded trace metadata as <fixture>.trace.jsonl and trace.jsonl.
+# Emits a JSON run-summary at test/eval/runs/<ts>/run-summary.json.
 #
 # Flags:
 #   --fixture <name>   Run only the named fixture (e.g. session-01)
@@ -18,7 +19,9 @@
 # Output schema (run-summary.json):
 #   { "run_ts": "20260512T...", "fixtures_processed": N,
 #     "errors_per_fixture": { "<fixture>": <int>, ... },
-#     "total_observations": N }
+#     "total_observations": N,
+#     "trace_rows_per_fixture": { "<fixture>": <int>, ... },
+#     "total_trace_rows": N }
 #
 # Bash 3.2 portable. No mapfile, no associative-array sugar.
 
@@ -110,8 +113,11 @@ mkdir -p "$run_dir"
 # so cache files don't leak across runs.
 fixtures_processed=0
 total_observations=0
+total_trace_rows=0
 errors_json="{"
 errors_first=1
+trace_rows_json="{"
+trace_rows_first=1
 
 for fix in $fixtures; do
   fix_dir="$_fixtures_dir/$fix"
@@ -207,6 +213,22 @@ for fix in $fixtures; do
   external_llm=1
   [ "$dry_run" = "1" ] && external_llm=0
 
+  # lib/config.sh loads config/default.env before user.env, so process-env
+  # overrides alone are not enough for eval controls whose defaults are set
+  # there (notably PP_EXTERNAL_LLM). Write the fixture's overrides into the
+  # sandboxed user config so dry-run is genuinely zero-LLM and trace capture
+  # is consistently enabled for non-dry eval cycles.
+  eval_config_dir="$sandbox/.claude/pair-polymath/config"
+  mkdir -p "$eval_config_dir"
+  {
+    printf 'PP_EVAL_MODE=1\n'
+    printf 'PP_TRACE_ENABLE=1\n'
+    printf 'PP_EXTERNAL_LLM=%s\n' "$external_llm"
+    printf 'PP_PARALLEL_INTERVAL_S=1\n'
+    printf 'PP_IDLE_THRESHOLD_S=999999\n'
+  } > "$eval_config_dir/user.env"
+  chmod 600 "$eval_config_dir/user.env" 2>/dev/null || true
+
   # Preserve llm's config path so the sandbox HOME doesn't break key
   # resolution. Without LLM_USER_PATH, llm under the sandboxed HOME finds
   # no keys.json and either fails with 429 'insufficient_quota' from an
@@ -228,6 +250,7 @@ for fix in $fixtures; do
     PP_CACHE_DIR="$sandbox/.claude/cache" \
     PP_STATE_DIR="$sandbox/.claude/pair-polymath" \
     PP_EVAL_MODE=1 \
+    PP_TRACE_ENABLE=1 \
     PP_EXTERNAL_LLM="$external_llm" \
     PP_PARALLEL_INTERVAL_S=1 \
     PP_IDLE_THRESHOLD_S=999999 \
@@ -244,11 +267,28 @@ for fix in $fixtures; do
     fix_obs=$(awk -F'\\|\\|\\|' 'NF>=4 && length($4)>0 {n++} END{print n+0}' "$obs_file")
   fi
 
+  # Preserve bounded trace rows before deleting the sandbox. Per-fixture files
+  # keep the raw emitted rows; trace.jsonl adds fixture=<name> so reports can
+  # aggregate across a whole run without opening every sandbox artifact.
+  fix_trace_rows=0
+  trace_tag_err=0
+  trace_src="$sandbox/.claude/cache/trace-cycle.jsonl"
+  if [ -s "$trace_src" ]; then
+    fix_trace_file="$run_dir/${fix}.trace.jsonl"
+    cp "$trace_src" "$fix_trace_file"
+    fix_trace_rows=$(awk 'END{print NR + 0}' "$trace_src")
+    if ! jq -c --arg fixture "$fix" '. + {fixture: $fixture}' "$trace_src" >> "$run_dir/trace.jsonl" 2>/dev/null; then
+      printf 'run-eval.sh: failed to tag trace rows for %s\n' "$fix" >&2
+      trace_tag_err=1
+    fi
+  fi
+
   # Error count = nonzero exit OR stderr non-empty. Keep it simple — the JSON
   # summary records both signals indirectly via errors_per_fixture.
   fix_err=0
   [ "$rc" -ne 0 ] && fix_err=1
   [ -s "$err_file" ] && fix_err=$((fix_err + 1))
+  [ "$trace_tag_err" -ne 0 ] && fix_err=$((fix_err + 1))
 
   if [ "$errors_first" = "1" ]; then
     errors_first=0
@@ -257,14 +297,23 @@ for fix in $fixtures; do
   fi
   errors_json="${errors_json}\"$fix\": $fix_err"
 
+  if [ "$trace_rows_first" = "1" ]; then
+    trace_rows_first=0
+  else
+    trace_rows_json="${trace_rows_json},"
+  fi
+  trace_rows_json="${trace_rows_json}\"$fix\": $fix_trace_rows"
+
   fixtures_processed=$((fixtures_processed + 1))
   total_observations=$((total_observations + fix_obs))
+  total_trace_rows=$((total_trace_rows + fix_trace_rows))
 
   # Clean the sandbox, leave only run-dir artifacts.
   rm -rf "$sandbox"
 done
 
 errors_json="${errors_json}}"
+trace_rows_json="${trace_rows_json}}"
 
 # Atomic write of the run summary. tmp+mv discipline (PR #19/#25 lesson).
 summary_path="$run_dir/run-summary.json"
@@ -274,7 +323,9 @@ cat > "$summary_tmp" <<EOF
   "run_ts": "$run_ts",
   "fixtures_processed": $fixtures_processed,
   "errors_per_fixture": $errors_json,
+  "trace_rows_per_fixture": $trace_rows_json,
   "total_observations": $total_observations,
+  "total_trace_rows": $total_trace_rows,
   "dry_run": $dry_run
 }
 EOF

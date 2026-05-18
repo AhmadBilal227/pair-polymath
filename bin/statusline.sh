@@ -2429,6 +2429,15 @@ EOF
           case "$_pp_trace_router_min" in ''|*[!0-9]*) _pp_trace_router_min=1 ;; esac
           case "$_pp_trace_router_max" in ''|*[!0-9]*) _pp_trace_router_max=3 ;; esac
 
+          _pp_trace_eval_mode=false
+          _pp_trace_decision_source="router"
+          if [ "${PP_EVAL_MODE:-0}" = "1" ]; then
+            _pp_trace_eval_mode=true
+            _pp_trace_decision_source="eval_bypass"
+          elif [ "${PP_ROUTER_ENABLE:-0}" != "1" ]; then
+            _pp_trace_decision_source="router_disabled"
+          fi
+
           _pp_trace_session_sha8=$(printf '%s' "$session_id" | _pp_sha8)
           _pp_trace_cwd_sha8=$(printf '%s' "${cwd:-}" | _pp_sha8)
           _pp_trace_blob=$(jq -nc \
@@ -2440,6 +2449,8 @@ EOF
             --argjson picked_lenses "$_pp_trace_picked_lenses" \
             --argjson router_min "$_pp_trace_router_min" \
             --argjson router_max "$_pp_trace_router_max" \
+            --argjson eval_mode "$_pp_trace_eval_mode" \
+            --arg decision_source "$_pp_trace_decision_source" \
             --argjson lens_count "${PP_LENS_COUNT:-0}" \
             --argjson picked_count "${_pp_kpi_picked_count:-0}" \
             --argjson cost_usd "${_pp_kpi_cost_usd:-0}" \
@@ -2458,10 +2469,14 @@ EOF
               ts: $ts,
               session_sha8: $session_sha8,
               cwd_sha8: $cwd_sha8,
+              mode: {
+                eval_mode: $eval_mode
+              },
               prompt_versions: $prompt_versions,
               router: {
                 min: $router_min,
                 max: $router_max,
+                decision_source: $decision_source,
                 signals: $router_signals,
                 picked_lenses: $picked_lenses,
                 picked_count: $picked_count

@@ -136,6 +136,30 @@ doctor_check_statusline_wired() {
   return 1
 }
 
+# v0.5.5: subagentStatusLine wires the ⚛ brand on polymath-spawned subagent
+# rows. Yellow (not red) when missing — pre-v0.5.5 installs simply don't
+# brand subagent rows, which is a cosmetic regression, not a correctness one.
+doctor_check_subagent_statusline_wired() {
+  local settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
+  [ -f "$settings" ] || { _pp_doctor_yellow "subagentStatusLine wired" "skipped (no settings.json)"; return 1; }
+  local cmd
+  cmd=$(jq -r '.subagentStatusLine?.command // ""' "$settings" 2>/dev/null)
+  if [ -z "$cmd" ]; then
+    _pp_doctor_yellow "subagentStatusLine wired" "not set (pre-v0.5.5 install; re-run installer to enable brand glyph on subagent rows)"
+    return 1
+  fi
+  local extracted want_real got_real
+  extracted=$(_pp_doctor_extract_path "$cmd")
+  want_real=$(cd "$PP_ROOT" 2>/dev/null && realpath "hooks/subagent-statusline.sh" 2>/dev/null)
+  got_real=$(realpath "$extracted" 2>/dev/null)
+  if [ -n "$want_real" ] && [ "$got_real" = "$want_real" ]; then
+    _pp_doctor_green "subagentStatusLine wired" "→ $extracted"
+    return 0
+  fi
+  _pp_doctor_yellow "subagentStatusLine wired" "points to a different script: $extracted"
+  return 1
+}
+
 doctor_check_hooks_wired() {
   local settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
   [ -f "$settings" ] || { _pp_doctor_yellow "hooks wired" "skipped"; return 1; }
@@ -892,7 +916,7 @@ pp_doctor_run() {
 
   local green=0 yellow=0 red=0
   local checks="doctor_check_bash doctor_check_jq doctor_check_llm doctor_check_openai_key \
-                doctor_check_settings_json doctor_check_statusline_wired doctor_check_hooks_wired \
+                doctor_check_settings_json doctor_check_statusline_wired doctor_check_subagent_statusline_wired doctor_check_hooks_wired \
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
                 doctor_check_prompts doctor_check_prompt_contracts doctor_check_transcript_libs doctor_check_router_libs \
                 doctor_check_coreutils doctor_check_budget_pressure \

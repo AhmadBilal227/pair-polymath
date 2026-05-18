@@ -3,6 +3,35 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.5.1] — 2026-05-19
+
+Finishes the three brand touchpoints v0.5.5.0 explicitly deferred ("helpers shipped; call-site wiring next release") and lands the first scheduled-job surface (`polymath auto-update`). All v0.5.5 spec'd surfaces are now wired.
+
+### Added
+
+- `polymath auto-update {enable|disable|status}` — schedules a daily/weekly background `polymath update --yes`. Backend autodetect: launchd on macOS, `systemctl --user` timers on Linux when present, cron as the portable fallback. Override with `PP_AUTO_UPDATE_BACKEND={launchd|systemd|cron}`. Defaults to 03:17 local (jittered off the round-number herd).
+- `bin/auto-update.sh` — worker invoked by the scheduler. Single-instance `mkdir`-lock with 1h stale-reclaim, summary line per run (`OK|FAIL|SKIP\trc=N`), full output indented below. Worker exits 0 even on update failure so the scheduler does not disable itself; operator sees the failure via `polymath auto-update status`.
+- `hooks/subagent-statusline.sh` — `subagentStatusLine` hook. Reads the subagent panel JSON envelope on stdin and emits `{"id": ..., "content": "⚛ <name> · <description>"}` for polymath-spawned rows (name matches `^(analyst|critique|planner|retry|inv)` or contains `polymath`). All other rows pass through unbranded — Claude Code falls back to its default rendering.
+- `bin/install.sh` — merges a `subagentStatusLine` config into `settings.json` alongside the existing `statusLine`. Tied to the same prompt gate, so opting out of `statusLine` also opts out of the subagent brand glyph.
+- `lib/doctor.sh` — `doctor_check_subagent_statusline_wired` check. Yellow (not red) on miss, since pre-v0.5.5 installs simply render subagent rows un-branded (cosmetic, not correctness).
+- `test/v0.5.5-auto-update.bats` — 16 tests covering the subagent hook (pass-through, malformed JSON, jq-missing degradation), the auto-update subcommand (validation, idempotent disable, status output), and the worker (OK/FAIL summary lines, concurrent-lock SKIP, stale-lock reclaim).
+
+### Changed
+
+- `bin/polymath update` — adds a constellation spinner (`⠁ ⠂ ⠄ ⡀` rotating) during the `git fetch origin` wait when stdout is a TTY. Spinner runs in a backgrounded subshell with a `trap`-guarded kill, so it never leaks past the fetch.
+
+### Decisions
+
+- **Subagent rows stay monochrome.** Same decision as v0.5.5.0: 7 simultaneous lens-colored rows would strobe. The `⚛` marks "this row came from polymath"; the row's existing name + description carry lens identity.
+- **Worker always exits 0.** A scheduler that disables itself after one failed update is worse than one that logs the failure and tries again tomorrow — especially when the failure is transient (network, upstream momentarily unavailable). The `FAIL` line in the log + the `polymath auto-update status` surface keeps operators informed.
+- **`--time` validation is strict.** Format-check first (HH:MM literal), then range-check (00-23 and 00-59). An earlier loose regex accepted `27:99` and wrote a broken launchd plist before validation ran — caught in dev, fixed before commit.
+
+### Test plan
+
+- `bats test/v0.5.5-auto-update.bats` — 16/16 green
+- `bats test/` — full suite green (no byte-identity regressions)
+- `shellcheck -S warning` on the touched files — clean
+
 ## [0.5.5.0] — 2026-05-18
 
 The **brand identity release.** Codifies pair-polymath's emerging visual vocabulary into a coherent terminal brand. Two marks introduced: `⚛` (the polymath sigil — atom, many specialists orbiting one work) and `⠁ ⠂ ⠄ ⡀` (the constellation — 4-frame braille loading mark). Voice: respectful pair-programmer, not notification system.

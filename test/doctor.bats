@@ -287,6 +287,13 @@ _pp_doctor_oar_enable() {
   printf 'PP_OAR_ENABLE=1\n' > "$HOME/.claude/pair-polymath/config/user.env"
 }
 
+_pp_doctor_project_id() {
+  export PP_STATE_DIR="$HOME/.claude/pair-polymath"
+  # shellcheck source=../lib/project-identity.sh
+  . "$PP_ROOT/lib/project-identity.sh"
+  pp_project_id "$PWD"
+}
+
 @test "doctor #21: oar quality green when enabled but no labeled file yet" {
   # OAR enabled, but oar-labeled.jsonl doesn't exist — fresh install case.
   _pp_doctor_oar_enable
@@ -388,6 +395,29 @@ _pp_doctor_oar_enable() {
   _pp_doctor_oar_enable
   mkdir -p "$PP_CACHE_DIR"
   local _i _out
+  local _pid
+  _pid=$(_pp_doctor_project_id)
+  for _i in $(seq 1 20); do
+    _out="ignored"
+    [ "$_i" -eq 19 ] && _out="acted"
+    [ "$_i" -eq 20 ] && _out="referenced"
+    jq -nc --arg sid "s$_i" --arg out "$_out" --arg pid "$_pid" \
+      '{schema_version:2,session_id:$sid,outcome:$out,
+        project_id:$pid,
+        prompt_versions:{"analyst-primary":"0.5.4.0","critique":"0.5.4.0"}}' \
+      >> "$PP_CACHE_DIR/oar-labeled.jsonl"
+  done
+  run bash "$PP_ROOT/bin/polymath" doctor
+  [[ "$output" == *"OAR quality"* ]]
+  [[ "$output" == *"20 rows"* ]]
+  [[ "$output" == *"ignored=18"* ]]
+  [[ "$output" == *"non-degenerate"* ]]
+}
+
+@test "doctor #21: oar quality YELLOW when v2 labeled rows miss project identity" {
+  _pp_doctor_oar_enable
+  mkdir -p "$PP_CACHE_DIR"
+  local _i _out
   for _i in $(seq 1 20); do
     _out="ignored"
     [ "$_i" -eq 19 ] && _out="acted"
@@ -399,9 +429,8 @@ _pp_doctor_oar_enable() {
   done
   run bash "$PP_ROOT/bin/polymath" doctor
   [[ "$output" == *"OAR quality"* ]]
-  [[ "$output" == *"20 rows"* ]]
-  [[ "$output" == *"ignored=18"* ]]
-  [[ "$output" == *"non-degenerate"* ]]
+  [[ "$output" == *"labeled project identity drift"* ]]
+  [[ "$output" == *"missing identity"* ]]
 }
 
 # ----- post-review hardening (GPT-5 + spec-reviewer convergent findings) -----

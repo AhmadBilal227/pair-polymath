@@ -1261,7 +1261,7 @@ SHIM
 @test "polymath history: empty-state hint when oar-labeled.jsonl missing" {
   export CLAUDE_DIR="$HOME/.claude"
   mkdir -p "$CLAUDE_DIR/cache"
-  run bash "$PP_ROOT/bin/polymath" history
+  run bash "$PP_ROOT/bin/polymath" history --all-projects
   [ "$status" -eq 0 ]
   printf '%s' "$output" | grep -q "No labeled observations yet"
 }
@@ -1306,7 +1306,7 @@ SHIM
        prompt_versions:{"analyst-primary":"0.5.4.0","critique":"0.5.4.0"}}' \
       >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
   done
-  run bash "$PP_ROOT/bin/polymath" history --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.by_lens[0].wilson_lower_95 != null' >/dev/null
   printf '%s' "$output" | jq -e '
@@ -1329,7 +1329,7 @@ SHIM
        inject_ts:$ts,labeled_at:$ts,outcome:"acted",evidence_id:"a",
        confidence:"symbol_exact",identity:"iy"}' \
     >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
-  run bash "$PP_ROOT/bin/polymath" history --lens SECURITY --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --lens SECURITY --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.total == 1 and (.by_lens | length) == 1' >/dev/null
 }
@@ -1365,7 +1365,7 @@ SHIM
        inject_ts:$ts,labeled_at:$ts,outcome:"ignored",evidence_id:null,
        confidence:"no_signal_in_window",identity:"ib"}' \
     >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
-  run bash "$PP_ROOT/bin/polymath" history --outcome acted --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --outcome acted --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.total == 1 and .by_outcome.acted == 1 and .by_outcome.ignored == 0' >/dev/null
 }
@@ -1387,7 +1387,7 @@ SHIM
        inject_ts:$ts,labeled_at:$ts,outcome:"silent",silent_reason:"no_eligible_surface",
        evidence_id:null,confidence:"silent",identity:"ic"}' \
     >> "$CLAUDE_DIR/cache/oar-labeled.jsonl"
-  run bash "$PP_ROOT/bin/polymath" history --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '
     .total == 3
@@ -1398,7 +1398,7 @@ SHIM
     and .by_lens[0].n == 2
   ' >/dev/null
 
-  run bash "$PP_ROOT/bin/polymath" history --outcome silent --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --outcome silent --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.total == 1 and .eligible == 0 and .by_outcome.silent == 1' >/dev/null
 }
@@ -1416,7 +1416,7 @@ SHIM
     > "$CLAUDE_DIR/cache/oar-stuck.jsonl"
   jq -nc '{session_id:"s2",lens:"UX_DESIGN",hash:"hu",attempts:3}' \
     >> "$CLAUDE_DIR/cache/oar-stuck.jsonl"
-  run bash "$PP_ROOT/bin/polymath" history --lens SECURITY --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --lens SECURITY --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.stuck == 1' >/dev/null
 }
@@ -1438,7 +1438,7 @@ SHIM
        inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:99999999999,
        attempts:0,status:"pending"}' \
     >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
-  run bash "$PP_ROOT/bin/polymath" history --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.pending == 2' >/dev/null
 }
@@ -1460,7 +1460,7 @@ SHIM
        inject_ts:"2026-05-15T00:00:00Z",scan_at_epoch:1,
        attempts:0,status:"pending"}' \
     >> "$CLAUDE_DIR/cache/oar-pending.jsonl"
-  run bash "$PP_ROOT/bin/polymath" history --json
+  run bash "$PP_ROOT/bin/polymath" history --all-projects --json
   [ "$status" -eq 0 ]
   printf '%s' "$output" \
     | jq -e '.pending == 2 and .pending_in_window == 1 and .pending_due == 1' >/dev/null
@@ -1475,6 +1475,7 @@ SHIM
   [[ "$output" == *"--outcome"* ]]
   [[ "$output" == *"silent"* ]]
   [[ "$output" == *"--json"* ]]
+  [[ "$output" == *"--all-projects"* ]]
 }
 
 @test "polymath help: includes history row" {

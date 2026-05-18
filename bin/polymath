@@ -11,6 +11,8 @@ PP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$PP_ROOT/lib/config.sh"
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/budget.sh"
+# shellcheck disable=SC1091
+. "$PP_ROOT/lib/project-identity.sh" 2>/dev/null || true
 
 # Detect GNU vs BSD stat ONCE, upfront (review fix F7' + R4-4).
 # Round-1 F7 used a fallback chain `stat -f %m FILE || stat -c %Y FILE`. The
@@ -669,6 +671,7 @@ USAGE
     _h_lens=""
     _h_outcome=""
     _h_json=0
+    _h_all_projects=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --window)
@@ -693,6 +696,7 @@ USAGE
           esac
           ;;
         --json) _h_json=1; shift ;;
+        --all-projects) _h_all_projects=1; shift ;;
         -h|--help)
           cat <<HELP
 polymath history — Observation outcomes (OAR labeler results)
@@ -704,10 +708,14 @@ Usage:
   polymath history --outcome acted       Filter to one outcome class
                                           (acted|referenced|pushed-back|ignored|silent|all)
   polymath history --json                Machine-readable JSON
+  polymath history --all-projects        Explicit cross-project reporting
 
 Filters compose: --lens narrows the rows BEFORE per-lens grouping;
 --outcome narrows AFTER --lens. Wilson 95% CI lower bound (two-sided z)
 shown per lens via pp_kpi_wilson_lower_95.
+
+By default, history reports only the current project. Use --all-projects
+when auditing old mixed global telemetry.
 
 Empty-state hint: enable with PP_OAR_ENABLE=1 in user.env and run
 sessions for at least one scan-window (24h ENG/SEC/PERF, 48h UX, 7d
@@ -723,6 +731,10 @@ HELP
     _h_labeled="${_h_cache_dir}/oar-labeled.jsonl"
     _h_pending="${_h_cache_dir}/oar-pending.jsonl"
     _h_stuck="${_h_cache_dir}/oar-stuck.jsonl"
+    _h_project_id=""
+    if command -v pp_project_id >/dev/null 2>&1; then
+      _h_project_id=$(pp_project_id "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null || printf '')
+    fi
     if [ ! -f "$_h_labeled" ] && [ ! -f "${_h_labeled}.1" ]; then
       printf 'No labeled observations yet. Enable with: PP_OAR_ENABLE=1 in user.env,\n'
       printf 'then run sessions for >= scan-window hours (24h-7d depending on lens).\n'
@@ -750,8 +762,9 @@ HELP
     # scope IS that lens regardless of outcome breakdown).
     _h_rows_unfiltered=$( { cat "${_h_labeled}.1" "$_h_labeled" 2>/dev/null; } \
               | jq -R 'fromjson?' 2>/dev/null \
-              | jq -s --argjson cut "$_h_cutoff" --arg lens "$_h_lens" '
+              | jq -s --argjson cut "$_h_cutoff" --arg lens "$_h_lens" --arg project_id "$_h_project_id" --argjson all_projects "$_h_all_projects" '
                   map(select((.labeled_at | fromdateiso8601? // 0) >= $cut))
+                  | (if ($all_projects == 1 or $project_id == "") then . else map(select(.project_id == $project_id)) end)
                   | (if $lens != "" then map(select(.lens == $lens)) else . end)
                 ' 2>/dev/null)
     [ -n "$_h_rows_unfiltered" ] || _h_rows_unfiltered='[]'
@@ -769,8 +782,9 @@ HELP
       _h_now=$(date +%s 2>/dev/null || printf '0')
       case "$_h_now" in ''|*[!0-9]*) _h_now=0 ;; esac
       _h_pending_stats=$(jq -R 'fromjson?' "$_h_pending" 2>/dev/null \
-                        | jq -s --arg lens "$_h_lens" --argjson now "$_h_now" '
+                        | jq -s --arg lens "$_h_lens" --arg project_id "$_h_project_id" --argjson all_projects "$_h_all_projects" --argjson now "$_h_now" '
                             map(select(.scan_at_epoch != null))
+                            | (if ($all_projects == 1 or $project_id == "") then . else map(select(.project_id == $project_id)) end)
                             | (if $lens != "" then map(select(.lens == $lens)) else . end)
                             | {total:length,
                                in_window:(map(select((.scan_at_epoch // 0) > $now)) | length),
@@ -787,7 +801,9 @@ HELP
     _h_stuck_count=0
     if [ -f "$_h_stuck" ]; then
       _h_stuck_count=$(jq -R 'fromjson?' "$_h_stuck" 2>/dev/null \
-                      | jq -s --arg lens "$_h_lens" '
+                      | jq -s --arg lens "$_h_lens" --arg project_id "$_h_project_id" --argjson all_projects "$_h_all_projects" '
+                          if ($all_projects == 1 or $project_id == "") then . else map(select(.project_id == $project_id)) end
+                          |
                           if $lens != "" then map(select(.lens == $lens)) else . end
                           | length' 2>/dev/null)
       case "$_h_stuck_count" in ''|*[!0-9]*) _h_stuck_count=0 ;; esac
@@ -853,6 +869,8 @@ HELP
                   --argjson pending_in_window "$_h_pending_in_window" \
                   --argjson pending_due "$_h_pending_due" \
                   --argjson stuck "$_h_stuck_count" \
+                  --arg project_id "$_h_project_id" \
+                  --argjson all_projects "$_h_all_projects" \
                   --argjson window "$_h_window" '
         (map(select(.outcome != "silent"))) as $eligible |
         {
@@ -862,6 +880,8 @@ HELP
           pending_in_window: $pending_in_window,
           pending_due: $pending_due,
           stuck: $stuck,
+          project_id: (if $project_id == "" then null else $project_id end),
+          all_projects: ($all_projects == 1),
           window_days: $window,
           by_outcome: {
             acted:       (map(select(.outcome == "acted"))       | length),
@@ -891,6 +911,11 @@ HELP
       printf '%s\n' "$_h_summary"
     else
       printf '\nObservation outcomes (last %s days)\n\n' "$_h_window"
+      if [ "$_h_all_projects" = "1" ]; then
+        printf '  Project scope:         all projects\n'
+      elif [ -n "$_h_project_id" ]; then
+        printf '  Project scope:         current (%s)\n' "$_h_project_id"
+      fi
       printf '%s' "$_h_summary" | jq -r '
         "  Total observations:    \(.total)",
         "  Eligible (non-silent): \(.eligible)      (\(.pending_in_window) still in scan window, \(.pending_due) due)",

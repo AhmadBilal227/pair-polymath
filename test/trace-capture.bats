@@ -100,6 +100,8 @@ EOF
     .schema_version == 1
     and (.session_sha8 | test("^[0-9a-f]{8}$"))
     and (.cwd_sha8 | test("^[0-9a-f]{8}$"))
+    and (.project_id | test("^[0-9a-f]{16}$"))
+    and (.project_root_sha8 | test("^[0-9a-f]{8}$"))
     and .mode.eval_mode == true
     and .prompt_versions["analyst-primary"] == "0.5.4.0"
     and .router.decision_source == "eval_bypass"

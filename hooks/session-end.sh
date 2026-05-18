@@ -17,6 +17,8 @@ umask 077
 PP_ROOT="${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PP_ROOT/lib/config.sh" 2>/dev/null || true
+# shellcheck disable=SC1091
+. "$PP_ROOT/lib/project-identity.sh" 2>/dev/null || true
 
 # Fast no-op path after config load: persistent PP_OAR_ENABLE in user.env
 # must be visible to Claude's SessionEnd hook process.
@@ -29,6 +31,18 @@ _input=$(cat 2>/dev/null || printf '{}')
 _session_id=$(printf '%s' "$_input" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$_session_id" ] && exit 0
 _session_id=$(pp_sanitize_session_id "$_session_id")
+
+_project_cwd=$(printf '%s' "$_input" | jq -r '.cwd // .workspace.current_dir // empty' 2>/dev/null)
+[ -n "$_project_cwd" ] || _project_cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
+_project_id=""
+_project_root=""
+_project_root_sha8=""
+if command -v pp_project_identity_json >/dev/null 2>&1; then
+  _project_identity_json=$(pp_project_identity_json "$_project_cwd" 2>/dev/null || printf '{}')
+  _project_id=$(printf '%s' "$_project_identity_json" | jq -r '.project_id // empty' 2>/dev/null)
+  _project_root=$(printf '%s' "$_project_identity_json" | jq -r '.project_root // empty' 2>/dev/null)
+  _project_root_sha8=$(printf '%s' "$_project_identity_json" | jq -r '.project_root_sha8 // empty' 2>/dev/null)
+fi
 
 # v0.5.2: pp_extract_citations_from_text — used to populate cited_paths +
 # cited_symbols in the pending row (C2 fix path A from plan addendum).
@@ -188,10 +202,16 @@ find "$_cache_dir" -maxdepth 1 \
       --arg inject_ts "$_inject_iso" \
       --argjson scan_at "$_scan_at" \
       --arg body "$_body" \
+      --arg project_id "$_project_id" \
+      --arg project_root "$_project_root" \
+      --arg project_root_sha8 "$_project_root_sha8" \
       --argjson cited_paths "$_cited_paths_json" \
       --argjson cited_symbols "$_cited_symbols_json" \
       --argjson prompt_versions "$_prompt_versions_json" \
-      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: $body, cited_paths: $cited_paths, cited_symbols: $cited_symbols, prompt_versions: $prompt_versions}' \
+      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: $body, cited_paths: $cited_paths, cited_symbols: $cited_symbols, prompt_versions: $prompt_versions,
+        project_id: (if $project_id == "" then null else $project_id end),
+        project_root: (if $project_root == "" then null else $project_root end),
+        project_root_sha8: (if $project_root_sha8 == "" then null else $project_root_sha8 end)}' \
       >> "$_pending_file" 2>/dev/null; then
       printf 'pair-polymath session-end: failed to append pending row for lens=%s (check %s permissions)\n' \
         "$_lens" "$_pending_file" >&2
@@ -230,8 +250,14 @@ find "$_cache_dir" -maxdepth 1 \
       --arg inject_ts "$_inject_iso" \
       --argjson scan_at "$_inject_epoch" \
       --arg reason "$_reason" \
+      --arg project_id "$_project_id" \
+      --arg project_root "$_project_root" \
+      --arg project_root_sha8 "$_project_root_sha8" \
       --argjson prompt_versions "$_prompt_versions_json" \
-      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: "", cited_paths: [], cited_symbols: [], outcome: "silent", silent_reason: $reason, prompt_versions: $prompt_versions}' \
+      '{session_id: $sid, lens: $lens, hash: $hash, inject_ts: $inject_ts, scan_at_epoch: $scan_at, attempts: 0, status: "pending", body: "", cited_paths: [], cited_symbols: [], outcome: "silent", silent_reason: $reason, prompt_versions: $prompt_versions,
+        project_id: (if $project_id == "" then null else $project_id end),
+        project_root: (if $project_root == "" then null else $project_root end),
+        project_root_sha8: (if $project_root_sha8 == "" then null else $project_root_sha8 end)}' \
       >> "$_pending_file" 2>/dev/null; then
       printf 'pair-polymath session-end: failed to append silent pending row for lens=%s (check %s permissions)\n' \
         "$_lens" "$_pending_file" >&2

@@ -64,20 +64,25 @@ _pp_oar_mtime() {
   printf '%s' "$_m"
 }
 
-# pp_oar_row_identity SID LENS HASH INJECT_TS
-# Stdout: 64-hex sha256 of the 4 fields joined by ASCII US (0x1F).
+# pp_oar_row_identity SID LENS HASH INJECT_TS [PROJECT_ID]
+# Stdout: 64-hex sha256 of the fields joined by ASCII US (0x1F).
 # Used to dedupe labeled rows + look up "already labeled?" membership.
 #
 # Separator choice: ASCII 0x1F (US, "Unit Separator") — invisible control
-# character that never appears in any of the four field domains (session
+# character that never appears in any of the field domains (session
 # id is ksuid-shaped, lens is uppercase identifier, hash is hex, inject_ts
-# is ISO-8601). A bare `|` separator would have been ambiguous if any
+# is ISO-8601, project_id is hex). A bare `|` separator would have been ambiguous if any
 # field ever contained `|`. Caught by Task 3 review S1 + GPT #3.
 pp_oar_row_identity() {
   local _sid="${1:-}" _lens="${2:-}" _hash="${3:-}" _ts="${4:-}"
+  local _project_id="${5:-}"
   local _body
   # printf '\037' emits the single US byte. Bash 3.2 supports this.
-  _body=$(printf '%s\037%s\037%s\037%s' "$_sid" "$_lens" "$_hash" "$_ts")
+  if [ -n "$_project_id" ]; then
+    _body=$(printf '%s\037%s\037%s\037%s\037%s' "$_sid" "$_lens" "$_hash" "$_ts" "$_project_id")
+  else
+    _body=$(printf '%s\037%s\037%s\037%s' "$_sid" "$_lens" "$_hash" "$_ts")
+  fi
   # Same sha tool chain as pp_project_key in lib/grounding.sh, extended
   # with openssl between native sha256 and the md5 last-resort (caught by
   # Task 3 GPT review #4 — openssl is more ubiquitous than the `sha256` BSD
@@ -939,6 +944,7 @@ pp_oar_label_pending() {
 
   local _processed=0
   local _line _sid _lens _hash _inj_ts _scan _attempts _id
+  local _project_id _project_root _project_root_sha8
   local _inj_epoch _upper
   local _cited_paths _cited_symbols _body
   local _prompt_versions_json
@@ -961,6 +967,9 @@ pp_oar_label_pending() {
     _inj_ts=$(printf '%s' "$_line" | jq -r '.inject_ts // ""' 2>/dev/null || true)
     _scan=$(printf '%s' "$_line" | jq -r '.scan_at_epoch // 0' 2>/dev/null || true)
     _attempts=$(printf '%s' "$_line" | jq -r '.attempts // 0' 2>/dev/null || true)
+    _project_id=$(printf '%s' "$_line" | jq -r '.project_id // ""' 2>/dev/null || true)
+    _project_root=$(printf '%s' "$_line" | jq -r '.project_root // ""' 2>/dev/null || true)
+    _project_root_sha8=$(printf '%s' "$_line" | jq -r '.project_root_sha8 // ""' 2>/dev/null || true)
     # Corrupt row → keep verbatim in pending (don't lose data).
     if [ -z "$_sid" ] || [ -z "$_lens" ] || [ -z "$_hash" ]; then
       printf '%s\n' "$_line" >> "$_kept"
@@ -987,7 +996,7 @@ pp_oar_label_pending() {
 
     # Already labeled? Drop (do NOT re-append to pending).
     _id=""
-    _id=$(pp_oar_row_identity "$_sid" "$_lens" "$_hash" "$_inj_ts" 2>/dev/null) \
+    _id=$(pp_oar_row_identity "$_sid" "$_lens" "$_hash" "$_inj_ts" "$_project_id" 2>/dev/null) \
       || _id=""
     if [ -n "$_id" ] && [ -s "$_seen" ] \
        && LC_ALL=C grep -qxF -- "$_id" "$_seen" 2>/dev/null; then
@@ -1200,9 +1209,15 @@ EOF
         jq -nc \
           --arg sid "$_sid" --arg lens "$_lens" --arg h "$_hash" \
           --arg ts "$_inj_ts" --argjson att "$_attempts" \
+          --arg project_id "$_project_id" \
+          --arg project_root "$_project_root" \
+          --arg project_root_sha8 "$_project_root_sha8" \
           --arg err "labeling failed after $_attempts attempts" \
           '{session_id:$sid,lens:$lens,hash:$h,inject_ts:$ts,
-            attempts:$att,last_error:$err}' \
+            attempts:$att,last_error:$err,
+            project_id:(if $project_id=="" then null else $project_id end),
+            project_root:(if $project_root=="" then null else $project_root end),
+            project_root_sha8:(if $project_root_sha8=="" then null else $project_root_sha8 end)}' \
           >> "$_stuck" 2>/dev/null || true
         continue
       fi
@@ -1224,6 +1239,9 @@ EOF
       --arg conf "$_conf" --arg identity "${_id:-}" \
       --arg body "$_body" \
       --arg silent_reason "$_silent_reason" \
+      --arg project_id "$_project_id" \
+      --arg project_root "$_project_root" \
+      --arg project_root_sha8 "$_project_root_sha8" \
       --argjson prompt_versions "$_prompt_versions_json" \
       --argjson schema "${PP_OAR_SCHEMA_VERSION:-2}" \
       '{schema_version:$schema,
@@ -1233,6 +1251,9 @@ EOF
         confidence:$conf,
         silent_reason:$silent_reason,
         prompt_versions:$prompt_versions,
+        project_id:(if $project_id=="" then null else $project_id end),
+        project_root:(if $project_root=="" then null else $project_root end),
+        project_root_sha8:(if $project_root_sha8=="" then null else $project_root_sha8 end),
         identity:(if $identity=="" then null else $identity end),
         evidence:(if $body=="" then null else $body end)}' \
       2>/dev/null) || _label_blob=""

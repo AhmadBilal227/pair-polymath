@@ -140,7 +140,7 @@ teardown() {
   jq -e '.' < "$PP_METRICS_FILE" >/dev/null
 }
 
-@test "metrics_flush_cycle: JSONL has ts, session, calls, usd_est, by_type, by_type_usd" {
+@test "metrics_flush_cycle: JSONL has ts, session, project identity, calls, usd_est, by_type, by_type_usd" {
   metrics_init "s1"
   metrics_increment_call planner gpt-5-mini
   metrics_increment_call analyst gpt-5-mini
@@ -150,6 +150,10 @@ teardown() {
   [[ "$output" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]
   run jq -r '.session' < "$PP_METRICS_FILE"
   [ "$output" = "s1" ]
+  run jq -r '.project_id | test("^[0-9a-f]{16}$")' < "$PP_METRICS_FILE"
+  [ "$output" = "true" ]
+  run jq -r '.project_root_sha8 | test("^[0-9a-f]{8}$")' < "$PP_METRICS_FILE"
+  [ "$output" = "true" ]
   run jq -r '.calls' < "$PP_METRICS_FILE"
   [ "$output" = "2" ]
   run jq -r '.usd_est | type' < "$PP_METRICS_FILE"

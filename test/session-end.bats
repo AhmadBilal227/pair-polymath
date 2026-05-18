@@ -79,7 +79,7 @@ teardown() { rm -rf "$HOME"; }
     "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
 }
 
-@test "session-end: schema has all 7 baseline fields + 3 v0.5.2 fields" {
+@test "session-end: schema has baseline fields, v0.5.2 fields, and project identity" {
   printf 'SEC: review credentials|||content with symbols pp_check_creds and paths lib/sec.sh\n' \
     > "$PP_CACHE_DIR/cc-monitor-s3-SECURITY.txt"
   printf 'hash-b2' > "$PP_CACHE_DIR/cc-monitor-injected-hash-s3-SECURITY.txt"
@@ -93,6 +93,9 @@ teardown() { rm -rf "$HOME"; }
     and has("attempts") and has("status")
     and has("body") and has("cited_paths") and has("cited_symbols")
     and has("prompt_versions")
+    and (.project_id | test("^[0-9a-f]{16}$"))
+    and (.project_root | type == "string" and length > 0)
+    and (.project_root_sha8 | test("^[0-9a-f]{8}$"))
   ' "$PP_CACHE_DIR/oar-pending.jsonl" >/dev/null
 }
 

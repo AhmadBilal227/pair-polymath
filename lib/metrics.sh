@@ -55,6 +55,11 @@ PP_METRICS_LOCK="${PP_METRICS_FILE}.lock"
 # can surface them in its output.
 PP_METRICS_WARN_LOG="${PP_CACHE_DIR}/metrics-warnings.log"
 
+if ! command -v pp_project_identity_json >/dev/null 2>&1; then
+  # shellcheck source=project-identity.sh
+  . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}/lib/project-identity.sh" 2>/dev/null || true
+fi
+
 # _pp_awk — wrapper that pins locale to C so awk's printf formats numbers
 # with `.` decimals regardless of the user's LC_NUMERIC / LC_ALL settings
 # (review fix R2-H1). Use this for any awk invocation that emits numeric
@@ -261,6 +266,18 @@ metrics_flush_cycle() {
   local ts
   ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
+  local project_id project_root project_root_sha8 project_identity_json project_cwd
+  project_id=""
+  project_root=""
+  project_root_sha8=""
+  project_cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
+  if command -v pp_project_identity_json >/dev/null 2>&1; then
+    project_identity_json=$(pp_project_identity_json "$project_cwd" 2>/dev/null || printf '{}')
+    project_id=$(printf '%s' "$project_identity_json" | jq -r '.project_id // empty' 2>/dev/null)
+    project_root=$(printf '%s' "$project_identity_json" | jq -r '.project_root // empty' 2>/dev/null)
+    project_root_sha8=$(printf '%s' "$project_identity_json" | jq -r '.project_root_sha8 // empty' 2>/dev/null)
+  fi
+
   # Build the JSONL entry in a tmp file in the SAME directory, then append.
   # Same-dir mktemp keeps the rename atomic on the same filesystem.
   #
@@ -278,11 +295,17 @@ metrics_flush_cycle() {
   jq -cn \
     --arg ts "$ts" \
     --arg sid "$sid" \
+    --arg project_id "$project_id" \
+    --arg project_root "$project_root" \
+    --arg project_root_sha8 "$project_root_sha8" \
     --argjson calls "$calls" \
     --argjson usd "$total_usd" \
     --argjson by_type "$by_type" \
     --argjson by_type_usd "$by_type_usd" \
-    '{ts:$ts, session:$sid, calls:$calls, usd_est:$usd, by_type:$by_type, by_type_usd:$by_type_usd}' \
+    '{ts:$ts, session:$sid, calls:$calls, usd_est:$usd, by_type:$by_type, by_type_usd:$by_type_usd,
+      project_id:(if $project_id=="" then null else $project_id end),
+      project_root:(if $project_root=="" then null else $project_root end),
+      project_root_sha8:(if $project_root_sha8=="" then null else $project_root_sha8 end)}' \
     > "$entry_tmp" 2>/dev/null
   local jq_rc=$?
 

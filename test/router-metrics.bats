@@ -26,6 +26,8 @@ teardown() { rm -rf "$HOME"; }
   pp_router_metrics_emit '{"phase":"debugging"}' "ENGINEERING SECURITY" 1 0 234
   line=$(head -1 "$PP_ROUTER_METRICS_FILE")
   echo "$line" | jq -e '.ts and .phase and (.picked_count != null) and (.surprise_fired != null) and (.failopen != null) and (.llm_call_ms != null)' >/dev/null
+  echo "$line" | jq -e '.project_id | test("^[0-9a-f]{16}$")' >/dev/null
+  echo "$line" | jq -e '.project_root_sha8 | test("^[0-9a-f]{8}$")' >/dev/null
   echo "$line" | jq -e '.picked_count == 2' >/dev/null
   echo "$line" | jq -e '.surprise_fired == 1' >/dev/null
   echo "$line" | jq -e '.failopen == 0' >/dev/null

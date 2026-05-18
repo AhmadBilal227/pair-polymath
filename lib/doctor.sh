@@ -579,6 +579,36 @@ doctor_check_oar_quality() {
   case "$_injected_count" in ''|*[!0-9]*) _injected_count=0 ;; esac
   case "$_pending_rows" in ''|*[!0-9]*) _pending_rows=0 ;; esac
   case "$_labeled_rows" in ''|*[!0-9]*) _labeled_rows=0 ;; esac
+
+  if command -v jq >/dev/null 2>&1; then
+    if ! command -v pp_project_id >/dev/null 2>&1; then
+      # shellcheck source=project-identity.sh
+      . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}/lib/project-identity.sh" 2>/dev/null || true
+    fi
+    local _project_id _identity_counts _missing_identity _foreign_identity
+    _project_id=""
+    if command -v pp_project_id >/dev/null 2>&1; then
+      _project_id=$(pp_project_id "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null || printf '')
+    fi
+    if [ -n "$_project_id" ] && [ -s "$_pending" ]; then
+      _identity_counts=$(jq -R 'fromjson?' "$_pending" 2>/dev/null \
+        | jq -s -r --arg project_id "$_project_id" '
+            map(select(type == "object")) as $rows
+            | ($rows | map(select((.project_id // "") == "")) | length) as $missing
+            | ($rows | map(select((.project_id // "") != "" and .project_id != $project_id)) | length) as $foreign
+            | "\($missing)\t\($foreign)"
+          ' 2>/dev/null)
+      _missing_identity=$(printf '%s' "$_identity_counts" | cut -f1)
+      _foreign_identity=$(printf '%s' "$_identity_counts" | cut -f2)
+      case "$_missing_identity" in ''|*[!0-9]*) _missing_identity=0 ;; esac
+      case "$_foreign_identity" in ''|*[!0-9]*) _foreign_identity=0 ;; esac
+      if [ "$_missing_identity" -gt 0 ] || [ "$_foreign_identity" -gt 0 ]; then
+        _pp_doctor_yellow "OAR quality" "pending project identity drift: ${_missing_identity} rows missing identity, ${_foreign_identity} rows from another project; history defaults to current project"
+        return 1
+      fi
+    fi
+  fi
+
   if [ "$_injected_count" -gt 0 ] && [ "$_pending_rows" -eq 0 ] && [ "$_labeled_rows" -lt "$_injected_count" ]; then
     _pp_doctor_yellow "OAR quality" "appears starved: ${_injected_count} injected observations, ${_pending_rows} pending rows, ${_labeled_rows} labeled rows — verify SessionEnd hook wiring"
     return 1
@@ -663,6 +693,25 @@ doctor_check_oar_quality() {
   if [ "$_v2_rows" -ge 20 ] && [ "$_missing_lineage" -gt 0 ]; then
     _pp_doctor_yellow "OAR quality" "${_missing_lineage}/${_v2_rows} v2 labeled rows missing prompt lineage — prompt improvement loops cannot attribute outcomes"
     return 1
+  fi
+
+  if [ -n "${_project_id:-}" ]; then
+    _identity_counts=$( { cat "$_labeled" "${_labeled}.1" 2>/dev/null; } \
+      | jq -R 'fromjson?' 2>/dev/null \
+      | jq -s -r --arg project_id "$_project_id" '
+          map(select(type == "object" and ((.schema_version // 1) >= 2))) as $rows
+          | ($rows | map(select((.project_id // "") == "")) | length) as $missing
+          | ($rows | map(select((.project_id // "") != "" and .project_id != $project_id)) | length) as $foreign
+          | "\($missing)\t\($foreign)"
+        ' 2>/dev/null)
+    _missing_identity=$(printf '%s' "$_identity_counts" | cut -f1)
+    _foreign_identity=$(printf '%s' "$_identity_counts" | cut -f2)
+    case "$_missing_identity" in ''|*[!0-9]*) _missing_identity=0 ;; esac
+    case "$_foreign_identity" in ''|*[!0-9]*) _foreign_identity=0 ;; esac
+    if [ "$_missing_identity" -gt 0 ] || [ "$_foreign_identity" -gt 0 ]; then
+      _pp_doctor_yellow "OAR quality" "labeled project identity drift: ${_missing_identity} v2 rows missing identity, ${_foreign_identity} rows from another project; history defaults to current project"
+      return 1
+    fi
   fi
 
   _pp_doctor_green "OAR quality" "${_valid} rows; ignored=${_ignored} (non-degenerate)"

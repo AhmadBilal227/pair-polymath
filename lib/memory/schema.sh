@@ -14,6 +14,11 @@
 PP_MEMORY_SCHEMA_VERSION="1"
 PP_MEMORY_DIR="${PP_MEMORY_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath/memory}"
 
+if ! command -v pp_project_id >/dev/null 2>&1; then
+  # shellcheck source=../project-identity.sh
+  . "${PP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}/lib/project-identity.sh" 2>/dev/null || true
+fi
+
 # pp_memory_get_salt
 # Returns the per-machine random salt. Created on first call, mode 0600.
 # Same salt persists forever per HOME — uninstalling pair-polymath does NOT
@@ -54,6 +59,14 @@ pp_memory_get_salt() {
 # Stdout: salted project identity hash (first 16 hex of sha1(salt || identity)).
 pp_memory_project_hash() {
   local cwd="${1:-$PWD}"
+  if command -v pp_project_id >/dev/null 2>&1; then
+    local project_id
+    project_id=$(pp_project_id "$cwd" 2>/dev/null || printf '')
+    if [ -n "$project_id" ]; then
+      printf '%s' "$project_id"
+      return 0
+    fi
+  fi
   local identity=""
   if git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
     identity=$(git -C "$cwd" config --get remote.origin.url 2>/dev/null)

@@ -57,6 +57,12 @@ if ! command -v pp_lens_is_eligible >/dev/null 2>&1; then
     . "${_pp_router_self_dir}/eligibility.sh" 2>/dev/null || true
   fi
 fi
+if ! command -v pp_project_identity_json >/dev/null 2>&1; then
+  if [ -r "${_pp_router_self_dir}/project-identity.sh" ]; then
+    # shellcheck source=project-identity.sh
+    . "${_pp_router_self_dir}/project-identity.sh" 2>/dev/null || true
+  fi
+fi
 
 : "${PP_ROUTER_ENABLE:=1}"
 : "${PP_ROUTER_MAX:=3}"
@@ -509,17 +515,31 @@ pp_router_metrics_emit() {
       [ -z "$_picked_count" ] && _picked_count=0
     fi
 
+    local _project_id="" _project_root="" _project_root_sha8="" _project_identity_json=""
+    if command -v pp_project_identity_json >/dev/null 2>&1; then
+      _project_identity_json=$(pp_project_identity_json "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null || printf '{}')
+      _project_id=$(printf '%s' "$_project_identity_json" | jq -r '.project_id // empty' 2>/dev/null)
+      _project_root=$(printf '%s' "$_project_identity_json" | jq -r '.project_root // empty' 2>/dev/null)
+      _project_root_sha8=$(printf '%s' "$_project_identity_json" | jq -r '.project_root_sha8 // empty' 2>/dev/null)
+    fi
+
     # Build JSONL line (compact, single-line).
     local _ts _line
     _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || _ts="1970-01-01T00:00:00Z"
     _line=$(jq -n -c \
       --arg ts "$_ts" \
       --arg phase "$_phase" \
+      --arg project_id "$_project_id" \
+      --arg project_root "$_project_root" \
+      --arg project_root_sha8 "$_project_root_sha8" \
       --argjson picked_count "$_picked_count" \
       --argjson surprise_fired "$_surprise" \
       --argjson failopen "$_failopen" \
       --argjson llm_call_ms "$_llm_ms" \
-      '{ts: $ts, phase: $phase, picked_count: $picked_count, surprise_fired: $surprise_fired, failopen: $failopen, llm_call_ms: $llm_call_ms}' \
+      '{ts: $ts, phase: $phase, picked_count: $picked_count, surprise_fired: $surprise_fired, failopen: $failopen, llm_call_ms: $llm_call_ms,
+        project_id:(if $project_id=="" then null else $project_id end),
+        project_root:(if $project_root=="" then null else $project_root end),
+        project_root_sha8:(if $project_root_sha8=="" then null else $project_root_sha8 end)}' \
       2>/dev/null) || _line=""
     [ -z "$_line" ] && exit 0
 

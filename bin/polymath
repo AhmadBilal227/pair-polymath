@@ -1085,6 +1085,79 @@ HELP
     printf 'LLM cycle enabled. New cycles take effect within 5 min.\n'
     ;;
 
+  onboard)
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/onboard.sh"
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/doctor.sh" 2>/dev/null || true
+    pp_onboard_run "$@"
+    ;;
+
+  fun)
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/fun-mode.sh"
+    _pp_fun_sub="${1:-status}"
+    case "$_pp_fun_sub" in
+      status)
+        _pp_fun_user_env="${PP_USER_CONFIG:-${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}/config/user.env}"
+        if [ -f "$_pp_fun_user_env" ]; then
+          # shellcheck disable=SC1090
+          . "$_pp_fun_user_env" 2>/dev/null || true
+        fi
+        printf '\nPair Polymath fun mode\n'
+        printf '  Enabled:   %s\n' "${PP_FUN_MODE:-0}"
+        printf '  Style:     %s\n' "$(pp_fun_style_normalize "${PP_FUN_STYLE:-mentor}")"
+        printf '  Intensity: %s\n' "$(pp_fun_intensity_normalize "${PP_FUN_INTENSITY:-1}")"
+        printf '  Roast:     %s\n' "${PP_FUN_ALLOW_ROAST:-0}"
+        if _pp_fun_sample=$(PP_FUN_MODE="${PP_FUN_MODE:-0}" pp_fun_render 2>/dev/null); then
+          printf '  Sample:    %s\n' "$_pp_fun_sample"
+        fi
+        printf '\n'
+        ;;
+      on)
+        _pp_set_user_env_var PP_FUN_MODE 1 || exit 1
+        printf 'Fun mode enabled (display-only).\n'
+        ;;
+      off)
+        _pp_set_user_env_var PP_FUN_MODE 0 || exit 1
+        printf 'Fun mode disabled.\n'
+        ;;
+      style)
+        [ -n "${2:-}" ] || { printf 'polymath fun style: style required\n' >&2; exit 2; }
+        _pp_fun_style=$(pp_fun_style_normalize "$2")
+        if [ "$_pp_fun_style" != "$2" ]; then
+          printf 'polymath fun style: invalid style %s (gentle|hype|dry|mentor|founder|roast)\n' "$2" >&2
+          exit 2
+        fi
+        _pp_set_user_env_var PP_FUN_STYLE "$_pp_fun_style" || exit 1
+        if [ "$_pp_fun_style" = "roast" ]; then
+          _pp_set_user_env_var PP_FUN_ALLOW_ROAST 1 || exit 1
+          printf 'Fun style set to roast (workflow-only roast enabled).\n'
+        else
+          _pp_set_user_env_var PP_FUN_ALLOW_ROAST 0 || exit 1
+          printf 'Fun style set to %s.\n' "$_pp_fun_style"
+        fi
+        ;;
+      -h|--help|help)
+        cat <<'HELP'
+polymath fun — display-only session commentary
+
+Usage:
+  polymath fun status
+  polymath fun on
+  polymath fun off
+  polymath fun style gentle|hype|dry|mentor|founder|roast
+HELP
+        ;;
+      *)
+        printf 'polymath fun: unknown subcommand %s\n' "$_pp_fun_sub" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   logs)
     shift
     _pp_logs_n=10
@@ -1948,8 +2021,10 @@ polymath — Pair Polymath CLI
 Usage:
   polymath status      Show today's calls, lens registry, config flags
   polymath doctor      Run health checks (--network for live OpenAI probe)
+  polymath onboard     Guided activation setup (roles, lenses, cost, fun mode)
   polymath enable      Enable the LLM lens cycle (set PP_EXTERNAL_LLM=1)
   polymath disable     Disable the LLM cycle / status-only mode (PP_EXTERNAL_LLM=0)
+  polymath fun         Display-only session commentary (status / on / off / style)
   polymath logs        Tail recent lens observations (-n, --lens, --follow)
   polymath cost        Show estimated USD spend (--since, --by-lens, --json)
   polymath kpi         Rolling cost / retry / phase summary (--window Nd, --json)

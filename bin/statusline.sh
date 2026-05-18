@@ -230,6 +230,10 @@ _pp_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_pp_bin_dir/../lib/router-signals.sh"
 # shellcheck disable=SC1091
 . "$_pp_bin_dir/../lib/router.sh"
+# Display-only fun mode. Function-only; output is rendered at the very end
+# and never enters analyst prompts or UserPromptSubmit hook injection.
+# shellcheck disable=SC1091
+. "$_pp_bin_dir/../lib/fun-mode.sh" 2>/dev/null || true
 
 # Pair Polymath memory subsystem (Phase 2.3). Only sourced when enabled; the
 # default PP_MEMORY_ENABLE=0 keeps the cycle path byte-identical to pre-2.3
@@ -2556,6 +2560,31 @@ mon_valid=0
 
 topic_line=""
 body_line=""
+fun_line=""
+
+if command -v pp_fun_render >/dev/null 2>&1 && [ "${PP_FUN_MODE:-0}" = "1" ]; then
+  _pp_fun_test_error="unknown"
+  _pp_fun_test_cache="${PP_CACHE_DIR}/cc-test-${session_id}.cache"
+  if [ -f "$_pp_fun_test_cache" ]; then
+    if LC_ALL=C grep -q '^ERROR: true$' "$_pp_fun_test_cache" 2>/dev/null; then
+      _pp_fun_test_error="true"
+    elif LC_ALL=C grep -q '^ERROR: false$' "$_pp_fun_test_cache" 2>/dev/null; then
+      _pp_fun_test_error="false"
+    fi
+  fi
+  _pp_fun_dirty=0
+  [ -n "$dirty" ] && _pp_fun_dirty=1
+  _pp_fun_msg=$(PP_FUN_TEST_ERROR="$_pp_fun_test_error" \
+    PP_FUN_GIT_DIRTY="$_pp_fun_dirty" \
+    PP_FUN_BUDGET_PCT="${_pp_budget_pct:-100}" \
+    PP_FUN_CONTEXT_PCT="${pct:-0}" \
+    PP_FUN_IDLE_S="${session_idle_s:-0}" \
+    PP_FUN_COOLDOWN_FILE="${PP_CACHE_DIR}/pp-fun-${session_id}.last" \
+    pp_fun_render 2>/dev/null || true)
+  if [ -n "$_pp_fun_msg" ]; then
+    fun_line="${aurora_hue:-}~${R}  ${DIM_A}${_pp_fun_msg}${R}"
+  fi
+fi
 
 if [ "$slot" -eq 0 ] && [ "$tip_valid" -eq 1 ]; then
   topic_line="${aurora_hue}▸${R}  ${BOLD}${CYAN_SOFT}${tip_topic}${R}"
@@ -2599,4 +2628,5 @@ fi
 echo "$line"
 [ -n "$topic_line" ] && echo "$topic_line"
 [ -n "$body_line" ] && echo "$body_line"
+[ -n "$fun_line" ] && echo "$fun_line"
 exit 0

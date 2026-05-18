@@ -1030,6 +1030,60 @@ HELP
     esac
     ;;
 
+  insights)
+    shift
+    _ins_sub="${1:-score}"
+    shift || true
+    case "$_ins_sub" in
+      score)
+        _ins_window=7
+        _ins_json=0
+        _ins_all_projects=0
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --window)
+              [ -n "${2:-}" ] || { printf 'polymath insights score: --window requires a value (e.g. 7d)\n' >&2; exit 2; }
+              _ins_window="${2%d}"
+              case "$_ins_window" in ''|*[!0-9]*|0) printf 'polymath insights score: --window must be a positive integer number of days\n' >&2; exit 2 ;; esac
+              shift 2 ;;
+            --json) _ins_json=1; shift ;;
+            --all-projects) _ins_all_projects=1; shift ;;
+            -h|--help)
+              cat <<HELP
+polymath insights score — Score advisory usefulness and noise
+
+Usage:
+  polymath insights score [--window 7d] [--json] [--all-projects]
+
+Scores live OAR rows plus historical bootstrap rows. Stored score rows contain
+hashes, redacted snippets, feature flags, and evidence references, not raw
+transcript archives.
+HELP
+              exit 0
+              ;;
+            *) printf 'polymath insights score: unknown flag %s\n' "$1" >&2; exit 2 ;;
+          esac
+        done
+        # shellcheck source=lib/insights-score.sh disable=SC1091
+        . "$PP_ROOT/lib/insights-score.sh"
+        pp_insights_score "$_ins_window" "$_ins_json" "$_ins_all_projects"
+        ;;
+      -h|--help|"")
+        cat <<HELP
+polymath insights — Insight quality tools
+
+Usage:
+  polymath insights score [--window 7d] [--json] [--all-projects]
+HELP
+        ;;
+      *)
+        printf 'polymath insights: unknown subcommand %s\n' "$_ins_sub" >&2
+        printf '  Try: polymath insights score\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   oar-label)
     # v0.5.2 (Task 15) — manual catchup labeler (spec §B + §D).
     #
@@ -2203,6 +2257,7 @@ Usage:
   polymath kpi         Rolling cost / retry / phase summary (--window Nd, --json)
   polymath history     OAR observation outcomes — per-lens acted% (--window, --lens, --outcome, --json)
   polymath oar         OAR bootstrap tools (bootstrap scan/report)
+  polymath insights    Score advisory usefulness/noise (score --json)
   polymath oar-label   Manual catchup labeler (--all-due [--limit N])
   polymath retry-router   v0.5.1 cost-router state (status / shadow-summary / clear-flag)
   polymath lens-gates  v0.5.1.1 planner-grounding kill-switches (status / enable / disable)

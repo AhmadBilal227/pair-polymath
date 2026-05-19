@@ -77,9 +77,10 @@ teardown() {
 
 @test "dim: evaluate_gate clears with 3 strong lenses meeting all floors" {
   oar=$(mktemp)
-  # 3 lenses × 280 rows × ~10% acted × 6+ distinct dates
+  # 3 lenses × 350 rows × ~10% acted × 6+ distinct dates
+  # 350 rows: worst-case ~35 holdout → ~315 gated, safely above min_n=250
   for lens in ENG SEC UX; do
-    for i in $(seq 1 280); do
+    for i in $(seq 1 350); do
       out="ignored"
       [ "$((i % 10))" = "0" ] && out="acted"
       day=$(( (i % 6) + 10 ))
@@ -125,4 +126,63 @@ teardown() {
   echo "$result" | jq -e '.qualifies == false' >/dev/null
   echo "$result" | jq -e '.per_lens == []' >/dev/null
   rm -f "$oar"
+}
+
+@test "dim: evaluate_gate_daily transitions monitoring → gated when gate clears" {
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  # 350 rows per lens: worst-case ~35 holdout → ~315 gated, safely above min_n=250
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 350); do
+      out="ignored"
+      [ "$((i % 10))" = "0" ] && out="acted"
+      day=$(( (i % 6) + 10 ))
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+        "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
+    done
+  done
+  pp_dim_evaluate_gate_daily "abcd1234"
+  state=$(pp_dim_get_current_state "abcd1234")
+  [ "$state" = "gated" ]
+}
+
+@test "dim: evaluate_gate_daily is idempotent within a UTC date" {
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s1","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}\n' > "$oar"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  eval_file=$(pp_dim_gate_eval_path "abcd1234")
+  [ "$(wc -l < "$eval_file")" -eq 1 ]
+}
+
+@test "dim: evaluate_gate_daily re-runs after UTC date boundary" {
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s1","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}\n' > "$oar"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  # Backdate last-eval to yesterday
+  last=$(pp_dim_last_eval_path "abcd1234")
+  printf '%s' "$(( $(date +%s) - 90000 ))" > "$last"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  eval_file=$(pp_dim_gate_eval_path "abcd1234")
+  [ "$(wc -l < "$eval_file")" -eq 2 ]
+}
+
+@test "dim: evaluate_gate_daily writes gate snapshot to forensic log" {
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s1","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}\n' > "$oar"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  eval_file=$(pp_dim_gate_eval_path "abcd1234")
+  jq -e '.qualifies == false and (.evaluated_at | type == "string")' "$eval_file"
+}
+
+@test "dim: evaluate_gate_daily honors mkdir lock (no double-eval)" {
+  lock="$PP_STATE_DIR/dim-eval-abcd1234.lock"
+  mkdir -p "$lock"
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s1","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}\n' > "$oar"
+  # Pre-held lock → second invocation must skip
+  pp_dim_evaluate_gate_daily "abcd1234"
+  eval_file=$(pp_dim_gate_eval_path "abcd1234")
+  # No eval line written because lock was held
+  [ ! -f "$eval_file" ] || [ "$(wc -l < "$eval_file")" -eq 0 ]
 }

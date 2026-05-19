@@ -100,3 +100,96 @@ pp_dim_evaluate_gate() {
            "$PP_DIM_MIN_LENSES" "$PP_DIM_MIN_N" "$PP_DIM_MIN_DISTINCT_DATES")
   printf '%s\n' "$gate" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + {evaluated_at:$ts}'
 }
+
+# pp_dim_evaluate_gate_daily SHA8 [OAR_FILE]
+# Public entry point. Once per UTC date, under mkdir lock:
+#   1. Compute gate decision
+#   2. Append forensic row to dim-gate-last-eval.<sha8>.jsonl
+#   3. Apply state-machine transition if gate state changed
+#   4. Update dim-last-eval-epoch.<sha8>.txt
+pp_dim_evaluate_gate_daily() {
+  local sha8="${1:-default}"
+  local oar="${2:-${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl}"
+  # Gate 0: respect master enable flag
+  [ "${PP_DIM_ENABLE:-1}" = "1" ] || return 0
+  # Gate 1: once-per-UTC-date
+  local today
+  today=$(date -u +%Y%m%d)
+  local last_file
+  last_file=$(pp_dim_last_eval_path "$sha8")
+  if [ -f "$last_file" ]; then
+    local last_epoch
+    last_epoch=$(cat "$last_file" 2>/dev/null)
+    if [ -n "$last_epoch" ] && [ "$last_epoch" -gt 0 ] 2>/dev/null; then
+      local last_day
+      last_day=$(date -u -r "$last_epoch" +%Y%m%d 2>/dev/null \
+                 || date -u -d "@$last_epoch" +%Y%m%d 2>/dev/null \
+                 || echo "")
+      [ "$last_day" = "$today" ] && return 0
+    fi
+  fi
+  # Gate 2: mkdir lock
+  local lock="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/state}/dim-eval-${sha8}.lock"
+  mkdir -p "$(dirname "$lock")" 2>/dev/null
+  if ! mkdir "$lock" 2>/dev/null; then
+    return 0  # Another process is evaluating; bail.
+  fi
+  trap 'rm -rf "$lock" 2>/dev/null; true' RETURN
+  # Double-checked locking: re-read last-eval inside the lock
+  if [ -f "$last_file" ]; then
+    local last_epoch2
+    last_epoch2=$(cat "$last_file" 2>/dev/null)
+    if [ -n "$last_epoch2" ] && [ "$last_epoch2" -gt 0 ] 2>/dev/null; then
+      local last_day2
+      last_day2=$(date -u -r "$last_epoch2" +%Y%m%d 2>/dev/null \
+                  || date -u -d "@$last_epoch2" +%Y%m%d 2>/dev/null \
+                  || echo "")
+      if [ "$last_day2" = "$today" ]; then
+        rm -rf "$lock"
+        trap - RETURN
+        return 0
+      fi
+    fi
+  fi
+  # Evaluate gate
+  local gate
+  gate=$(pp_dim_evaluate_gate "$oar" "$sha8")
+  # Append forensic row
+  local eval_file
+  eval_file=$(pp_dim_gate_eval_path "$sha8")
+  mkdir -p "$(dirname "$eval_file")" 2>/dev/null
+  printf '%s\n' "$gate" >> "$eval_file"
+  # Update last-eval epoch
+  date +%s > "$last_file"
+  # Apply state transition
+  pp_dim_apply_transition "$sha8" "$gate"
+  rm -rf "$lock"
+  trap - RETURN
+}
+
+# pp_dim_apply_transition SHA8 GATE_JSON
+# State machine: monitoring → gated → active → quarantine → monitoring.
+# Read current state, decide next, append transition if changed.
+pp_dim_apply_transition() {
+  local sha8="$1" gate="$2"
+  local cur next reason
+  cur=$(pp_dim_get_current_state "$sha8")
+  local qualifies
+  qualifies=$(printf '%s' "$gate" | jq -r '.qualifies // false')
+  next="$cur"
+  reason=""
+  case "$cur" in
+    monitoring)
+      if [ "$qualifies" = "true" ]; then
+        next="gated"; reason="gate cleared; entering holdout validation window"
+      fi
+      ;;
+    gated|active|quarantine)
+      # State transitions for these are time-based (handled in Tasks 11/12).
+      :
+      ;;
+  esac
+  if [ "$next" != "$cur" ]; then
+    pp_dim_append_transition "$sha8" "$cur" "$next" "$reason" "auto" "$gate"
+  fi
+}

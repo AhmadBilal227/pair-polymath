@@ -186,3 +186,36 @@ teardown() {
   # No eval line written because lock was held
   [ ! -f "$eval_file" ] || [ "$(wc -l < "$eval_file")" -eq 0 ]
 }
+
+@test "dim: gated → active after 7d holdout validation with no drift" {
+  # Synth state: gated at t-8d
+  pp_dim_append_transition "abcd1234" "monitoring" "gated" "test" "auto" '{"qualifies":true}'
+  state_file=$(pp_dim_state_file_path "abcd1234")
+  # Backdate the transition timestamp by 8 days
+  tmp=$(mktemp)
+  past=$(date -u -v-8d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+         || date -u -d "8 days ago" +%Y-%m-%dT%H:%M:%SZ)
+  jq -c --arg ts "$past" '.ts = $ts' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+  # OAR with matching holdout + gated rates (no drift)
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  for i in $(seq 1 500); do
+    out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+    day=$(( (i % 7) + 10 ))
+    printf '{"schema_version":2,"lens":"ENG","outcome":"%s","session_id":"s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+      "$out" "$i" "$day" >> "$oar"
+  done
+  # Force re-eval after date boundary
+  printf '0' > "$(pp_dim_last_eval_path abcd1234)"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  state=$(pp_dim_get_current_state "abcd1234")
+  [ "$state" = "active" ]
+}
+
+@test "dim: gated stays gated when holdout window not yet elapsed" {
+  pp_dim_append_transition "abcd1234" "monitoring" "gated" "test" "auto" '{"qualifies":true}'
+  printf '0' > "$(pp_dim_last_eval_path abcd1234)"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  state=$(pp_dim_get_current_state "abcd1234")
+  [ "$state" = "gated" ]
+}

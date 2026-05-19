@@ -184,12 +184,71 @@ pp_dim_apply_transition() {
         next="gated"; reason="gate cleared; entering holdout validation window"
       fi
       ;;
-    gated|active|quarantine)
-      # State transitions for these are time-based (handled in Tasks 11/12).
+    gated)
+      # Check if 7d holdout validation window has elapsed
+      local entered_at age_days
+      entered_at=$(pp_dim_state_entered_at "$sha8" "gated")
+      [ -n "$entered_at" ] || return 0
+      age_days=$(pp_dim_days_since "$entered_at")
+      if [ "$age_days" -ge "$PP_DIM_HOLDOUT_VALIDATION_DAYS" ]; then
+        # Check for drift; if no drift, promote
+        if pp_dim_holdout_no_drift "$sha8" "$gate"; then
+          next="active"; reason="holdout validation passed (${age_days}d, no drift)"
+        fi
+      fi
+      ;;
+    active|quarantine)
+      # State transitions for these are time-based (handled in Tasks 12+).
       :
       ;;
   esac
   if [ "$next" != "$cur" ]; then
     pp_dim_append_transition "$sha8" "$cur" "$next" "$reason" "auto" "$gate"
   fi
+}
+
+# pp_dim_state_entered_at SHA8 STATE → ISO timestamp of LAST transition INTO STATE, or empty
+pp_dim_state_entered_at() {
+  local f
+  f=$(pp_dim_state_file_path "$1")
+  [ -f "$f" ] || return 0
+  jq -r --arg s "$2" 'select(.to == $s) | .ts' "$f" 2>/dev/null | tail -n 1
+}
+
+# pp_dim_days_since ISO_TS → integer days (UTC, BSD/GNU date-portable)
+pp_dim_days_since() {
+  local ts="$1"
+  [ -z "$ts" ] && { echo "0"; return; }
+  local then_epoch now_epoch
+  then_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null \
+               || date -u -d "$ts" +%s 2>/dev/null \
+               || echo "0")
+  now_epoch=$(date -u +%s)
+  echo $(( (now_epoch - then_epoch) / 86400 ))
+}
+
+# pp_dim_holdout_no_drift SHA8 GATE_JSON → 0 (no drift) / 1 (drift)
+# Compares holdout acted% vs gated acted% using pooled SE.
+# Drift = |holdout_pct - gated_pct| > 2*SE. Returns 0 (no drift) if holdout_n < 20.
+pp_dim_holdout_no_drift() {
+  local sha8="$1"
+  local oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
+  local rollup
+  rollup=$(pp_dim_stats_per_lens_rollup "$oar" "$sha8")
+  local gated_s gated_n holdout_s holdout_n
+  gated_s=$(printf '%s' "$rollup" | jq '[.gated[].s]   | add // 0')
+  gated_n=$(printf '%s' "$rollup" | jq '[.gated[].n]   | add // 0')
+  holdout_s=$(printf '%s' "$rollup" | jq '[.holdout[].s] | add // 0')
+  holdout_n=$(printf '%s' "$rollup" | jq '[.holdout[].n] | add // 0')
+  # Need at least 20 holdout rows for a meaningful SE check; otherwise default no-drift.
+  [ "$holdout_n" -lt 20 ] && return 0
+  LC_ALL=C awk -v gs="$gated_s" -v gn="$gated_n" -v hs="$holdout_s" -v hn="$holdout_n" 'BEGIN {
+    if (gn == 0 || hn == 0) exit 0
+    gp = gs / gn; hp = hs / hn
+    pooled = (gs + hs) / (gn + hn)
+    se = sqrt(pooled * (1 - pooled) * (1/gn + 1/hn))
+    diff = gp - hp; if (diff < 0) diff = -diff
+    if (se == 0) exit 0
+    exit (diff > 2 * se) ? 1 : 0
+  }'
 }

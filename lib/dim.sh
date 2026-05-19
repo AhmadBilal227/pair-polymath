@@ -197,9 +197,22 @@ pp_dim_apply_transition() {
         fi
       fi
       ;;
-    active|quarantine)
-      # State transitions for these are time-based (handled in Tasks 12+).
-      :
+    active)
+      # Continuous drift surveillance
+      if ! pp_dim_holdout_no_drift "$sha8" "$gate"; then
+        next="quarantine"; reason="post-activation drift detected"
+      fi
+      ;;
+    quarantine)
+      # Auto-recover after 14d clean window
+      local entered_at age_days
+      entered_at=$(pp_dim_state_entered_at "$sha8" "quarantine")
+      [ -n "$entered_at" ] || return 0
+      age_days=$(pp_dim_days_since "$entered_at")
+      if [ "$age_days" -ge "$PP_DIM_QUARANTINE_RECOVERY_DAYS" ] && \
+         pp_dim_holdout_no_drift "$sha8" "$gate"; then
+        next="monitoring"; reason="quarantine cleared after ${age_days}d clean window"
+      fi
       ;;
   esac
   if [ "$next" != "$cur" ]; then

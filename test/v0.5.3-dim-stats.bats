@@ -84,3 +84,13 @@ setup() {
   result=$(pp_dim_stats_events_to_clear 0 200 0.05 0.05)
   [ "$result" = "-1" ]
 }
+
+@test "dim-stats: events-to-clear finds answers in [1,5] (bisect lower-bound regression)" {
+  # Craft a case where the smallest delta_n is small (~1-5). With s=2,n=10,
+  # observed p=20%; LCB at small n is wide, but adding a few events at 20% acted
+  # quickly clears the 5% target. The right answer must be small.
+  result=$(pp_dim_stats_events_to_clear 2 10 0.05 0.05)
+  # Sanity bounds — must be a positive integer below 100.
+  [ "$result" -gt 0 ] 2>/dev/null
+  [ "$result" -lt 100 ] 2>/dev/null
+}

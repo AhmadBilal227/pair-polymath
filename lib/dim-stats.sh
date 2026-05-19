@@ -61,7 +61,7 @@ pp_dim_stats_events_to_clear() {
     echo "-1"
     return 0
   fi
-  local delta=10 max_probe=1000000
+  local delta=1 max_probe=1000000
   local probe_s probe_n probe_lcb
   while [ "$delta" -lt "$max_probe" ]; do
     probe_n=$((n + delta))
@@ -75,7 +75,10 @@ pp_dim_stats_events_to_clear() {
     delta=$((delta * 2))
   done
   [ "$delta" -ge "$max_probe" ] && { echo "$max_probe"; return 0; }
-  local lo=$((delta / 2)) hi="$delta" mid
+  # lo=0 is guaranteed non-clearing because the "already cleared" case
+  # short-circuits earlier; this gives the bisect a proven lower bound
+  # regardless of the exponential probe's first hit.
+  local lo=0 hi="$delta" mid
   while [ "$((hi - lo))" -gt 1 ]; do
     mid=$(( (lo + hi) / 2 ))
     probe_n=$((n + mid))

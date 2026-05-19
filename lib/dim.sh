@@ -46,3 +46,36 @@ pp_dim_last_eval_path() {
 pp_dim_gate_eval_path() {
   echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-gate-last-eval.${1:-default}.jsonl"
 }
+
+# pp_dim_get_current_state SHA8 → current state (default: "monitoring")
+# Reads the last line of dim-state.<sha8>.jsonl; jq-extracts .to.
+pp_dim_get_current_state() {
+  local f
+  f=$(pp_dim_state_file_path "${1:-default}")
+  [ -f "$f" ] || { echo "monitoring"; return 0; }
+  local last
+  last=$(tail -n 1 "$f" 2>/dev/null)
+  [ -z "$last" ] && { echo "monitoring"; return 0; }
+  local state
+  state=$(printf '%s' "$last" | jq -r '.to // "monitoring"' 2>/dev/null)
+  [ -z "$state" ] || [ "$state" = "null" ] && state="monitoring"
+  echo "$state"
+}
+
+# pp_dim_append_transition SHA8 FROM TO REASON SOURCE GATE_SNAPSHOT_JSON
+# Atomically appends one transition row to dim-state.<sha8>.jsonl.
+# SOURCE: "auto" | "operator_override" | "auto_recovery"
+pp_dim_append_transition() {
+  local sha8="${1:-default}" from="${2:-monitoring}" to="${3:-monitoring}"
+  local reason="${4:-}" source="${5:-auto}" gate_json="${6:-{\}}"
+  local f
+  f=$(pp_dim_state_file_path "$sha8")
+  mkdir -p "$(dirname "$f")" 2>/dev/null
+  local ts row
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  row=$(jq -nc --arg ts "$ts" --arg from "$from" --arg to "$to" \
+              --arg reason "$reason" --arg source "$source" \
+              --argjson gate_snapshot "$gate_json" \
+    '{ts:$ts, from:$from, to:$to, reason:$reason, source:$source, gate_snapshot:$gate_snapshot}')
+  printf '%s\n' "$row" >> "$f"
+}

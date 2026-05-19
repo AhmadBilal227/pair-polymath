@@ -3,6 +3,43 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.6.0] — 2026-05-20 — v0.5.3 DIM (control plane)
+
+The **Developer Insights Module** control plane. Ships shadow-by-default with a metric-gated auto-promotion from `monitoring → gated → active`. Statistical gate uses time-uniform Wilson LCB (Howard et al. 2021), no fixed peek budget. Per-project state sharding from day one. Workforce-management CLI (`polymath agents *`) and trajectory engine are deferred to v0.5.4+ and consume this control plane.
+
+### Added
+
+- `lib/dim.sh` — control plane (state machine + gate evaluator + per-project state I/O)
+- `lib/dim-stats.sh` — pure-math primitives (anytime-CS LCB, composite gate, salted 10% holdout, events-to-clear)
+- `polymath dim {status [--json], enable, disable, force-activate, force-disable}` — operator surface
+- `doctor_check_dim_gate_progress` — yellow during monitoring/gated, green at active, red at quarantine
+- `doctor_check_dim_data_quality` — Goodhart drift detector (holdout vs. gated rate divergence)
+- `hooks/inject-monitor-insight.sh` — daily gate evaluation call (once-per-UTC-date, mkdir-locked)
+- `test/v0.5.3-dim-stats.bats` + `test/v0.5.3-dim.bats` — 56 new tests
+- `docs/v0.5.3-dim-spec.md` + GPT pre-implementation review addendum
+- `docs/superpowers/plans/2026-05-19-v0.5.3-dim.md` — task-by-task TDD plan
+
+### Decisions
+
+- **Release as 0.5.6.0, not 0.5.3.0.** Working title "v0.5.3 DIM" stays in task tracking and spec filename; release version monotonic-continues v0.5.5.1.
+- **Time-uniform CS, not Bonferroni-30.** Original spec used z=2.94 for 30-peek Bonferroni; GPT review caught that daily evaluation runs indefinitely and Bonferroni-30 silently under-corrects past day 31. Switched to Howard et al. 2021 stitched Wilson.
+- **Per-project sharding NOW, not v0.5.4.** State files keyed by `project_root_sha8`. One project's OAR accumulation cannot auto-activate DIM for another.
+- **`enable` ≠ `force-activate`.** GPT review caught that aliasing them silently lets `disable` leave monitoring running.
+
+### Non-goals (deferred)
+
+- `polymath agents *` workforce CLI — v0.5.4 (consumes DIM)
+- Per-day trajectory engine + anomaly flags — v0.5.4 (first DIM-active feature)
+- Flow Health / Friction Signal / Assistance Calibration — v0.6
+- Cross-project aggregation — never (local-first invariant)
+
+### Test plan
+
+- `bats test/v0.5.3-dim-stats.bats` — 20/20 green
+- `bats test/v0.5.3-dim.bats` — 36/36 green
+- `bats test/` — 1061/1061 green (1005 + 56)
+- `shellcheck -S warning` on `lib/dim*.sh bin/polymath hooks/inject-monitor-insight.sh lib/doctor.sh` — clean
+
 ## [0.5.5.1] — 2026-05-19
 
 Finishes the three brand touchpoints v0.5.5.0 explicitly deferred ("helpers shipped; call-site wiring next release") and lands the first scheduled-job surface (`polymath auto-update`). All v0.5.5 spec'd surfaces are now wired.

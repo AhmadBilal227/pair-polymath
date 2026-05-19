@@ -386,3 +386,25 @@ teardown() {
   PP_ROOT="$PP_ROOT" run doctor_check_dim_gate_progress
   [ "$status" -eq 2 ]
 }
+
+@test "dim doctor: data_quality returns green pre-activation" {
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/doctor.sh"
+  PP_ROOT="$PP_ROOT" run doctor_check_dim_data_quality
+  [ "$status" -eq 0 ]
+}
+
+@test "dim doctor: data_quality green when active + no drift" {
+  pp_dim_append_transition "default" "monitoring" "gated" "" "auto" '{}'
+  pp_dim_append_transition "default" "gated" "active" "" "auto" '{}'
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  for i in $(seq 1 100); do
+    out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+    printf '{"schema_version":2,"lens":"ENG","outcome":"%s","session_id":"s%d","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"default"}\n' \
+      "$out" "$i" >> "$oar"
+  done
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/doctor.sh"
+  PP_ROOT="$PP_ROOT" run doctor_check_dim_data_quality
+  [ "$status" -eq 0 ]
+}

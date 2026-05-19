@@ -3,8 +3,23 @@
 setup() {
   PP_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export PP_ROOT
+  HOME="$(mktemp -d)"
+  export HOME
+  CLAUDE_DIR="$HOME/.claude"
+  PP_CACHE_DIR="$CLAUDE_DIR/cache"
+  PP_STATE_DIR="$CLAUDE_DIR/state"
+  PP_HOME="$CLAUDE_DIR/pair-polymath"
+  export CLAUDE_DIR PP_CACHE_DIR PP_STATE_DIR PP_HOME
+  mkdir -p "$PP_CACHE_DIR" "$PP_STATE_DIR" "$PP_HOME"
   # shellcheck disable=SC1091
   . "$PP_ROOT/lib/dim-stats.sh"
+}
+
+teardown() {
+  if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
+    rm -rf "$HOME"
+  fi
+  return 0
 }
 
 @test "dim-stats: source guard prevents double-sourcing" {
@@ -160,9 +175,10 @@ setup() {
     slot=$(pp_dim_stats_holdout_slot "sess$i" "ENGINEERING" "2026-05-19T12:00:00Z")
     [ "$slot" = "0" ] && in_holdout=$((in_holdout + 1))
   done
-  # Expected 20 (10%); allow 2σ margin: 10-32
-  [ "$in_holdout" -ge 10 ] 2>/dev/null
-  [ "$in_holdout" -le 32 ] 2>/dev/null
+  # Expected 20 (10%); allow ~3σ margin: 6-36. (σ ≈ 4.24 for n=200, p=0.1.)
+  # The salt is random per-test, so wider bounds keep this test from flaking.
+  [ "$in_holdout" -ge 6 ] 2>/dev/null
+  [ "$in_holdout" -le 36 ] 2>/dev/null
   rm -rf "$HOME"
 }
 
@@ -293,4 +309,100 @@ EOF
   result=$(pp_dim_stats_per_lens_rollup "/nonexistent" "abcd1234")
   echo "$result" | jq -e '.gated == [] and .holdout == []' >/dev/null
   rm -rf "$HOME"
+}
+
+# ---------------------------------------------------------------------------
+# 5-reviewer critical-fix bundle regressions
+# ---------------------------------------------------------------------------
+
+@test "dim-stats: FIX#1 — setup creates hermetic HOME (no real pollution)" {
+  # If setup() were not hermetic, $HOME would be the developer's real home.
+  # We assert HOME is under /tmp or /var (mktemp's default), never the real
+  # home directory.
+  case "$HOME" in
+    /tmp/*|/var/folders/*|/var/tmp/*|/private/tmp/*|/private/var/*) : ;;
+    *) printf 'HOME (%s) is not under a temp dir — setup() is not hermetic\n' "$HOME" >&2; false ;;
+  esac
+  [ ! -e "$HOME/.claude/pair-polymath/dim-holdout-salt" ] || \
+    [ "${HOME#/tmp/}" != "$HOME" ] || [ "${HOME#/var/}" != "$HOME" ] || \
+    [ "${HOME#/private/}" != "$HOME" ]
+}
+
+@test "dim-stats: FIX#6 — sourcing the lib does not export LC_ALL to caller" {
+  # The lib must not mutate LC_ALL globally. We unset before sourcing and
+  # verify LC_ALL is still unset after.
+  (
+    unset LC_ALL
+    # shellcheck disable=SC1091
+    # Force re-source by clearing the guard
+    _PP_DIM_STATS_SOURCED=0
+    . "$PP_ROOT/lib/dim-stats.sh"
+    [ -z "${LC_ALL:-}" ]
+  )
+}
+
+@test "dim-stats: FIX#8 — sha256 fallback to cksum when no crypto hash available" {
+  # Stub the hash commands by hiding them with a constrained PATH.
+  # od, awk, cksum, tr live in /usr/bin or /bin; we need those.
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  hidden=$(mktemp -d)
+  for cmd in shasum sha256sum openssl; do
+    src=$(command -v "$cmd" 2>/dev/null) || continue
+    # Create a placeholder that always errors out — masks the real one
+    # without breaking PATH lookups for other tools.
+    cat > "$hidden/$cmd" <<'EOF'
+#!/bin/sh
+exit 127
+EOF
+    chmod +x "$hidden/$cmd"
+  done
+  PATH="$hidden:$PATH" \
+    bash -c '. '"$PP_ROOT"'/lib/dim-stats.sh
+             # In this restricted env, holdout_slot should still emit 0..9.
+             v=$(pp_dim_stats_holdout_slot "sess1" "ENG" "2026-05-19T00:00:00Z")
+             [ "$v" -ge 0 ] && [ "$v" -le 9 ]'
+  rm -rf "$hidden" "$HOME"
+}
+
+@test "dim-stats: FIX#11 — composite-gate handles non-numeric s/n/distinct_dates" {
+  # Inject garbage: nulls, strings, missing fields. The function must NOT
+  # crash and must coerce to qualifies=false (n_below_floor).
+  input='[
+    {"lens":"A","s":null,"n":"oops","distinct_dates":true},
+    {"lens":"B"}
+  ]'
+  result=$(pp_dim_stats_composite_gate "$input" 0.05 0.05 3 250 5 2>/dev/null)
+  echo "$result" | jq -e '.qualifies == false' >/dev/null
+  echo "$result" | jq -e '.per_lens | length == 2' >/dev/null
+}
+
+@test "dim-stats: FIX#12 — ensure_salt refuses to write through a symlink" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  mkdir -p "$PP_HOME"
+  # Pre-place a symlink at the salt path pointing to an attacker-controlled file.
+  target=$(mktemp)
+  ln -s "$target" "$PP_HOME/dim-holdout-salt"
+  run _pp_dim_stats_ensure_salt
+  [ "$status" -ne 0 ]
+  # Symlink target must NOT have been written through.
+  [ ! -s "$target" ]
+  rm -f "$target"
+}
+
+@test "dim-stats: FIX#12 — ensure_salt creates parent dir with 0700 perms (umask 077)" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  # Force loose umask in the caller; the helper must still create dir 0700.
+  ( umask 022 && _pp_dim_stats_ensure_salt )
+  perms=$(stat -f %p "$PP_HOME" 2>/dev/null | sed 's/^.*\([0-7][0-7][0-7]\)$/\1/' \
+          || stat -c %a "$PP_HOME" 2>/dev/null)
+  [ "$perms" = "700" ]
 }

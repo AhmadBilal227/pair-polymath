@@ -2622,13 +2622,53 @@ EOF
           printf 'polymath dim force-activate: requires PP_DIM_ENABLE=1. Run `polymath dim enable` first.\n' >&2
           exit 2
         fi
+        # Take the same dim-eval lock used by the daily evaluator to avoid
+        # interleaving an operator override with an in-flight auto-transition.
+        _force_lock="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/state}/dim-eval-${_dim_sha8}.lock"
+        mkdir -p "$(dirname "$_force_lock")" 2>/dev/null
+        _force_wait=0
+        _force_held=0
+        while [ "$_force_wait" -lt 10 ]; do
+          if mkdir "$_force_lock" 2>/dev/null; then
+            _force_held=1; break
+          fi
+          sleep 0.1
+          _force_wait=$((_force_wait + 1))
+        done
+        if [ "$_force_held" -ne 1 ]; then
+          printf 'polymath dim force-activate: could not acquire lock; another evaluation in progress.\n' >&2
+          exit 2
+        fi
+        # shellcheck disable=SC2064
+        trap "rm -rf '$_force_lock' 2>/dev/null" EXIT INT TERM
         _pp_set_user_env_var "PP_DIM_ACTIVE" "1"
         pp_dim_append_transition "$_dim_sha8" "$(pp_dim_get_current_state "$_dim_sha8")" "active" "operator override" "operator_override" '{}'
+        rm -rf "$_force_lock" 2>/dev/null
+        trap - EXIT INT TERM
         printf 'DIM activated by operator override (PP_DIM_ACTIVE=1).\n'
         ;;
       force-disable)
+        _force_lock="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/state}/dim-eval-${_dim_sha8}.lock"
+        mkdir -p "$(dirname "$_force_lock")" 2>/dev/null
+        _force_wait=0
+        _force_held=0
+        while [ "$_force_wait" -lt 10 ]; do
+          if mkdir "$_force_lock" 2>/dev/null; then
+            _force_held=1; break
+          fi
+          sleep 0.1
+          _force_wait=$((_force_wait + 1))
+        done
+        if [ "$_force_held" -ne 1 ]; then
+          printf 'polymath dim force-disable: could not acquire lock; another evaluation in progress.\n' >&2
+          exit 2
+        fi
+        # shellcheck disable=SC2064
+        trap "rm -rf '$_force_lock' 2>/dev/null" EXIT INT TERM
         _pp_set_user_env_var "PP_DIM_ACTIVE" "0"
         pp_dim_append_transition "$_dim_sha8" "$(pp_dim_get_current_state "$_dim_sha8")" "monitoring" "operator force-disable" "operator_override" '{}'
+        rm -rf "$_force_lock" 2>/dev/null
+        trap - EXIT INT TERM
         printf 'DIM deactivated by operator override (PP_DIM_ACTIVE=0). Monitoring continues.\n'
         ;;
       help|-h|--help|"")

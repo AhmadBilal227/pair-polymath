@@ -77,13 +77,13 @@ teardown() {
 
 @test "dim: evaluate_gate clears with 3 strong lenses meeting all floors" {
   oar=$(mktemp)
-  # 3 lenses × 350 rows × ~10% acted × 6+ distinct dates
+  # 3 lenses × 350 rows × ~10% acted × 7 distinct dates (== MIN_CALENDAR_DAYS)
   # 350 rows: worst-case ~35 holdout → ~315 gated, safely above min_n=250
   for lens in ENG SEC UX; do
     for i in $(seq 1 350); do
       out="ignored"
       [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 6) + 10 ))
+      day=$(( (i % 7) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done
@@ -135,7 +135,7 @@ teardown() {
     for i in $(seq 1 350); do
       out="ignored"
       [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 6) + 10 ))
+      day=$(( (i % 7) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done
@@ -197,13 +197,15 @@ teardown() {
          || date -u -d "8 days ago" +%Y-%m-%dT%H:%M:%SZ)
   jq -c --arg ts "$past" '.ts = $ts' "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
-  # OAR with matching holdout + gated rates (no drift)
+  # OAR with 3 strong lenses so the gate stays qualified during holdout.
   oar="$PP_CACHE_DIR/oar-labeled.jsonl"
-  for i in $(seq 1 500); do
-    out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
-    day=$(( (i % 7) + 10 ))
-    printf '{"schema_version":2,"lens":"ENG","outcome":"%s","session_id":"s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
-      "$out" "$i" "$day" >> "$oar"
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 500); do
+      out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+      day=$(( (i % 7) + 10 ))
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+        "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
+    done
   done
   # Force re-eval after date boundary
   printf '0' > "$(pp_dim_last_eval_path abcd1234)"
@@ -214,6 +216,17 @@ teardown() {
 
 @test "dim: gated stays gated when holdout window not yet elapsed" {
   pp_dim_append_transition "abcd1234" "monitoring" "gated" "test" "auto" '{"qualifies":true}'
+  # Provide an OAR with 3 strong lenses so the gate stays qualified — the
+  # gated→monitoring regress edge only fires when the gate UN-qualifies.
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 500); do
+      out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+      day=$(( (i % 7) + 10 ))
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+        "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
+    done
+  done
   printf '0' > "$(pp_dim_last_eval_path abcd1234)"
   pp_dim_evaluate_gate_daily "abcd1234"
   state=$(pp_dim_get_current_state "abcd1234")
@@ -423,4 +436,106 @@ teardown() {
   printf '%s\n' "$output" | grep -q 'disable'
   printf '%s\n' "$output" | grep -q 'force-activate'
   printf '%s\n' "$output" | grep -q 'force-disable'
+}
+
+# ---------------------------------------------------------------------------
+# 5-reviewer critical-fix bundle regressions
+# ---------------------------------------------------------------------------
+
+@test "dim: FIX#7 — gated → monitoring when gate unqualifies during holdout" {
+  # Synth state: gated at t-3d (within holdout window) with a degraded gate.
+  pp_dim_append_transition "abcd1234" "monitoring" "gated" "test" "auto" '{"qualifies":true}'
+  state_file=$(pp_dim_state_file_path "abcd1234")
+  past=$(date -u -v-3d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+         || date -u -d "3 days ago" +%Y-%m-%dT%H:%M:%SZ)
+  tmp=$(mktemp)
+  jq -c --arg ts "$past" '.ts = $ts' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+  # Degraded OAR — only one lens, gate will report qualifies=false.
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  for i in $(seq 1 50); do
+    printf '{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s%d","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}\n' "$i" >> "$oar"
+  done
+  printf '0' > "$(pp_dim_last_eval_path abcd1234)"
+  pp_dim_evaluate_gate_daily "abcd1234"
+  state=$(pp_dim_get_current_state "abcd1234")
+  [ "$state" = "monitoring" ]
+  # And the transition reason references regression
+  tail -n 1 "$state_file" | jq -e '.to == "monitoring" and (.reason | test("regress"))'
+}
+
+@test "dim: FIX#9 — calendar span below floor blocks qualifies even with 3 strong lenses" {
+  oar=$(mktemp)
+  # 3 strong lenses, but EVERY row is on the same calendar day → span=1.
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 350); do
+      out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+        "$lens" "$out" "$lens" "$i" >> "$oar"
+    done
+  done
+  result=$(pp_dim_evaluate_gate "$oar" "abcd1234")
+  # Should fail global calendar floor even if per-lens stats would clear.
+  # (distinct_dates per lens is also 1, so per-lens floor fails too — but
+  # the global stamp must be present and qualifies must be false.)
+  echo "$result" | jq -e '.qualifies == false' >/dev/null
+  echo "$result" | jq -e '.calendar_days_floor == 7' >/dev/null
+  echo "$result" | jq -e '.calendar_span_days < 7' >/dev/null
+  rm -f "$oar"
+}
+
+@test "dim: FIX#9 — calendar span exposed on every gate evaluation" {
+  oar=$(mktemp)
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 350); do
+      out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+      day=$(( (i % 7) + 10 ))
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+        "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
+    done
+  done
+  result=$(pp_dim_evaluate_gate "$oar" "abcd1234")
+  echo "$result" | jq -e '.calendar_span_days >= 7' >/dev/null
+  echo "$result" | jq -e '.calendar_days_floor == 7' >/dev/null
+  echo "$result" | jq -e '.qualifies == true' >/dev/null
+  rm -f "$oar"
+}
+
+@test "dim: FIX#10 — force-activate acquires dim-eval lock before append" {
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  PP_DIM_PROJECT_SHA8="locktest8"
+  export PP_USER_CONFIG PP_DIM_PROJECT_SHA8
+  mkdir -p "$(dirname "$PP_USER_CONFIG")"
+  bash "$PP_ROOT/bin/polymath" dim enable >/dev/null
+  # Pre-hold the lock; force-activate must refuse (exit 2) after retries.
+  lock="$PP_STATE_DIR/dim-eval-locktest8.lock"
+  mkdir -p "$lock"
+  run bash "$PP_ROOT/bin/polymath" dim force-activate
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -qE 'could not acquire lock'
+  # State must NOT have transitioned (no audit row appended)
+  state_file=$(pp_dim_state_file_path "locktest8")
+  [ ! -f "$state_file" ] || [ "$(wc -l < "$state_file")" -eq 0 ]
+  rm -rf "$lock"
+}
+
+@test "dim: FIX#10 — force-activate succeeds and releases lock when unheld" {
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  PP_DIM_PROJECT_SHA8="locktst9b"
+  export PP_USER_CONFIG PP_DIM_PROJECT_SHA8
+  mkdir -p "$(dirname "$PP_USER_CONFIG")"
+  bash "$PP_ROOT/bin/polymath" dim enable >/dev/null
+  run bash "$PP_ROOT/bin/polymath" dim force-activate
+  [ "$status" -eq 0 ]
+  lock="$PP_STATE_DIR/dim-eval-locktst9b.lock"
+  [ ! -d "$lock" ]
+  state_file=$(pp_dim_state_file_path "locktst9b")
+  tail -n 1 "$state_file" | jq -e '.source == "operator_override" and .to == "active"'
+}
+
+@test "dim: FIX#5 — daily eval trap covers RETURN INT TERM" {
+  # The trap inside pp_dim_evaluate_gate_daily must clean the lock dir on
+  # normal return AND on Ctrl-C / TERM signals; otherwise a stale lock
+  # blocks tomorrow's eval.
+  grep -E 'rm -rf .*\$lock.*RETURN INT TERM' "$PP_ROOT/lib/dim.sh"
 }

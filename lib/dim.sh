@@ -12,7 +12,9 @@
 
 [ "${_PP_DIM_SOURCED:-0}" = "1" ] && return 0
 
-export LC_ALL=C
+# Note: LC_ALL=C is applied INLINE on every awk/jq/sort/grep call below.
+# We deliberately do NOT export LC_ALL at file top — that would mutate the
+# caller's environment for the rest of the session.
 _PP_DIM_SOURCED=1
 
 # Lazy-load stats helpers
@@ -58,7 +60,9 @@ pp_dim_get_current_state() {
   [ -z "$last" ] && { echo "monitoring"; return 0; }
   local state
   state=$(printf '%s' "$last" | jq -r '.to // "monitoring"' 2>/dev/null)
-  [ -z "$state" ] || [ "$state" = "null" ] && state="monitoring"
+  if [ -z "$state" ] || [ "$state" = "null" ]; then
+    state="monitoring"
+  fi
   echo "$state"
 }
 
@@ -67,14 +71,14 @@ pp_dim_get_current_state() {
 # SOURCE: "auto" | "operator_override" | "auto_recovery"
 pp_dim_append_transition() {
   local sha8="${1:-default}" from="${2:-monitoring}" to="${3:-monitoring}"
-  local reason="${4:-}" source="${5:-auto}" gate_json="${6:-{\}}"
+  local reason="${4:-}" _src="${5:-auto}" gate_json="${6:-{\}}"
   local f
   f=$(pp_dim_state_file_path "$sha8")
   mkdir -p "$(dirname "$f")" 2>/dev/null
   local ts row
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   row=$(jq -nc --arg ts "$ts" --arg from "$from" --arg to "$to" \
-              --arg reason "$reason" --arg source "$source" \
+              --arg reason "$reason" --arg source "$_src" \
               --argjson gate_snapshot "$gate_json" \
     '{ts:$ts, from:$from, to:$to, reason:$reason, source:$source, gate_snapshot:$gate_snapshot}')
   printf '%s\n' "$row" >> "$f"
@@ -82,7 +86,8 @@ pp_dim_append_transition() {
 
 # pp_dim_evaluate_gate OAR_FILE PROJECT_SHA8
 # Pure function: returns gate decision as JSON. Does not mutate state.
-# Output: {qualifies, lenses_qualifying, per_lens: [...], evaluated_at}
+# Output: {qualifies, lenses_qualifying, per_lens: [...], evaluated_at,
+#          calendar_span_days, calendar_days_floor}
 pp_dim_evaluate_gate() {
   local oar="$1" sha8="${2:-default}"
   local rollup
@@ -98,6 +103,50 @@ pp_dim_evaluate_gate() {
   gate=$(pp_dim_stats_composite_gate "$gated" \
            "$PP_DIM_ALPHA" "$PP_DIM_TARGET_LCB" \
            "$PP_DIM_MIN_LENSES" "$PP_DIM_MIN_N" "$PP_DIM_MIN_DISTINCT_DATES")
+  # Global calendar floor: even when 3+ lenses each pass distinct_dates>=5,
+  # the union of all qualifying-lens dates must span >= PP_DIM_MIN_CALENDAR_DAYS.
+  # Compute the span from the OAR rows for this project. jq builtins differ
+  # across platforms (gojq vs jq, macOS strptime quirks), so we pipe min/max
+  # date strings to awk and do the day math with portable date logic.
+  local span_days
+  span_days=0
+  if [ -f "$oar" ]; then
+    local _date_bounds
+    _date_bounds=$(LC_ALL=C jq -sr --arg sha8 "$sha8" '
+      [.[] | select(.project_root_sha8 == $sha8) | (.inject_ts // "")[0:10] | select(. != "")]
+      | unique
+      | if length < 2 then "" else "\(min) \(max)" end
+    ' "$oar" 2>/dev/null)
+    if [ -n "$_date_bounds" ]; then
+      local _d_min _d_max _epoch_min _epoch_max
+      _d_min="${_date_bounds%% *}"
+      _d_max="${_date_bounds##* }"
+      _epoch_min=$(date -u -j -f "%Y-%m-%d" "$_d_min" +%s 2>/dev/null \
+                   || date -u -d "$_d_min" +%s 2>/dev/null \
+                   || echo "0")
+      _epoch_max=$(date -u -j -f "%Y-%m-%d" "$_d_max" +%s 2>/dev/null \
+                   || date -u -d "$_d_max" +%s 2>/dev/null \
+                   || echo "0")
+      if [ "$_epoch_min" -gt 0 ] 2>/dev/null && [ "$_epoch_max" -gt 0 ] 2>/dev/null; then
+        span_days=$(( (_epoch_max - _epoch_min) / 86400 + 1 ))
+      fi
+    fi
+  fi
+  case "$span_days" in (*[!0-9]*|"") span_days=0 ;; esac
+  if [ "$span_days" -lt "$PP_DIM_MIN_CALENDAR_DAYS" ] 2>/dev/null; then
+    gate=$(printf '%s' "$gate" | jq -c \
+      --argjson floor "$PP_DIM_MIN_CALENDAR_DAYS" \
+      --argjson span "$span_days" \
+      '.qualifies = false
+       | .calendar_span_days = $span
+       | .calendar_days_floor = $floor
+       | .calendar_fail_reason = "global_calendar_span_below_floor"')
+  else
+    gate=$(printf '%s' "$gate" | jq -c \
+      --argjson floor "$PP_DIM_MIN_CALENDAR_DAYS" \
+      --argjson span "$span_days" \
+      '.calendar_span_days = $span | .calendar_days_floor = $floor')
+  fi
   printf '%s\n' "$gate" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + {evaluated_at:$ts}'
 }
 
@@ -134,7 +183,10 @@ pp_dim_evaluate_gate_daily() {
   if ! mkdir "$lock" 2>/dev/null; then
     return 0  # Another process is evaluating; bail.
   fi
-  trap 'rm -rf "$lock" 2>/dev/null; true' RETURN
+  # Symmetric cleanup: RETURN handles normal exit, INT/TERM handles Ctrl-C
+  # and TERM-signaled shutdown so a stale lock dir never blocks tomorrow's eval.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$lock' 2>/dev/null; true" RETURN INT TERM
   # Double-checked locking: re-read last-eval inside the lock
   if [ -f "$last_file" ]; then
     local last_epoch2
@@ -145,9 +197,7 @@ pp_dim_evaluate_gate_daily() {
                   || date -u -d "@$last_epoch2" +%Y%m%d 2>/dev/null \
                   || echo "")
       if [ "$last_day2" = "$today" ]; then
-        rm -rf "$lock"
-        trap - RETURN
-        return 0
+        return 0  # trap handles lock cleanup
       fi
     fi
   fi
@@ -163,8 +213,7 @@ pp_dim_evaluate_gate_daily() {
   date +%s > "$last_file"
   # Apply state transition
   pp_dim_apply_transition "$sha8" "$gate"
-  rm -rf "$lock"
-  trap - RETURN
+  return 0  # trap handles lock cleanup
 }
 
 # pp_dim_apply_transition SHA8 GATE_JSON
@@ -185,15 +234,21 @@ pp_dim_apply_transition() {
       fi
       ;;
     gated)
-      # Check if 7d holdout validation window has elapsed
-      local entered_at age_days
-      entered_at=$(pp_dim_state_entered_at "$sha8" "gated")
-      [ -n "$entered_at" ] || return 0
-      age_days=$(pp_dim_days_since "$entered_at")
-      if [ "$age_days" -ge "$PP_DIM_HOLDOUT_VALIDATION_DAYS" ]; then
-        # Check for drift; if no drift, promote
-        if pp_dim_holdout_no_drift "$sha8" "$gate"; then
-          next="active"; reason="holdout validation passed (${age_days}d, no drift)"
+      # If the gate unqualifies during the holdout window, regress to
+      # monitoring rather than getting stuck pending promotion forever.
+      if [ "$qualifies" != "true" ]; then
+        next="monitoring"; reason="gate regressed during holdout window"
+      else
+        # Check if 7d holdout validation window has elapsed
+        local entered_at age_days
+        entered_at=$(pp_dim_state_entered_at "$sha8" "gated")
+        [ -n "$entered_at" ] || return 0
+        age_days=$(pp_dim_days_since "$entered_at")
+        if [ "$age_days" -ge "$PP_DIM_HOLDOUT_VALIDATION_DAYS" ]; then
+          # Check for drift; if no drift, promote
+          if pp_dim_holdout_no_drift "$sha8" "$gate"; then
+            next="active"; reason="holdout validation passed (${age_days}d, no drift)"
+          fi
         fi
       fi
       ;;

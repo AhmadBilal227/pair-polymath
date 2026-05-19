@@ -8,7 +8,9 @@
 
 [ "${_PP_DIM_STATS_SOURCED:-0}" = "1" ] && return 0
 
-export LC_ALL=C
+# Note: LC_ALL=C is applied INLINE on every awk/jq/sort/grep/od call below.
+# We deliberately do NOT export LC_ALL at file top — that would mutate the
+# caller's environment for the rest of the session.
 _PP_DIM_STATS_SOURCED=1
 
 # pp_dim_stats_lcb_anytime SUCCESSES TRIALS ALPHA
@@ -101,8 +103,13 @@ pp_dim_stats_events_to_clear() {
 _pp_dim_stats_ensure_salt() {
   local home="${PP_HOME:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
   local salt_file="$home/dim-holdout-salt"
+  # Refuse if salt path or parent is a symlink (attacker pre-created).
+  if [ -L "$salt_file" ] || [ -L "$home" ]; then
+    return 1
+  fi
   [ -s "$salt_file" ] && return 0
-  mkdir -p "$home" 2>/dev/null || return 1
+  # Create parent dir with restrictive perms; tighten if it pre-existed loose.
+  (umask 077 && mkdir -p "$home") 2>/dev/null || return 1
   chmod 700 "$home" 2>/dev/null || true
   # 16 bytes from /dev/urandom, hex-encoded → 32 chars.
   # od is portable; printf '%02x' loops are slow but more portable.
@@ -126,14 +133,22 @@ pp_dim_stats_holdout_slot() {
   salt=$(cat "$home/dim-holdout-salt" 2>/dev/null) || { echo "0"; return 1; }
   local input="${salt}|${sid}|${lens}|${ts}"
   # Portable sha256 — Mac has shasum, Linux often has sha256sum.
+  # If none of the crypto hashes are available, fall back to a deterministic
+  # non-crypto hash (cksum) so the system still distributes rows across
+  # buckets instead of forcing every row into the holdout (slot 0). Bucket
+  # assignment is no longer attacker-resistant in this mode, but DIM still
+  # functions as a gating system.
   local digest
   if command -v shasum >/dev/null 2>&1; then
     digest=$(printf '%s' "$input" | shasum -a 256 | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
     digest=$(printf '%s' "$input" | sha256sum | awk '{print $1}')
+  elif command -v openssl >/dev/null 2>&1; then
+    digest=$(printf '%s' "$input" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')
   else
-    echo "0"
-    return 1
+    # cksum gives a 32-bit decimal; awk emits it as hex so substr() still works.
+    digest=$(printf '%s' "$input" | LC_ALL=C cksum \
+             | LC_ALL=C awk '{ v = $1 + 0; printf "%08x%08x%08x%08x%08x%08x%08x%08x", v, v, v, v, v, v, v, v }')
   fi
   # Convert first 8 hex chars to int; mod 10. Use awk for big-int safety.
   LC_ALL=C awk -v hex="$digest" 'BEGIN {
@@ -163,10 +178,10 @@ pp_dim_stats_composite_gate() {
   local min_lenses="${4:-3}" min_n="${5:-250}" min_dates="${6:-5}"
   local n_lenses
   n_lenses=$(printf '%s' "$lens_json" | jq -r 'length' 2>/dev/null)
-  [ -z "$n_lenses" ] || [ "$n_lenses" -eq 0 ] && {
+  if [ -z "$n_lenses" ] || [ "$n_lenses" = "0" ]; then
     printf '{"qualifies":false,"lenses_qualifying":0,"per_lens":[]}\n'
     return 0
-  }
+  fi
   local alpha_per
   alpha_per=$(LC_ALL=C awk -v a="$alpha" -v L="$n_lenses" 'BEGIN { printf "%.6f", a / L }')
   # Iterate per lens via jq → bash loop. Build per_lens array.
@@ -177,6 +192,12 @@ pp_dim_stats_composite_gate() {
     s=$(printf '%s' "$lens_json" | jq -r ".[$i].s // 0")
     n=$(printf '%s' "$lens_json" | jq -r ".[$i].n // 0")
     dates=$(printf '%s' "$lens_json" | jq -r ".[$i].distinct_dates // 0")
+    # Defensive: --argjson requires strict JSON numbers. Coerce any
+    # non-numeric payload (null serialized as "null", booleans, garbage)
+    # to 0 so the downstream jq builder doesn't abort the whole pipeline.
+    case "$s"     in (*[!0-9-]*|"") s=0 ;; esac
+    case "$n"     in (*[!0-9-]*|"") n=0 ;; esac
+    case "$dates" in (*[!0-9-]*|"") dates=0 ;; esac
     lcb=$(pp_dim_stats_lcb_anytime "$s" "$n" "$alpha_per")
     qualifies="true"
     fail_reason=""
@@ -213,7 +234,7 @@ pp_dim_stats_per_lens_rollup() {
   # Stamp holdout_slot per row in a temp jsonl, then group server-side via jq.
   local stamped
   stamped=$(mktemp) || return 1
-  local sid lens ts slot
+  local sid lens ts slot row_sha row
   while IFS= read -r row; do
     [ -z "$row" ] && continue
     # Filter by project before doing the (expensive) hash

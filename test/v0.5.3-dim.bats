@@ -311,3 +311,24 @@ teardown() {
   run bash "$PP_ROOT/bin/polymath" dim enable
   [ "$status" -eq 0 ]
 }
+
+@test "dim CLI: force-activate refuses when PP_DIM_ENABLE=0" {
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  export PP_USER_CONFIG
+  mkdir -p "$(dirname "$PP_USER_CONFIG")"
+  bash "$PP_ROOT/bin/polymath" dim disable
+  run env PP_DIM_ENABLE=0 bash "$PP_ROOT/bin/polymath" dim force-activate
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -qE 'requires PP_DIM_ENABLE=1'
+}
+
+@test "dim CLI: force-activate writes operator_override audit row" {
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  PP_DIM_PROJECT_SHA8="testsha8"
+  export PP_USER_CONFIG PP_DIM_PROJECT_SHA8
+  mkdir -p "$(dirname "$PP_USER_CONFIG")"
+  bash "$PP_ROOT/bin/polymath" dim enable
+  bash "$PP_ROOT/bin/polymath" dim force-activate
+  state_file=$(pp_dim_state_file_path "testsha8")
+  tail -n 1 "$state_file" | jq -e '.source == "operator_override" and .to == "active"'
+}

@@ -219,3 +219,60 @@ setup() {
   result=$(pp_dim_stats_composite_gate "$input" 0.05 0.05 3 250 5)
   echo "$result" | jq -e '.per_lens[0].lcb > 0' >/dev/null
 }
+
+@test "dim-stats: per-lens rollup groups by lens, counts acted, gates project_root_sha8" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  oar=$(mktemp)
+  # 5 ENG rows (3 acted), 2 SEC rows (1 acted), 1 row from different project (excluded)
+  cat > "$oar" <<'EOF'
+{"schema_version":2,"lens":"ENG","outcome":"acted","session_id":"s1","inject_ts":"2026-05-12T00:00:00Z","project_root_sha8":"abcd1234"}
+{"schema_version":2,"lens":"ENG","outcome":"acted","session_id":"s2","inject_ts":"2026-05-13T00:00:00Z","project_root_sha8":"abcd1234"}
+{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s3","inject_ts":"2026-05-14T00:00:00Z","project_root_sha8":"abcd1234"}
+{"schema_version":2,"lens":"ENG","outcome":"acted","session_id":"s4","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}
+{"schema_version":2,"lens":"ENG","outcome":"silent","session_id":"s5","inject_ts":"2026-05-16T00:00:00Z","project_root_sha8":"abcd1234"}
+{"schema_version":2,"lens":"SEC","outcome":"acted","session_id":"s6","inject_ts":"2026-05-12T00:00:00Z","project_root_sha8":"abcd1234"}
+{"schema_version":2,"lens":"SEC","outcome":"ignored","session_id":"s7","inject_ts":"2026-05-13T00:00:00Z","project_root_sha8":"abcd1234"}
+{"schema_version":2,"lens":"ENG","outcome":"acted","session_id":"s8","inject_ts":"2026-05-12T00:00:00Z","project_root_sha8":"zzz99999"}
+EOF
+  result=$(pp_dim_stats_per_lens_rollup "$oar" "abcd1234")
+  echo "$result" | jq -e '.gated | length == 2' >/dev/null
+  # ENG: 5 rows total, 3 acted, 5 distinct dates
+  echo "$result" | jq -e '.gated[] | select(.lens == "ENG") | .n == 5 and .s == 3 and .distinct_dates == 5' >/dev/null
+  echo "$result" | jq -e '.gated[] | select(.lens == "SEC") | .n == 2 and .s == 1 and .distinct_dates == 2' >/dev/null
+  rm -f "$oar"; rm -rf "$HOME"
+}
+
+@test "dim-stats: per-lens rollup splits gated vs holdout by slot 0" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  oar=$(mktemp)
+  # 50 rows; exact split depends on salt so just assert holdout has some + total preserved
+  for i in $(seq 1 50); do
+    printf '{"schema_version":2,"lens":"ENG","outcome":"acted","session_id":"s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+      "$i" "$((10 + (i % 10)))" >> "$oar"
+  done
+  result=$(pp_dim_stats_per_lens_rollup "$oar" "abcd1234")
+  gated_n=$(echo "$result" | jq -r '.gated[0].n')
+  holdout_n=$(echo "$result" | jq -r '.holdout[0].n // 0')
+  total=$((gated_n + holdout_n))
+  [ "$total" = "50" ]
+  # Holdout should be roughly 10% — allow 1-15 over 50
+  [ "$holdout_n" -ge 1 ] 2>/dev/null
+  [ "$holdout_n" -le 15 ] 2>/dev/null
+  rm -f "$oar"; rm -rf "$HOME"
+}
+
+@test "dim-stats: per-lens rollup handles missing OAR file" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  result=$(pp_dim_stats_per_lens_rollup "/nonexistent" "abcd1234")
+  echo "$result" | jq -e '.gated == [] and .holdout == []' >/dev/null
+  rm -rf "$HOME"
+}

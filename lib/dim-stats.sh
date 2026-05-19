@@ -201,3 +201,50 @@ pp_dim_stats_composite_gate() {
   jq -nc --argjson qualifies "$qualifies" --argjson n_qual "$n_qual" --argjson per_lens "$per_lens" \
     '{qualifies:$qualifies, lenses_qualifying:$n_qual, per_lens:$per_lens}'
 }
+
+# pp_dim_stats_per_lens_rollup OAR_FILE PROJECT_SHA8
+# Reads OAR labeled JSONL, filters to project_root_sha8 == PROJECT_SHA8,
+# splits into gated (holdout_slot != 0) and holdout (slot == 0),
+# groups by lens, computes {lens, s, n, distinct_dates} for each bucket.
+# Echoes JSON: {gated: [...], holdout: [...]}.
+pp_dim_stats_per_lens_rollup() {
+  local oar="$1" sha8="${2:-}"
+  [ -f "$oar" ] || { printf '{"gated":[],"holdout":[]}\n'; return 0; }
+  # Stamp holdout_slot per row in a temp jsonl, then group server-side via jq.
+  local stamped
+  stamped=$(mktemp) || return 1
+  local sid lens ts slot
+  while IFS= read -r row; do
+    [ -z "$row" ] && continue
+    # Filter by project before doing the (expensive) hash
+    if [ -n "$sha8" ]; then
+      row_sha=$(printf '%s' "$row" | jq -r '.project_root_sha8 // ""')
+      [ "$row_sha" = "$sha8" ] || continue
+    fi
+    sid=$(printf '%s' "$row" | jq -r '.session_id // ""')
+    lens=$(printf '%s' "$row" | jq -r '.lens // ""')
+    ts=$(printf '%s' "$row" | jq -r '.inject_ts // ""')
+    slot=$(pp_dim_stats_holdout_slot "$sid" "$lens" "$ts")
+    printf '%s\n' "$row" | jq -c --argjson slot "$slot" '. + {_dim_holdout_slot: $slot}' >> "$stamped"
+  done < "$oar"
+  # Group by bucket × lens via jq.
+  local rollup
+  rollup=$(jq -sc '
+    def acted_filter: . | select(.outcome == "acted") | .;
+    def date_of: (.inject_ts // "")[0:10];
+    def group_lens(bucket):
+      . | group_by(.lens)
+        | map({
+            lens: .[0].lens,
+            s: ([.[] | select(.outcome == "acted")] | length),
+            n: length,
+            distinct_dates: ([.[] | date_of] | unique | length)
+          });
+    {
+      gated:   ([.[] | select(._dim_holdout_slot != 0)] | group_lens("gated")),
+      holdout: ([.[] | select(._dim_holdout_slot == 0)] | group_lens("holdout"))
+    }
+  ' "$stamped")
+  rm -f "$stamped"
+  printf '%s\n' "$rollup"
+}

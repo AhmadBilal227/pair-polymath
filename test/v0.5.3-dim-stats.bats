@@ -177,3 +177,45 @@ setup() {
   [ "$perms" = "700" ]
   rm -rf "$HOME"
 }
+
+@test "dim-stats: composite-gate qualifies with 3 of 7 lenses passing per-lens LCB" {
+  # 3 strong lenses, 4 zeros; alpha_per_lens = 0.05/7 ≈ 0.00714
+  input='[
+    {"lens":"A","s":40,"n":300,"distinct_dates":7},
+    {"lens":"B","s":30,"n":300,"distinct_dates":7},
+    {"lens":"C","s":30,"n":250,"distinct_dates":7},
+    {"lens":"D","s":0,"n":10,"distinct_dates":1},
+    {"lens":"E","s":0,"n":10,"distinct_dates":1},
+    {"lens":"F","s":0,"n":10,"distinct_dates":1},
+    {"lens":"G","s":0,"n":10,"distinct_dates":1}
+  ]'
+  result=$(pp_dim_stats_composite_gate "$input" 0.05 0.05 3 250 5)
+  echo "$result" | jq -e '.qualifies == true' >/dev/null
+  echo "$result" | jq -e '.lenses_qualifying == 3' >/dev/null
+}
+
+@test "dim-stats: composite-gate fails with 2 of 7 (below 3-lens floor)" {
+  input='[
+    {"lens":"A","s":40,"n":200,"distinct_dates":7},
+    {"lens":"B","s":30,"n":200,"distinct_dates":7}
+  ]'
+  result=$(pp_dim_stats_composite_gate "$input" 0.05 0.05 3 250 5)
+  echo "$result" | jq -e '.qualifies == false' >/dev/null
+}
+
+@test "dim-stats: composite-gate fails when n below floor (300 raw but distinct_dates only 2)" {
+  input='[
+    {"lens":"A","s":60,"n":300,"distinct_dates":2},
+    {"lens":"B","s":60,"n":300,"distinct_dates":2},
+    {"lens":"C","s":60,"n":300,"distinct_dates":2}
+  ]'
+  result=$(pp_dim_stats_composite_gate "$input" 0.05 0.05 3 250 5)
+  echo "$result" | jq -e '.qualifies == false' >/dev/null
+  echo "$result" | jq -e '.per_lens[0].fail_reason | contains("distinct_dates")' >/dev/null
+}
+
+@test "dim-stats: composite-gate stamps lcb on every lens in per_lens output" {
+  input='[{"lens":"A","s":40,"n":200,"distinct_dates":7}]'
+  result=$(pp_dim_stats_composite_gate "$input" 0.05 0.05 3 250 5)
+  echo "$result" | jq -e '.per_lens[0].lcb > 0' >/dev/null
+}

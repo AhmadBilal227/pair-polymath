@@ -153,3 +153,51 @@ pp_dim_stats_holdout_slot() {
     printf "%d\n", val % 10
   }'
 }
+
+# pp_dim_stats_composite_gate LENS_JSON ALPHA TARGET_LCB MIN_LENSES MIN_N MIN_DISTINCT_DATES
+# LENS_JSON: JSON array of {lens, s, n, distinct_dates}
+# Returns JSON: {qualifies, lenses_qualifying, per_lens: [{lens, s, n, lcb, qualifies, fail_reason?}]}
+# Applies Bonferroni-across-lenses: each lens uses alpha/L where L = len(input).
+pp_dim_stats_composite_gate() {
+  local lens_json="$1" alpha="${2:-0.05}" target="${3:-0.05}"
+  local min_lenses="${4:-3}" min_n="${5:-250}" min_dates="${6:-5}"
+  local n_lenses
+  n_lenses=$(printf '%s' "$lens_json" | jq -r 'length' 2>/dev/null)
+  [ -z "$n_lenses" ] || [ "$n_lenses" -eq 0 ] && {
+    printf '{"qualifies":false,"lenses_qualifying":0,"per_lens":[]}\n'
+    return 0
+  }
+  local alpha_per
+  alpha_per=$(LC_ALL=C awk -v a="$alpha" -v L="$n_lenses" 'BEGIN { printf "%.6f", a / L }')
+  # Iterate per lens via jq → bash loop. Build per_lens array.
+  local per_lens="[]"
+  local i lens s n dates lcb qualifies fail_reason row
+  for i in $(seq 0 $((n_lenses - 1))); do
+    lens=$(printf '%s' "$lens_json" | jq -r ".[$i].lens")
+    s=$(printf '%s' "$lens_json" | jq -r ".[$i].s // 0")
+    n=$(printf '%s' "$lens_json" | jq -r ".[$i].n // 0")
+    dates=$(printf '%s' "$lens_json" | jq -r ".[$i].distinct_dates // 0")
+    lcb=$(pp_dim_stats_lcb_anytime "$s" "$n" "$alpha_per")
+    qualifies="true"
+    fail_reason=""
+    if [ "$n" -lt "$min_n" ]; then
+      qualifies="false"; fail_reason="n_below_floor"
+    elif [ "$dates" -lt "$min_dates" ]; then
+      qualifies="false"; fail_reason="distinct_dates_below_floor"
+    elif ! LC_ALL=C awk -v l="$lcb" -v t="$target" 'BEGIN { exit (l >= t) ? 0 : 1 }'; then
+      qualifies="false"; fail_reason="lcb_below_target"
+    fi
+    row=$(jq -nc --arg lens "$lens" --argjson s "$s" --argjson n "$n" \
+                 --argjson dates "$dates" --arg lcb "$lcb" \
+                 --argjson qualifies "$qualifies" --arg fail_reason "$fail_reason" \
+      '{lens:$lens, s:$s, n:$n, distinct_dates:$dates, lcb:($lcb|tonumber), qualifies:$qualifies}
+       + (if $fail_reason != "" then {fail_reason:$fail_reason} else {} end)')
+    per_lens=$(printf '%s' "$per_lens" | jq -c ". + [$row]")
+  done
+  local n_qual
+  n_qual=$(printf '%s' "$per_lens" | jq '[.[] | select(.qualifies == true)] | length')
+  local qualifies
+  if [ "$n_qual" -ge "$min_lenses" ]; then qualifies="true"; else qualifies="false"; fi
+  jq -nc --argjson qualifies "$qualifies" --argjson n_qual "$n_qual" --argjson per_lens "$per_lens" \
+    '{qualifies:$qualifies, lenses_qualifying:$n_qual, per_lens:$per_lens}'
+}

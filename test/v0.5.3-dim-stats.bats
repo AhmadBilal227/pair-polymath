@@ -48,6 +48,21 @@ setup() {
   awk -v a="$a" -v b="$b" -v c="$c" 'BEGIN { exit (a < b && b < c) ? 0 : 1 }'
 }
 
+@test "dim-stats: anytime LCB with alpha=0 returns 0 (refuse, not inf)" {
+  result=$(pp_dim_stats_lcb_anytime 20 200 0)
+  awk -v r="$result" 'BEGIN { exit (r == 0) ? 0 : 1 }'
+}
+
+@test "dim-stats: anytime LCB with alpha=2 returns 0 (refuse, not over-confident)" {
+  result=$(pp_dim_stats_lcb_anytime 20 200 2)
+  awk -v r="$result" 'BEGIN { exit (r == 0) ? 0 : 1 }'
+}
+
+@test "dim-stats: anytime LCB with alpha=-0.1 returns 0 (refuse negative)" {
+  result=$(pp_dim_stats_lcb_anytime 20 200 -0.1)
+  awk -v r="$result" 'BEGIN { exit (r == 0) ? 0 : 1 }'
+}
+
 @test "dim-stats: anytime LCB locale-stable (LC_ALL=fr_FR.UTF-8)" {
   result=$(LC_ALL=fr_FR.UTF-8 pp_dim_stats_lcb_anytime 20 200 0.05)
   ! echo "$result" | grep -q ','

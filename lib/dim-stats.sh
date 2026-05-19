@@ -19,6 +19,10 @@ pp_dim_stats_lcb_anytime() {
   local s="${1:-0}" n="${2:-0}" alpha="${3:-0.05}"
   LC_ALL=C awk -v s="$s" -v n="$n" -v alpha="$alpha" 'BEGIN {
     if (n + 0 <= 0) { printf "0.0000\n"; exit }
+    # Alpha must be in (0, 1) — otherwise the log(2/alpha) term is
+    # undefined (alpha<=0) or non-positive (alpha>=2), which silently
+    # produces an over-confident LCB. Refuse with a conservative 0.
+    if (alpha + 0 <= 0 || alpha + 0 >= 1) { printf "0.0000\n"; exit }
     if (s + 0 < 0)  s = 0
     if (s + 0 > n)  s = n
     n2 = (2.0 * n < 4 ? 4 : 2.0 * n)

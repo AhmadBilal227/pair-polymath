@@ -2607,6 +2607,30 @@ EOF
           printf '  → polymath dim disable          (halt monitoring)\n'
         fi
         ;;
+      enable)
+        _pp_set_user_env_var "PP_DIM_ENABLE" "1"
+        printf 'DIM monitoring enabled (PP_DIM_ENABLE=1).\n'
+        printf '  Run `polymath dim status` to see gate progress.\n'
+        ;;
+      disable)
+        _pp_set_user_env_var "PP_DIM_ENABLE" "0"
+        _pp_set_user_env_var "PP_DIM_ACTIVE" "0"
+        printf 'DIM monitoring disabled (PP_DIM_ENABLE=0, PP_DIM_ACTIVE=0).\n'
+        ;;
+      force-activate)
+        if [ "${PP_DIM_ENABLE:-1}" != "1" ]; then
+          printf 'polymath dim force-activate: requires PP_DIM_ENABLE=1. Run `polymath dim enable` first.\n' >&2
+          exit 2
+        fi
+        _pp_set_user_env_var "PP_DIM_ACTIVE" "1"
+        pp_dim_append_transition "$_dim_sha8" "$(pp_dim_get_current_state "$_dim_sha8")" "active" "operator override" "operator_override" '{}'
+        printf 'DIM activated by operator override (PP_DIM_ACTIVE=1).\n'
+        ;;
+      force-disable)
+        _pp_set_user_env_var "PP_DIM_ACTIVE" "0"
+        pp_dim_append_transition "$_dim_sha8" "$(pp_dim_get_current_state "$_dim_sha8")" "monitoring" "operator force-disable" "operator_override" '{}'
+        printf 'DIM deactivated by operator override (PP_DIM_ACTIVE=0). Monitoring continues.\n'
+        ;;
       help|-h|--help|"")
         cat <<EOF
 polymath dim — Developer Insights Module control plane.

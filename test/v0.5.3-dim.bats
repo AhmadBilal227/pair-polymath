@@ -281,3 +281,33 @@ teardown() {
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -qE 'force-activate|disable'
 }
+
+@test "dim CLI: enable sets PP_DIM_ENABLE=1 in user.env" {
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  export PP_USER_CONFIG
+  mkdir -p "$(dirname "$PP_USER_CONFIG")"
+  run bash "$PP_ROOT/bin/polymath" dim enable
+  [ "$status" -eq 0 ]
+  grep -qE '^PP_DIM_ENABLE=1' "$PP_USER_CONFIG"
+}
+
+@test "dim CLI: disable sets PP_DIM_ENABLE=0 and PP_DIM_ACTIVE=0" {
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  export PP_USER_CONFIG
+  mkdir -p "$(dirname "$PP_USER_CONFIG")"
+  bash "$PP_ROOT/bin/polymath" dim enable
+  bash "$PP_ROOT/bin/polymath" dim force-activate
+  run bash "$PP_ROOT/bin/polymath" dim disable
+  [ "$status" -eq 0 ]
+  grep -qE '^PP_DIM_ENABLE=0' "$PP_USER_CONFIG"
+  grep -qE '^PP_DIM_ACTIVE=0' "$PP_USER_CONFIG"
+}
+
+@test "dim CLI: enable is idempotent (re-run doesn't error)" {
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  export PP_USER_CONFIG
+  mkdir -p "$(dirname "$PP_USER_CONFIG")"
+  bash "$PP_ROOT/bin/polymath" dim enable
+  run bash "$PP_ROOT/bin/polymath" dim enable
+  [ "$status" -eq 0 ]
+}

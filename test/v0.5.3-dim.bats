@@ -68,3 +68,61 @@ teardown() {
   [ "$s1" = "gated" ]
   [ "$s2" = "active" ]
 }
+
+@test "dim: evaluate_gate with no OAR file returns qualifies=false" {
+  result=$(pp_dim_evaluate_gate "/nonexistent" "abcd1234")
+  echo "$result" | jq -e '.qualifies == false' >/dev/null
+  echo "$result" | jq -e '.lenses_qualifying == 0' >/dev/null
+}
+
+@test "dim: evaluate_gate clears with 3 strong lenses meeting all floors" {
+  oar=$(mktemp)
+  # 3 lenses × 280 rows × ~10% acted × 6+ distinct dates
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 280); do
+      out="ignored"
+      [ "$((i % 10))" = "0" ] && out="acted"
+      day=$(( (i % 6) + 10 ))
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+        "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
+    done
+  done
+  result=$(pp_dim_evaluate_gate "$oar" "abcd1234")
+  echo "$result" | jq -e '.qualifies == true' >/dev/null
+  echo "$result" | jq -e '.lenses_qualifying == 3' >/dev/null
+  rm -f "$oar"
+}
+
+@test "dim: evaluate_gate fails when distinct_dates below floor" {
+  oar=$(mktemp)
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 280); do
+      out="ignored"
+      [ "$((i % 10))" = "0" ] && out="acted"
+      # All rows on same date — fails distinct_dates>=5
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"abcd1234"}\n' \
+        "$lens" "$out" "$lens" "$i" >> "$oar"
+    done
+  done
+  result=$(pp_dim_evaluate_gate "$oar" "abcd1234")
+  echo "$result" | jq -e '.qualifies == false' >/dev/null
+  rm -f "$oar"
+}
+
+@test "dim: evaluate_gate filters out foreign projects" {
+  oar=$(mktemp)
+  for lens in ENG SEC UX; do
+    for i in $(seq 1 280); do
+      out="ignored"
+      [ "$((i % 10))" = "0" ] && out="acted"
+      day=$(( (i % 6) + 10 ))
+      printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"zzzz9999"}\n' \
+        "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
+    done
+  done
+  # All rows tagged zzzz9999; querying abcd1234 must filter all out
+  result=$(pp_dim_evaluate_gate "$oar" "abcd1234")
+  echo "$result" | jq -e '.qualifies == false' >/dev/null
+  echo "$result" | jq -e '.per_lens == []' >/dev/null
+  rm -f "$oar"
+}

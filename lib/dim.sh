@@ -79,3 +79,24 @@ pp_dim_append_transition() {
     '{ts:$ts, from:$from, to:$to, reason:$reason, source:$source, gate_snapshot:$gate_snapshot}')
   printf '%s\n' "$row" >> "$f"
 }
+
+# pp_dim_evaluate_gate OAR_FILE PROJECT_SHA8
+# Pure function: returns gate decision as JSON. Does not mutate state.
+# Output: {qualifies, lenses_qualifying, per_lens: [...], evaluated_at}
+pp_dim_evaluate_gate() {
+  local oar="$1" sha8="${2:-default}"
+  local rollup
+  rollup=$(pp_dim_stats_per_lens_rollup "$oar" "$sha8")
+  local gated
+  gated=$(printf '%s' "$rollup" | jq -c '.gated')
+  if [ "$gated" = "[]" ] || [ -z "$gated" ]; then
+    jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{qualifies:false, lenses_qualifying:0, per_lens:[], evaluated_at:$ts}'
+    return 0
+  fi
+  local gate
+  gate=$(pp_dim_stats_composite_gate "$gated" \
+           "$PP_DIM_ALPHA" "$PP_DIM_TARGET_LCB" \
+           "$PP_DIM_MIN_LENSES" "$PP_DIM_MIN_N" "$PP_DIM_MIN_DISTINCT_DATES")
+  printf '%s\n' "$gate" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + {evaluated_at:$ts}'
+}

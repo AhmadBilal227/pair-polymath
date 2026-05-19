@@ -408,3 +408,19 @@ teardown() {
   PP_ROOT="$PP_ROOT" run doctor_check_dim_data_quality
   [ "$status" -eq 0 ]
 }
+
+@test "dim CLI: appears in 'polymath help' usage" {
+  run bash "$PP_ROOT/bin/polymath" help
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qE 'polymath dim '
+}
+
+@test "dim CLI: help subcommand lists all 5 verbs" {
+  run bash "$PP_ROOT/bin/polymath" dim help
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q 'status'
+  printf '%s\n' "$output" | grep -q 'enable'
+  printf '%s\n' "$output" | grep -q 'disable'
+  printf '%s\n' "$output" | grep -q 'force-activate'
+  printf '%s\n' "$output" | grep -q 'force-disable'
+}

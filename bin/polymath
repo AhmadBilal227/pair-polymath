@@ -2677,6 +2677,7 @@ Usage:
   polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
   polymath dismiss     Suppression rules (add / list / show / disable / enable / ack)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)
+  polymath dim         Developer Insights Module (status / enable / disable / force-activate / force-disable)
   polymath auto-update Scheduled background pull (enable / disable / status)
   polymath self-test   End-to-end LLM probe (~\$0.0001 per run)
   polymath version     Print version

@@ -68,3 +68,19 @@ setup() {
   ! echo "$result" | grep -q ','
   awk -v r="$result" 'BEGIN { exit (r >= 0.05) ? 0 : 1 }'
 }
+
+@test "dim-stats: events-to-clear at n=200,s=14 (p=7%) targeting 5% returns positive N" {
+  result=$(pp_dim_stats_events_to_clear 14 200 0.05 0.05)
+  [ -n "$result" ]
+  [ "$result" -gt 0 ] 2>/dev/null
+}
+
+@test "dim-stats: events-to-clear at already-clearing input returns 0" {
+  result=$(pp_dim_stats_events_to_clear 20 200 0.05 0.05)
+  [ "$result" = "0" ]
+}
+
+@test "dim-stats: events-to-clear returns -1 sentinel when acted% is below target" {
+  result=$(pp_dim_stats_events_to_clear 0 200 0.05 0.05)
+  [ "$result" = "-1" ]
+}

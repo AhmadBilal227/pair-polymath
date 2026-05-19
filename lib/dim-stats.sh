@@ -94,3 +94,61 @@ pp_dim_stats_events_to_clear() {
   done
   echo "$hi"
 }
+
+# _pp_dim_stats_ensure_salt
+# Idempotent: creates $PP_HOME/dim-holdout-salt with 16 random hex bytes
+# (mode 0600) if absent. Returns 0 on success.
+_pp_dim_stats_ensure_salt() {
+  local home="${PP_HOME:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
+  local salt_file="$home/dim-holdout-salt"
+  [ -s "$salt_file" ] && return 0
+  mkdir -p "$home" 2>/dev/null || return 1
+  # 16 bytes from /dev/urandom, hex-encoded → 32 chars.
+  # od is portable; printf '%02x' loops are slow but more portable.
+  local tmp
+  tmp=$(mktemp "${salt_file}.XXXXXX") || return 1
+  LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' > "$tmp"
+  chmod 600 "$tmp" 2>/dev/null
+  mv "$tmp" "$salt_file"
+  return 0
+}
+
+# pp_dim_stats_holdout_slot SESSION_ID LENS INJECT_TS
+# Echoes integer 0..9. Slot 0 means the row is in the holdout (10% sampled out).
+# Salt is loaded lazily; hash is sha256 of salt||session_id||lens||inject_ts,
+# taking the first 8 hex chars as a uint32 and reducing mod 10.
+pp_dim_stats_holdout_slot() {
+  local sid="${1:-}" lens="${2:-}" ts="${3:-}"
+  _pp_dim_stats_ensure_salt || { echo "0"; return 1; }
+  local home="${PP_HOME:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
+  local salt
+  salt=$(cat "$home/dim-holdout-salt" 2>/dev/null) || { echo "0"; return 1; }
+  local input="${salt}|${sid}|${lens}|${ts}"
+  # Portable sha256 — Mac has shasum, Linux often has sha256sum.
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$input" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$input" | sha256sum | awk '{print $1}')
+  else
+    echo "0"
+    return 1
+  fi
+  # Convert first 8 hex chars to int; mod 10. Use awk for big-int safety.
+  LC_ALL=C awk -v hex="$digest" 'BEGIN {
+    s = substr(hex, 1, 8)
+    val = 0
+    for (i = 1; i <= length(s); i++) {
+      c = substr(s, i, 1)
+      val *= 16
+      if (c ~ /[0-9]/) val += c + 0
+      else if (c == "a") val += 10
+      else if (c == "b") val += 11
+      else if (c == "c") val += 12
+      else if (c == "d") val += 13
+      else if (c == "e") val += 14
+      else if (c == "f") val += 15
+    }
+    printf "%d\n", val % 10
+  }'
+}

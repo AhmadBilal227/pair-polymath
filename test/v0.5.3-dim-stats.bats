@@ -94,3 +94,74 @@ setup() {
   [ "$result" -gt 0 ] 2>/dev/null
   [ "$result" -lt 100 ] 2>/dev/null
 }
+
+@test "dim-stats: holdout salt auto-created with 0600 perms on first call" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  _pp_dim_stats_ensure_salt
+  [ -f "$PP_HOME/dim-holdout-salt" ]
+  # macOS: stat -f %p; Linux: stat -c %a
+  perms=$(stat -f %p "$PP_HOME/dim-holdout-salt" 2>/dev/null || stat -c %a "$PP_HOME/dim-holdout-salt")
+  case "$perms" in
+    *600|600) : ;;
+    *) false ;;
+  esac
+  rm -rf "$HOME"
+}
+
+@test "dim-stats: holdout salt is 16 hex bytes (32 chars)" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  _pp_dim_stats_ensure_salt
+  salt=$(cat "$PP_HOME/dim-holdout-salt")
+  [ "${#salt}" -eq 32 ]
+  echo "$salt" | grep -qE '^[0-9a-f]{32}$'
+  rm -rf "$HOME"
+}
+
+@test "dim-stats: holdout salt is idempotent (re-call doesn't change it)" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  _pp_dim_stats_ensure_salt
+  s1=$(cat "$PP_HOME/dim-holdout-salt")
+  _pp_dim_stats_ensure_salt
+  s2=$(cat "$PP_HOME/dim-holdout-salt")
+  [ "$s1" = "$s2" ]
+  rm -rf "$HOME"
+}
+
+@test "dim-stats: holdout slot returns 0..9 deterministically" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  result=$(pp_dim_stats_holdout_slot "sess1" "ENGINEERING" "2026-05-19T12:00:00Z")
+  [ "$result" -ge 0 ] 2>/dev/null
+  [ "$result" -le 9 ] 2>/dev/null
+  # Determinism
+  result2=$(pp_dim_stats_holdout_slot "sess1" "ENGINEERING" "2026-05-19T12:00:00Z")
+  [ "$result" = "$result2" ]
+  rm -rf "$HOME"
+}
+
+@test "dim-stats: holdout distribution roughly uniform across 200 synthetic rows" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  in_holdout=0
+  for i in $(seq 1 200); do
+    slot=$(pp_dim_stats_holdout_slot "sess$i" "ENGINEERING" "2026-05-19T12:00:00Z")
+    [ "$slot" = "0" ] && in_holdout=$((in_holdout + 1))
+  done
+  # Expected 20 (10%); allow 2σ margin: 10-32
+  [ "$in_holdout" -ge 10 ] 2>/dev/null
+  [ "$in_holdout" -le 32 ] 2>/dev/null
+  rm -rf "$HOME"
+}

@@ -260,3 +260,24 @@ teardown() {
   state=$(pp_dim_get_current_state "abcd1234")
   [ "$state" = "monitoring" ]
 }
+
+@test "dim CLI: status exits 0 and includes state label" {
+  run bash "$PP_ROOT/bin/polymath" dim status
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qE 'DIM .*Developer Insights Module'
+  printf '%s\n' "$output" | grep -qE 'state:.*monitoring'
+}
+
+@test "dim CLI: status --json emits parseable JSON" {
+  run bash "$PP_ROOT/bin/polymath" dim status --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.state == "monitoring"' >/dev/null
+  printf '%s' "$output" | jq -e '.enabled == 1' >/dev/null
+  printf '%s' "$output" | jq -e '.active == 0' >/dev/null
+}
+
+@test "dim CLI: status shows 'shadow' verb in next-actions when not active" {
+  run bash "$PP_ROOT/bin/polymath" dim status
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qE 'force-activate|disable'
+}

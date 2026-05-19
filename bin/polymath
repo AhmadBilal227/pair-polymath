@@ -2555,6 +2555,80 @@ EOF
     esac
     ;;
 
+  dim)
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/dim.sh" 2>/dev/null || { echo "polymath dim: lib/dim.sh missing" >&2; exit 2; }
+    _dim_sub="${1:-status}"; shift || true
+    # Project sha8 — defaults to current cwd's project identity (best-effort).
+    _dim_sha8="${PP_DIM_PROJECT_SHA8:-default}"
+    if [ "$_dim_sha8" = "default" ] && [ -r "$PP_ROOT/lib/project-identity.sh" ]; then
+      # shellcheck disable=SC1091
+      . "$PP_ROOT/lib/project-identity.sh" 2>/dev/null || true
+      if type pp_project_root_sha8 >/dev/null 2>&1; then
+        _dim_sha8=$(pp_project_root_sha8 2>/dev/null || echo "default")
+      fi
+    fi
+
+    case "$_dim_sub" in
+      status)
+        _dim_json=0
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --json) _dim_json=1; shift ;;
+            *) printf 'polymath dim status: unknown flag %s\n' "$1" >&2; exit 2 ;;
+          esac
+        done
+        _dim_state=$(pp_dim_get_current_state "$_dim_sha8")
+        _dim_enabled="${PP_DIM_ENABLE:-1}"
+        _dim_active="${PP_DIM_ACTIVE:-0}"
+        _dim_oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
+        _dim_gate=$(pp_dim_evaluate_gate "$_dim_oar" "$_dim_sha8")
+        if [ "$_dim_json" = "1" ]; then
+          jq -nc \
+            --arg state "$_dim_state" \
+            --argjson enabled "$_dim_enabled" \
+            --argjson active "$_dim_active" \
+            --argjson gate "$_dim_gate" \
+            --arg sha8 "$_dim_sha8" \
+            '{state:$state, enabled:$enabled, active:$active, project_root_sha8:$sha8, gate_progress:{lenses_qualifying:$gate.lenses_qualifying, lenses_required:3, evaluated_at:$gate.evaluated_at}, per_lens:$gate.per_lens}'
+        else
+          printf 'DIM (Developer Insights Module)\n'
+          printf '  state:           %s\n' "$_dim_state"
+          printf '  enabled:         %s\n' "$_dim_enabled"
+          printf '  active:          %s\n' "$_dim_active"
+          printf '  project:         %s\n' "$_dim_sha8"
+          printf '\n'
+          printf 'Gate progress\n'
+          printf '%s\n' "$_dim_gate" | jq -r '.per_lens[]? | "  \(.lens)\t\(.n) obs, acted=\(.s), lcb=\(.lcb), qualifies=\(.qualifies)"'
+          printf '\n'
+          printf 'Next actions\n'
+          printf '  → polymath dim force-activate   (override gate, activate immediately)\n'
+          printf '  → polymath dim disable          (halt monitoring)\n'
+        fi
+        ;;
+      help|-h|--help|"")
+        cat <<EOF
+polymath dim — Developer Insights Module control plane.
+
+Usage:
+  polymath dim status [--json]
+  polymath dim enable
+  polymath dim disable
+  polymath dim force-activate
+  polymath dim force-disable
+
+States: monitoring → gated → active → quarantine (auto-recovers to monitoring).
+See docs/v0.5.3-dim-spec.md for the gate parameters and design rationale.
+EOF
+        ;;
+      *)
+        printf 'polymath dim: unknown subcommand "%s". Try: polymath dim help\n' "$_dim_sub" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI

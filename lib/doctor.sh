@@ -160,6 +160,47 @@ doctor_check_subagent_statusline_wired() {
   return 1
 }
 
+# v0.5.3: DIM gate progress
+doctor_check_dim_gate_progress() {
+  if ! [ -r "$PP_ROOT/lib/dim.sh" ]; then
+    _pp_doctor_yellow "DIM gate progress" "lib/dim.sh missing (pre-v0.5.3 install)"
+    return 1
+  fi
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/dim.sh" 2>/dev/null || {
+    _pp_doctor_red "DIM gate progress" "lib/dim.sh failed to source"
+    return 2
+  }
+  local sha8="${PP_DIM_PROJECT_SHA8:-}"
+  if [ -z "$sha8" ] && [ -r "$PP_ROOT/lib/project-identity.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/project-identity.sh" 2>/dev/null || true
+    type pp_project_root_sha8 >/dev/null 2>&1 && \
+      sha8=$(pp_project_root_sha8 2>/dev/null || true)
+  fi
+  [ -z "$sha8" ] && sha8="default"
+  local state
+  state=$(pp_dim_get_current_state "$sha8")
+  case "$state" in
+    active)
+      _pp_doctor_green "DIM gate progress" "active (gate cleared, holdout validated)"
+      return 0
+      ;;
+    quarantine)
+      _pp_doctor_red "DIM gate progress" "quarantine (post-activation drift detected; will auto-recover after 14d clean window)"
+      return 2
+      ;;
+    monitoring|gated)
+      _pp_doctor_yellow "DIM gate progress" "$state (gate not yet cleared; passively accumulating OAR data)"
+      return 1
+      ;;
+    *)
+      _pp_doctor_yellow "DIM gate progress" "unknown state: $state"
+      return 1
+      ;;
+  esac
+}
+
 doctor_check_hooks_wired() {
   local settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
   [ -f "$settings" ] || { _pp_doctor_yellow "hooks wired" "skipped"; return 1; }
@@ -916,7 +957,7 @@ pp_doctor_run() {
 
   local green=0 yellow=0 red=0
   local checks="doctor_check_bash doctor_check_jq doctor_check_llm doctor_check_openai_key \
-                doctor_check_settings_json doctor_check_statusline_wired doctor_check_subagent_statusline_wired doctor_check_hooks_wired \
+                doctor_check_settings_json doctor_check_statusline_wired doctor_check_subagent_statusline_wired doctor_check_dim_gate_progress doctor_check_hooks_wired \
                 doctor_check_cache_writable doctor_check_budget_file doctor_check_lenses \
                 doctor_check_prompts doctor_check_prompt_contracts doctor_check_transcript_libs doctor_check_router_libs \
                 doctor_check_coreutils doctor_check_budget_pressure \

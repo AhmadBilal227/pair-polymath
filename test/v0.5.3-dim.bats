@@ -355,3 +355,34 @@ teardown() {
   eval_file=$(pp_dim_gate_eval_path "default")
   [ ! -f "$eval_file" ] || [ "$(wc -l < "$eval_file")" -eq 0 ]
 }
+
+@test "dim doctor: gate_progress returns yellow when state=monitoring" {
+  PP_DIM_PROJECT_SHA8=default
+  export PP_DIM_PROJECT_SHA8
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/doctor.sh"
+  PP_ROOT="$PP_ROOT" run doctor_check_dim_gate_progress
+  [ "$status" -eq 1 ]
+  printf '%s\n' "$output" | grep -qE 'DIM gate progress.*monitoring'
+}
+
+@test "dim doctor: gate_progress returns green when state=active" {
+  PP_DIM_PROJECT_SHA8=default
+  export PP_DIM_PROJECT_SHA8
+  pp_dim_append_transition "default" "monitoring" "gated" "" "auto" '{}'
+  pp_dim_append_transition "default" "gated" "active" "" "auto" '{}'
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/doctor.sh"
+  PP_ROOT="$PP_ROOT" run doctor_check_dim_gate_progress
+  [ "$status" -eq 0 ]
+}
+
+@test "dim doctor: gate_progress returns red when state=quarantine" {
+  PP_DIM_PROJECT_SHA8=default
+  export PP_DIM_PROJECT_SHA8
+  pp_dim_append_transition "default" "active" "quarantine" "drift" "auto" '{}'
+  # shellcheck disable=SC1091
+  . "$PP_ROOT/lib/doctor.sh"
+  PP_ROOT="$PP_ROOT" run doctor_check_dim_gate_progress
+  [ "$status" -eq 2 ]
+}

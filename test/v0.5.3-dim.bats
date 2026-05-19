@@ -332,3 +332,26 @@ teardown() {
   state_file=$(pp_dim_state_file_path "testsha8")
   tail -n 1 "$state_file" | jq -e '.source == "operator_override" and .to == "active"'
 }
+
+@test "dim hook: inject-monitor-insight calls pp_dim_evaluate_gate_daily when ENABLE=1" {
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s1","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"default"}\n' > "$oar"
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  export PP_USER_CONFIG PP_DIM_ENABLE=1 PP_DIM_PROJECT_SHA8=default
+  printf '{"session_id":"hook-test","cwd":"%s"}' "$PWD" \
+    | bash "$PP_ROOT/hooks/inject-monitor-insight.sh" >/dev/null 2>&1
+  eval_file=$(pp_dim_gate_eval_path "default")
+  [ -f "$eval_file" ]
+  [ "$(wc -l < "$eval_file")" -ge 1 ]
+}
+
+@test "dim hook: PP_DIM_ENABLE=0 short-circuits the hook (no eval file)" {
+  oar="$PP_CACHE_DIR/oar-labeled.jsonl"
+  printf '{"schema_version":2,"lens":"ENG","outcome":"ignored","session_id":"s1","inject_ts":"2026-05-15T00:00:00Z","project_root_sha8":"default"}\n' > "$oar"
+  PP_USER_CONFIG="$CLAUDE_DIR/pair-polymath/config/user.env"
+  export PP_USER_CONFIG PP_DIM_ENABLE=0
+  printf '{"session_id":"hook-test","cwd":"%s"}' "$PWD" \
+    | bash "$PP_ROOT/hooks/inject-monitor-insight.sh" >/dev/null 2>&1
+  eval_file=$(pp_dim_gate_eval_path "default")
+  [ ! -f "$eval_file" ] || [ "$(wc -l < "$eval_file")" -eq 0 ]
+}

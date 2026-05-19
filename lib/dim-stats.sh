@@ -103,6 +103,7 @@ _pp_dim_stats_ensure_salt() {
   local salt_file="$home/dim-holdout-salt"
   [ -s "$salt_file" ] && return 0
   mkdir -p "$home" 2>/dev/null || return 1
+  chmod 700 "$home" 2>/dev/null || true
   # 16 bytes from /dev/urandom, hex-encoded → 32 chars.
   # od is portable; printf '%02x' loops are slow but more portable.
   local tmp

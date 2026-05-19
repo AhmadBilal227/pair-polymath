@@ -165,3 +165,15 @@ setup() {
   [ "$in_holdout" -le 32 ] 2>/dev/null
   rm -rf "$HOME"
 }
+
+@test "dim-stats: holdout salt parent dir is 0700 after ensure" {
+  HOME="$(mktemp -d)"
+  export HOME
+  PP_HOME="$HOME/.claude/pair-polymath"
+  export PP_HOME
+  _pp_dim_stats_ensure_salt
+  perms=$(stat -f %p "$PP_HOME" 2>/dev/null | sed 's/^.*\([0-7][0-7][0-7]\)$/\1/' \
+          || stat -c %a "$PP_HOME" 2>/dev/null)
+  [ "$perms" = "700" ]
+  rm -rf "$HOME"
+}

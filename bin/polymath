@@ -2555,6 +2555,144 @@ EOF
     esac
     ;;
 
+  dim)
+    shift
+    # shellcheck disable=SC1091
+    . "$PP_ROOT/lib/dim.sh" 2>/dev/null || { echo "polymath dim: lib/dim.sh missing" >&2; exit 2; }
+    _dim_sub="${1:-status}"; shift || true
+    # Project sha8 — defaults to current cwd's project identity (best-effort).
+    _dim_sha8="${PP_DIM_PROJECT_SHA8:-default}"
+    if [ "$_dim_sha8" = "default" ] && [ -r "$PP_ROOT/lib/project-identity.sh" ]; then
+      # shellcheck disable=SC1091
+      . "$PP_ROOT/lib/project-identity.sh" 2>/dev/null || true
+      if type pp_project_root_sha8 >/dev/null 2>&1; then
+        _dim_sha8=$(pp_project_root_sha8 2>/dev/null || echo "default")
+      fi
+    fi
+
+    case "$_dim_sub" in
+      status)
+        _dim_json=0
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --json) _dim_json=1; shift ;;
+            *) printf 'polymath dim status: unknown flag %s\n' "$1" >&2; exit 2 ;;
+          esac
+        done
+        _dim_state=$(pp_dim_get_current_state "$_dim_sha8")
+        _dim_enabled="${PP_DIM_ENABLE:-1}"
+        _dim_active="${PP_DIM_ACTIVE:-0}"
+        _dim_oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
+        _dim_gate=$(pp_dim_evaluate_gate "$_dim_oar" "$_dim_sha8")
+        if [ "$_dim_json" = "1" ]; then
+          jq -nc \
+            --arg state "$_dim_state" \
+            --argjson enabled "$_dim_enabled" \
+            --argjson active "$_dim_active" \
+            --argjson gate "$_dim_gate" \
+            --arg sha8 "$_dim_sha8" \
+            '{state:$state, enabled:$enabled, active:$active, project_root_sha8:$sha8, gate_progress:{lenses_qualifying:$gate.lenses_qualifying, lenses_required:3, evaluated_at:$gate.evaluated_at}, per_lens:$gate.per_lens}'
+        else
+          printf 'DIM (Developer Insights Module)\n'
+          printf '  state:           %s\n' "$_dim_state"
+          printf '  enabled:         %s\n' "$_dim_enabled"
+          printf '  active:          %s\n' "$_dim_active"
+          printf '  project:         %s\n' "$_dim_sha8"
+          printf '\n'
+          printf 'Gate progress\n'
+          printf '%s\n' "$_dim_gate" | jq -r '.per_lens[]? | "  \(.lens)\t\(.n) obs, acted=\(.s), lcb=\(.lcb), qualifies=\(.qualifies)"'
+          printf '\n'
+          printf 'Next actions\n'
+          printf '  → polymath dim force-activate   (override gate, activate immediately)\n'
+          printf '  → polymath dim disable          (halt monitoring)\n'
+        fi
+        ;;
+      enable)
+        _pp_set_user_env_var "PP_DIM_ENABLE" "1"
+        printf 'DIM monitoring enabled (PP_DIM_ENABLE=1).\n'
+        printf '  Run `polymath dim status` to see gate progress.\n'
+        ;;
+      disable)
+        _pp_set_user_env_var "PP_DIM_ENABLE" "0"
+        _pp_set_user_env_var "PP_DIM_ACTIVE" "0"
+        printf 'DIM monitoring disabled (PP_DIM_ENABLE=0, PP_DIM_ACTIVE=0).\n'
+        ;;
+      force-activate)
+        if [ "${PP_DIM_ENABLE:-1}" != "1" ]; then
+          printf 'polymath dim force-activate: requires PP_DIM_ENABLE=1. Run `polymath dim enable` first.\n' >&2
+          exit 2
+        fi
+        # Take the same dim-eval lock used by the daily evaluator to avoid
+        # interleaving an operator override with an in-flight auto-transition.
+        _force_lock="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/state}/dim-eval-${_dim_sha8}.lock"
+        mkdir -p "$(dirname "$_force_lock")" 2>/dev/null
+        _force_wait=0
+        _force_held=0
+        while [ "$_force_wait" -lt 10 ]; do
+          if mkdir "$_force_lock" 2>/dev/null; then
+            _force_held=1; break
+          fi
+          sleep 0.1
+          _force_wait=$((_force_wait + 1))
+        done
+        if [ "$_force_held" -ne 1 ]; then
+          printf 'polymath dim force-activate: could not acquire lock; another evaluation in progress.\n' >&2
+          exit 2
+        fi
+        # shellcheck disable=SC2064
+        trap "rm -rf '$_force_lock' 2>/dev/null" EXIT INT TERM
+        _pp_set_user_env_var "PP_DIM_ACTIVE" "1"
+        pp_dim_append_transition "$_dim_sha8" "$(pp_dim_get_current_state "$_dim_sha8")" "active" "operator override" "operator_override" '{}'
+        rm -rf "$_force_lock" 2>/dev/null
+        trap - EXIT INT TERM
+        printf 'DIM activated by operator override (PP_DIM_ACTIVE=1).\n'
+        ;;
+      force-disable)
+        _force_lock="${PP_STATE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/state}/dim-eval-${_dim_sha8}.lock"
+        mkdir -p "$(dirname "$_force_lock")" 2>/dev/null
+        _force_wait=0
+        _force_held=0
+        while [ "$_force_wait" -lt 10 ]; do
+          if mkdir "$_force_lock" 2>/dev/null; then
+            _force_held=1; break
+          fi
+          sleep 0.1
+          _force_wait=$((_force_wait + 1))
+        done
+        if [ "$_force_held" -ne 1 ]; then
+          printf 'polymath dim force-disable: could not acquire lock; another evaluation in progress.\n' >&2
+          exit 2
+        fi
+        # shellcheck disable=SC2064
+        trap "rm -rf '$_force_lock' 2>/dev/null" EXIT INT TERM
+        _pp_set_user_env_var "PP_DIM_ACTIVE" "0"
+        pp_dim_append_transition "$_dim_sha8" "$(pp_dim_get_current_state "$_dim_sha8")" "monitoring" "operator force-disable" "operator_override" '{}'
+        rm -rf "$_force_lock" 2>/dev/null
+        trap - EXIT INT TERM
+        printf 'DIM deactivated by operator override (PP_DIM_ACTIVE=0). Monitoring continues.\n'
+        ;;
+      help|-h|--help|"")
+        cat <<EOF
+polymath dim — Developer Insights Module control plane.
+
+Usage:
+  polymath dim status [--json]
+  polymath dim enable
+  polymath dim disable
+  polymath dim force-activate
+  polymath dim force-disable
+
+States: monitoring → gated → active → quarantine (auto-recovers to monitoring).
+See docs/v0.5.3-dim-spec.md for the gate parameters and design rationale.
+EOF
+        ;;
+      *)
+        printf 'polymath dim: unknown subcommand "%s". Try: polymath dim help\n' "$_dim_sub" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+
   help|-h|--help|"")
     cat <<EOF
 polymath — Pair Polymath CLI
@@ -2579,6 +2717,7 @@ Usage:
   polymath memory      Memory subsystem (status / recompute / evict / patterns / clear / enable / disable)
   polymath dismiss     Suppression rules (add / list / show / disable / enable / ack)
   polymath update      Pull latest + re-run installer (--yes, --dry-run)
+  polymath dim         Developer Insights Module (status / enable / disable / force-activate / force-disable)
   polymath auto-update Scheduled background pull (enable / disable / status)
   polymath self-test   End-to-end LLM probe (~\$0.0001 per run)
   polymath version     Print version

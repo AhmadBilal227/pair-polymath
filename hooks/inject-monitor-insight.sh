@@ -36,6 +36,26 @@ pp_load_lenses
 LENS_NAMES=("${PP_LENS_IDS[@]}")
 LENS_COUNT="${PP_LENS_COUNT:-${#LENS_NAMES[@]}}"
 
+# v0.5.3 DIM auto-monitor: once per UTC date, evaluate the gate.
+# Bails immediately on PP_DIM_ENABLE=0. Failures are non-fatal — DIM is a
+# control-plane feature; the hook's primary advisory render must not depend on it.
+if [ "${PP_DIM_ENABLE:-1}" = "1" ]; then
+  # shellcheck disable=SC1091
+  if . "$PP_ROOT/lib/dim.sh" 2>/dev/null && type pp_dim_evaluate_gate_daily >/dev/null 2>&1; then
+    # PP_DIM_PROJECT_SHA8 env override — used by tests and operator scripts.
+    # Falls back to pp_project_root_sha8 (hashes cwd), then "default".
+    _pp_dim_sha8="${PP_DIM_PROJECT_SHA8:-}"
+    if [ -z "$_pp_dim_sha8" ] && [ -r "$PP_ROOT/lib/project-identity.sh" ]; then
+      # shellcheck disable=SC1091
+      . "$PP_ROOT/lib/project-identity.sh" 2>/dev/null || true
+      type pp_project_root_sha8 >/dev/null 2>&1 && \
+        _pp_dim_sha8=$(pp_project_root_sha8 2>/dev/null || echo "default")
+    fi
+    : "${_pp_dim_sha8:=default}"
+    pp_dim_evaluate_gate_daily "$_pp_dim_sha8" 2>/dev/null || true
+  fi
+fi
+
 # v0.5 Phase 3: source dismiss lib (idempotent). Skip silently if unavailable
 # — the hook predates dismiss and we don't want to hard-fail older installs.
 if [ -z "${_pp_dismiss_sourced:-}" ]; then

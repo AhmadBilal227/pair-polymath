@@ -77,13 +77,13 @@ teardown() {
 
 @test "dim: evaluate_gate clears with 3 strong lenses meeting all floors" {
   oar=$(mktemp)
-  # 3 lenses × 350 rows × ~10% acted × 7 distinct dates (== MIN_CALENDAR_DAYS)
+  # 3 lenses × 350 rows × ~10% acted × 10 distinct dates (span 9d > MIN_CALENDAR_DAYS=7)
   # 350 rows: worst-case ~35 holdout → ~315 gated, safely above min_n=250
   for lens in ENG SEC UX; do
     for i in $(seq 1 350); do
       out="ignored"
       [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 7) + 10 ))
+      day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done
@@ -116,7 +116,7 @@ teardown() {
     for i in $(seq 1 280); do
       out="ignored"
       [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 6) + 10 ))
+      day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"zzzz9999"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done
@@ -135,7 +135,7 @@ teardown() {
     for i in $(seq 1 350); do
       out="ignored"
       [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 7) + 10 ))
+      day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done
@@ -202,7 +202,7 @@ teardown() {
   for lens in ENG SEC UX; do
     for i in $(seq 1 500); do
       out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 7) + 10 ))
+      day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done
@@ -222,7 +222,7 @@ teardown() {
   for lens in ENG SEC UX; do
     for i in $(seq 1 500); do
       out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 7) + 10 ))
+      day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done
@@ -239,7 +239,7 @@ teardown() {
   oar="$PP_CACHE_DIR/oar-labeled.jsonl"
   # 30 holdout rows at 0% acted, 270 gated rows at 25% acted → huge drift
   for i in $(seq 1 300); do
-    day=$(( (i % 7) + 10 ))
+    day=$(( (i % 10) + 10 ))
     if [ "$((i % 10))" = "0" ]; then
       # holdout slot: pretend slot=0 by using a known session_id+lens+ts hash
       out="ignored"
@@ -489,7 +489,7 @@ teardown() {
   for lens in ENG SEC UX; do
     for i in $(seq 1 350); do
       out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
-      day=$(( (i % 7) + 10 ))
+      day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
     done

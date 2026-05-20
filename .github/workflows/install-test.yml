@@ -24,9 +24,11 @@ jobs:
     # v0.5.2.1 grew the bats suite from ~705 to ~862 tests (Stage A-D OAR /
     # eligibility additions); install-test's full-suite run exceeded the
     # prior 10m ceiling. Bumped to 20m to absorb the new footprint with
-    # headroom. If the suite keeps growing, consider parallelizing bats or
-    # splitting the install-test workflow into install + bats jobs.
-    timeout-minutes: 20
+    # headroom. v0.5.6.0 DIM adds ~60 jq/awk-heavy bats; bumped to 30m
+    # after install-clean-ubuntu hit the 20m ceiling on PR #81. If the
+    # suite keeps growing, consider parallelizing bats or splitting the
+    # install-test workflow into install + bats jobs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 

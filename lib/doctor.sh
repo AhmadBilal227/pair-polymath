@@ -938,9 +938,7 @@ doctor_check_dim_data_quality() {
       return 0
       ;;
   esac
-  local gate
-  gate=$(pp_dim_evaluate_gate "$oar" "$sha8")
-  if pp_dim_holdout_no_drift "$sha8" "$gate"; then
+  if pp_dim_holdout_no_drift "$sha8"; then
     _pp_doctor_green "DIM data quality" "holdout matches gated rate (no drift)"
     return 0
   fi

@@ -264,7 +264,7 @@ pp_dim_apply_transition() {
         age_days=$(pp_dim_days_since "$entered_at")
         if [ "$age_days" -ge "$PP_DIM_HOLDOUT_VALIDATION_DAYS" ]; then
           # Check for drift; if no drift, promote
-          if pp_dim_holdout_no_drift "$sha8" "$gate"; then
+          if pp_dim_holdout_no_drift "$sha8"; then
             next="active"; reason="holdout validation passed (${age_days}d, no drift)"
           fi
         fi
@@ -272,7 +272,7 @@ pp_dim_apply_transition() {
       ;;
     active)
       # Continuous drift surveillance
-      if ! pp_dim_holdout_no_drift "$sha8" "$gate"; then
+      if ! pp_dim_holdout_no_drift "$sha8"; then
         next="quarantine"; reason="post-activation drift detected"
       fi
       ;;
@@ -283,7 +283,7 @@ pp_dim_apply_transition() {
       [ -n "$entered_at" ] || return 0
       age_days=$(pp_dim_days_since "$entered_at")
       if [ "$age_days" -ge "$PP_DIM_QUARANTINE_RECOVERY_DAYS" ] && \
-         pp_dim_holdout_no_drift "$sha8" "$gate"; then
+         pp_dim_holdout_no_drift "$sha8"; then
         next="monitoring"; reason="quarantine cleared after ${age_days}d clean window"
       fi
       ;;
@@ -313,9 +313,13 @@ pp_dim_days_since() {
   echo $(( (now_epoch - then_epoch) / 86400 ))
 }
 
-# pp_dim_holdout_no_drift SHA8 GATE_JSON → 0 (no drift) / 1 (drift)
+# pp_dim_holdout_no_drift SHA8 → 0 (no drift) / 1 (drift)
 # Compares holdout acted% vs gated acted% using pooled SE.
 # Drift = |holdout_pct - gated_pct| > 2*SE. Returns 0 (no drift) if holdout_n < 20.
+#
+# v0.5.6.1 FIX A6: previously took a second $gate arg that the body ignored
+# (it re-reads OAR fresh on every call). The unused parameter invited
+# callers to plumb stale gate snapshots through; drop it.
 pp_dim_holdout_no_drift() {
   local sha8="$1"
   local oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"

@@ -242,6 +242,12 @@ pp_dim_stats_per_lens_rollup() {
   # Stamp holdout_slot per row in a temp jsonl, then group server-side via jq.
   local stamped
   stamped=$(mktemp) || return 1
+  # v0.5.6.1 FIX A7: ensure the temp file is removed even if the inner jq
+  # exits non-zero (or the loop is interrupted). The old `rm -f` after the
+  # jq call only ran on the success path. RETURN handles normal exit; INT/TERM
+  # handles signal-driven shutdown (Ctrl-C, pipeline kill).
+  # shellcheck disable=SC2064
+  trap "rm -f '$stamped' 2>/dev/null; true" RETURN INT TERM
   local sid lens ts slot row_sha row
   while IFS= read -r row; do
     [ -z "$row" ] && continue

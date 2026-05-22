@@ -34,19 +34,37 @@ PP_DIM_MIN_CALENDAR_DAYS="${PP_DIM_MIN_CALENDAR_DAYS:-7}"
 PP_DIM_HOLDOUT_VALIDATION_DAYS="${PP_DIM_HOLDOUT_VALIDATION_DAYS:-7}"
 PP_DIM_QUARANTINE_RECOVERY_DAYS="${PP_DIM_QUARANTINE_RECOVERY_DAYS:-14}"
 
+# v0.5.6.1 FIX A2: sha8 format validation. The default arg `${1:-default}`
+# accepts any string; a tainted caller passing `../etc` would write outside
+# PP_STATE_DIR. Reject anything other than [a-zA-Z0-9_-] (the "default"
+# sentinel + 8-hex sha8 prefixes both satisfy this); fall back to "default".
+_pp_dim_validate_sha8() {
+  local sha8="${1:-default}"
+  case "$sha8" in
+    ""|*[!a-zA-Z0-9_-]*) printf '%s' "default" ;;
+    *) printf '%s' "$sha8" ;;
+  esac
+}
+
 # pp_dim_state_file_path SHA8 → /path/to/dim-state.<sha8>.jsonl
 pp_dim_state_file_path() {
-  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-state.${1:-default}.jsonl"
+  local sha8
+  sha8=$(_pp_dim_validate_sha8 "${1:-default}")
+  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-state.${sha8}.jsonl"
 }
 
 # pp_dim_last_eval_path SHA8 → /path/to/dim-last-eval-epoch.<sha8>.txt
 pp_dim_last_eval_path() {
-  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-last-eval-epoch.${1:-default}.txt"
+  local sha8
+  sha8=$(_pp_dim_validate_sha8 "${1:-default}")
+  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-last-eval-epoch.${sha8}.txt"
 }
 
 # pp_dim_gate_eval_path SHA8 → /path/to/dim-gate-last-eval.<sha8>.jsonl
 pp_dim_gate_eval_path() {
-  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-gate-last-eval.${1:-default}.jsonl"
+  local sha8
+  sha8=$(_pp_dim_validate_sha8 "${1:-default}")
+  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-gate-last-eval.${sha8}.jsonl"
 }
 
 # pp_dim_get_current_state SHA8 → current state (default: "monitoring")

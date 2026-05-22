@@ -302,26 +302,29 @@ STUB
 # ============================================================
 
 @test "C1: dim status human output shows state-specific actions (active)" {
-  printf '{"ts":"2026-05-01T00:00:00Z","from":"monitoring","to":"active","reason":"test","source":"test","gate_snapshot":{}}\n' > \
-    "$PP_CACHE_DIR/dim-state.default.jsonl"
-  PP_DIM_PROJECT_SHA8=default
+  # The CLI recomputes the sha8 from cwd when PP_DIM_PROJECT_SHA8 is unset
+  # or equals "default" — so we need to set it to a real 8-hex value and
+  # pre-write the matching state file.
+  PP_DIM_PROJECT_SHA8=c1active
   export PP_DIM_PROJECT_SHA8
+  printf '{"ts":"2026-05-01T00:00:00Z","from":"monitoring","to":"active","reason":"test","source":"test","gate_snapshot":{}}\n' > \
+    "$PP_CACHE_DIR/dim-state.c1active.jsonl"
   out=$("$PP_ROOT/bin/polymath" dim status 2>/dev/null)
   echo "$out" | grep -qi 'deactivate' || { echo "Expected 'deactivate' for active state; got: $out" >&2; false; }
 }
 
 @test "C1: dim status human output mentions drift for quarantine" {
-  printf '{"ts":"2026-05-01T00:00:00Z","from":"active","to":"quarantine","reason":"test","source":"test","gate_snapshot":{}}\n' > \
-    "$PP_CACHE_DIR/dim-state.default.jsonl"
-  PP_DIM_PROJECT_SHA8=default
+  PP_DIM_PROJECT_SHA8=c1quarn
   export PP_DIM_PROJECT_SHA8
+  printf '{"ts":"2026-05-01T00:00:00Z","from":"active","to":"quarantine","reason":"test","source":"test","gate_snapshot":{}}\n' > \
+    "$PP_CACHE_DIR/dim-state.c1quarn.jsonl"
   out=$("$PP_ROOT/bin/polymath" dim status 2>/dev/null)
   echo "$out" | grep -qi 'drift' || { echo "Expected 'drift' for quarantine state; got: $out" >&2; false; }
 }
 
 @test "C1: dim status human output shows force-activate for monitoring" {
-  # Default state with no transitions is monitoring
-  PP_DIM_PROJECT_SHA8=default
+  # No transitions → state defaults to monitoring.
+  PP_DIM_PROJECT_SHA8=c1monit
   export PP_DIM_PROJECT_SHA8
   out=$("$PP_ROOT/bin/polymath" dim status 2>/dev/null)
   echo "$out" | grep -qi 'force-activate' || { echo "Expected 'force-activate' for monitoring state; got: $out" >&2; false; }

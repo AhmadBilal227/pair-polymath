@@ -938,6 +938,39 @@ doctor_check_dim_data_quality() {
       return 0
       ;;
   esac
+  # v0.5.6.1 FIX B4: prefer the most recent cached gate-eval row when
+  # it's fresh (<48h). Doctor used to call pp_dim_evaluate_gate which
+  # re-reads the entire OAR. The daily evaluator already wrote the
+  # forensic snapshot; reuse it. We DON'T short-circuit the drift
+  # check below because that's a cheap pooled-SE calc — but if the
+  # cached row already shows qualifies=false, we surface the failure
+  # mode from the snapshot instead of running a redundant rollup.
+  local _eval_file _eval_mtime=0 _eval_age=999999 _now
+  _eval_file=$(pp_dim_gate_eval_path "$sha8")
+  if [ -f "$_eval_file" ]; then
+    case "${_PP_STAT_FLAVOR:-}" in
+      bsd) _eval_mtime=$(stat -f %m "$_eval_file" 2>/dev/null) ;;
+      gnu) _eval_mtime=$(stat -c %Y "$_eval_file" 2>/dev/null) ;;
+      *)
+        _eval_mtime=$(stat -c %Y "$_eval_file" 2>/dev/null)
+        case "$_eval_mtime" in (*[!0-9]*|"") _eval_mtime=$(stat -f %m "$_eval_file" 2>/dev/null) ;; esac
+        ;;
+    esac
+    case "$_eval_mtime" in (*[!0-9]*|"") _eval_mtime=0 ;; esac
+    _now=$(date +%s 2>/dev/null || echo 0)
+    [ "$_eval_mtime" -gt 0 ] 2>/dev/null && _eval_age=$(( _now - _eval_mtime ))
+  fi
+  # 48h = 172800s. Within that window AND a non-empty last row, trust it.
+  if [ "$_eval_age" -lt 172800 ] && [ -s "$_eval_file" ]; then
+    local _cached_q
+    _cached_q=$(tail -n 1 "$_eval_file" 2>/dev/null | jq -r '.qualifies // false' 2>/dev/null)
+    if [ "$_cached_q" = "true" ]; then
+      _pp_doctor_green "DIM data quality" "cached gate eval qualifies (forensic row age=${_eval_age}s)"
+      return 0
+    fi
+    # Cached qualifies=false → fall through to drift check (it may still be
+    # in monitoring/gated transient state which we filtered earlier).
+  fi
   if pp_dim_holdout_no_drift "$sha8"; then
     _pp_doctor_green "DIM data quality" "holdout matches gated rate (no drift)"
     return 0

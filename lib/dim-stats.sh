@@ -257,17 +257,24 @@ pp_dim_stats_per_lens_rollup() {
     printf '%s\n' "$row" | jq -c --argjson slot "$slot" '. + {_dim_holdout_slot: $slot}' >> "$stamped"
   done < "$oar"
   # Group by bucket × lens via jq.
+  # v0.5.6.1 FIX A4: date_of returns null (not "") when inject_ts is missing or
+  # malformed, so distinct_dates ignores them instead of collapsing all missing
+  # rows into a single sentinel date. Without this, 250 rows missing inject_ts
+  # would falsely count distinct_dates: 1 and could clear the floor.
   local rollup
   rollup=$(jq -sc '
     def acted_filter: . | select(.outcome == "acted") | .;
-    def date_of: (.inject_ts // "")[0:10];
+    def date_of:
+      if ((.inject_ts // "") | type == "string"
+            and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}"))
+      then .inject_ts[0:10] else null end;
     def group_lens(bucket):
       . | group_by(.lens)
         | map({
             lens: .[0].lens,
             s: ([.[] | select(.outcome == "acted")] | length),
             n: length,
-            distinct_dates: ([.[] | date_of] | unique | length)
+            distinct_dates: ([.[] | date_of] | map(select(. != null)) | unique | length)
           });
     {
       gated:   ([.[] | select(._dim_holdout_slot != 0)] | group_lens("gated")),

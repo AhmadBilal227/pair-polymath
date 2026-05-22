@@ -128,6 +128,14 @@ _pp_dim_stats_ensure_salt() {
 pp_dim_stats_holdout_slot() {
   local sid="${1:-}" lens="${2:-}" ts="${3:-}"
   _pp_dim_stats_ensure_salt || { echo "0"; return 1; }
+  # v0.5.6.1 FIX A1: sanitize inputs BEFORE hashing. Defense-in-depth against
+  # an attacker who can write OAR rows — the hash is salt-prefixed so this is
+  # belt-and-suspenders, but it forecloses bucket-grinding attacks by limiting
+  # the input alphabet + length. Sanitize via tr (drop disallowed bytes), then
+  # cut to bounded length. LC_ALL=C so tr's class is byte-oriented.
+  sid=$(printf '%s' "$sid" | LC_ALL=C tr -cd 'a-zA-Z0-9._:-' | cut -c1-128)
+  lens=$(printf '%s' "$lens" | LC_ALL=C tr -cd 'A-Z_' | cut -c1-32)
+  ts=$(printf '%s' "$ts" | LC_ALL=C tr -cd '0-9TZ:.-' | cut -c1-32)
   local home="${PP_HOME:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
   local salt
   salt=$(cat "$home/dim-holdout-salt" 2>/dev/null) || { echo "0"; return 1; }

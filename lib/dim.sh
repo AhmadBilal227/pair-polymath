@@ -202,6 +202,16 @@ pp_dim_evaluate_gate_daily() {
   local oar="${2:-${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl}"
   # Gate 0: respect master enable flag
   [ "${PP_DIM_ENABLE:-1}" = "1" ] || return 0
+  # v0.5.6.1 FIX B3: default-shard short-circuit. When sha8="default" AND
+  # the on-disk OAR has no rows tagged with project_root_sha8=="default",
+  # the rollup is guaranteed empty and the whole pipeline is wasted work.
+  # Skip silently — saves the daily eval cost on machines where DIM is
+  # installed globally but the user is currently outside a project root.
+  if [ "$sha8" = "default" ]; then
+    if ! [ -f "$oar" ] || ! LC_ALL=C grep -q '"project_root_sha8":"default"' "$oar" 2>/dev/null; then
+      return 0
+    fi
+  fi
   # Gate 1: once-per-UTC-date
   local today
   today=$(date -u +%Y%m%d)

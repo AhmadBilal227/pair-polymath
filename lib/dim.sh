@@ -84,6 +84,27 @@ pp_dim_get_current_state() {
   echo "$state"
 }
 
+# v0.5.6.1 FIX B2: lazy-source the shared JSONL rotation helper. dim-state
+# and dim-gate-last-eval are infrequent writers (max one transition per day
+# per project) but a long-lived install can still grow them past sensible
+# bounds. Cap rotates at PP_DIM_LOG_MAX_BYTES (default 1MB, smaller than
+# kpi/router because writes here are sparse).
+_pp_dim_load_rotator() {
+  if ! type _pp_rotate_jsonl >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "${_pp_dim_root:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/lib/metrics.sh" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
+_pp_dim_rotate_state_file() {
+  local _f="$1"
+  [ -n "$_f" ] || return 0
+  local _max="${PP_DIM_LOG_MAX_BYTES:-1048576}"
+  case "$_max" in (*[!0-9]*|"") _max=1048576 ;; esac
+  _pp_dim_load_rotator && _pp_rotate_jsonl "$_f" "$_max" 2>/dev/null || true
+}
+
 # pp_dim_append_transition SHA8 FROM TO REASON SOURCE GATE_SNAPSHOT_JSON
 # Atomically appends one transition row to dim-state.<sha8>.jsonl.
 # SOURCE: "auto" | "operator_override" | "auto_recovery"
@@ -93,6 +114,8 @@ pp_dim_append_transition() {
   local f
   f=$(pp_dim_state_file_path "$sha8")
   mkdir -p "$(dirname "$f")" 2>/dev/null
+  # v0.5.6.1 FIX B2: rotate BEFORE append at 1MB cap.
+  _pp_dim_rotate_state_file "$f"
   local ts row
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   row=$(jq -nc --arg ts "$ts" --arg from "$from" --arg to "$to" \
@@ -222,10 +245,11 @@ pp_dim_evaluate_gate_daily() {
   # Evaluate gate
   local gate
   gate=$(pp_dim_evaluate_gate "$oar" "$sha8")
-  # Append forensic row
+  # Append forensic row (v0.5.6.1 FIX B2: rotate before append)
   local eval_file
   eval_file=$(pp_dim_gate_eval_path "$sha8")
   mkdir -p "$(dirname "$eval_file")" 2>/dev/null
+  _pp_dim_rotate_state_file "$eval_file"
   printf '%s\n' "$gate" >> "$eval_file"
   # Update last-eval epoch
   date +%s > "$last_file"

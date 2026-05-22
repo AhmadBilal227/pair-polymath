@@ -910,15 +910,34 @@ doctor_check_dim_data_quality() {
   [ -z "$sha8" ] && sha8="default"
   local state
   state=$(pp_dim_get_current_state "$sha8")
-  # Pre-activation: nothing to check
+  # v0.5.6.1 FIX A5: OAR schema sanity. Runs in EVERY state (including
+  # monitoring/gated, where the original "pre-activation" short-circuit hid
+  # a silent schema break). When the on-disk OAR has >100 rows AND the
+  # rollup projects n=0 for this project, the schema almost certainly
+  # changed under us — surface yellow rather than silently look healthy.
+  local oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
+  if [ -f "$oar" ]; then
+    local _oar_rows _rollup_n
+    _oar_rows=$(LC_ALL=C wc -l < "$oar" 2>/dev/null | tr -d ' ')
+    case "$_oar_rows" in (*[!0-9]*|"") _oar_rows=0 ;; esac
+    if [ "$_oar_rows" -gt 100 ]; then
+      _rollup_n=$(pp_dim_stats_per_lens_rollup "$oar" "$sha8" 2>/dev/null \
+        | jq '[.gated[].n, .holdout[].n] | add // 0' 2>/dev/null)
+      case "$_rollup_n" in (*[!0-9]*|"") _rollup_n=0 ;; esac
+      if [ "$_rollup_n" = "0" ]; then
+        _pp_doctor_yellow "DIM data quality" \
+          "rollup empty but OAR has ${_oar_rows} rows; possible schema break (run polymath logs to inspect)"
+        return 1
+      fi
+    fi
+  fi
+  # Pre-activation: nothing more to check
   case "$state" in
     monitoring|gated)
       _pp_doctor_green "DIM data quality" "pre-activation (no holdout validation needed)"
       return 0
       ;;
   esac
-  # Active or quarantine: compare holdout vs gated
-  local oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
   local gate
   gate=$(pp_dim_evaluate_gate "$oar" "$sha8")
   if pp_dim_holdout_no_drift "$sha8" "$gate"; then

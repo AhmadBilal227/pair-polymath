@@ -140,21 +140,22 @@ teardown() {
   # shellcheck disable=SC1091
   . "$PP_ROOT/lib/doctor.sh"
   oar="$PP_CACHE_DIR/oar-labeled.jsonl"
-  # 100+ rows missing the required 'outcome' field (renamed to 'action')
+  # 100+ rows missing the required 'project_root_sha8' field. Rollup filters
+  # by sha8, so the result for sha8=sch00111 will be empty (n=0) even though
+  # OAR is full. This is the canonical "schema renamed/dropped" failure mode.
   for i in $(seq 1 110); do
-    printf '{"schema_version":99,"lens":"ENG","action":"acted","session_id":"s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"sch00111"}\n' \
+    printf '{"schema_version":99,"lens":"ENG","outcome":"acted","session_id":"s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_repo_root":"sch00111"}\n' \
       "$i" "$((10 + (i % 10)))" >> "$oar"
   done
-  # Force active state so the schema check runs (state != monitoring)
-  mkdir -p "$PP_CACHE_DIR"
-  printf '{"ts":"2026-05-01T00:00:00Z","from":"monitoring","to":"active","reason":"test","source":"test","gate_snapshot":{}}\n' > \
-    "$PP_CACHE_DIR/dim-state.sch00111.jsonl"
+  # Default state (monitoring) — check should ALSO run during monitoring/gated
+  # because the schema break manifests there too (and used to be hidden by the
+  # pre-activation short-circuit).
   PP_DIM_PROJECT_SHA8=sch00111
   export PP_DIM_PROJECT_SHA8
   run doctor_check_dim_data_quality
-  # Should yellow (status=1) or call out the schema gap. Either way: not green.
-  [ "$status" -ne 0 ]
-  echo "$output" | grep -qE 'schema|rollup empty|OAR has rows' || \
+  # Should yellow (status=1) — schema break detected
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qE 'schema|rollup empty|OAR has' || \
     { echo "Expected schema-break message; got: $output" >&2; false; }
 }
 

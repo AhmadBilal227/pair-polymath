@@ -2585,13 +2585,19 @@ EOF
         _dim_oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
         _dim_gate=$(pp_dim_evaluate_gate "$_dim_oar" "$_dim_sha8")
         if [ "$_dim_json" = "1" ]; then
+          # v0.5.6.1 FIX A3: report lenses_required from PP_DIM_MIN_LENSES (not
+          # a hardcoded 3) so an operator who tunes the floor sees the actual
+          # configured value in the JSON contract.
+          _dim_min_lenses="${PP_DIM_MIN_LENSES:-3}"
+          case "$_dim_min_lenses" in (*[!0-9]*|"") _dim_min_lenses=3 ;; esac
           jq -nc \
             --arg state "$_dim_state" \
             --argjson enabled "$_dim_enabled" \
             --argjson active "$_dim_active" \
             --argjson gate "$_dim_gate" \
+            --argjson required "$_dim_min_lenses" \
             --arg sha8 "$_dim_sha8" \
-            '{state:$state, enabled:$enabled, active:$active, project_root_sha8:$sha8, gate_progress:{lenses_qualifying:$gate.lenses_qualifying, lenses_required:3, evaluated_at:$gate.evaluated_at}, per_lens:$gate.per_lens}'
+            '{state:$state, enabled:$enabled, active:$active, project_root_sha8:$sha8, gate_progress:{lenses_qualifying:$gate.lenses_qualifying, lenses_required:$required, evaluated_at:$gate.evaluated_at}, per_lens:$gate.per_lens}'
         else
           printf 'DIM (Developer Insights Module)\n'
           printf '  state:           %s\n' "$_dim_state"

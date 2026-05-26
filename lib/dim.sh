@@ -34,19 +34,37 @@ PP_DIM_MIN_CALENDAR_DAYS="${PP_DIM_MIN_CALENDAR_DAYS:-7}"
 PP_DIM_HOLDOUT_VALIDATION_DAYS="${PP_DIM_HOLDOUT_VALIDATION_DAYS:-7}"
 PP_DIM_QUARANTINE_RECOVERY_DAYS="${PP_DIM_QUARANTINE_RECOVERY_DAYS:-14}"
 
+# v0.5.6.1 FIX A2: sha8 format validation. The default arg `${1:-default}`
+# accepts any string; a tainted caller passing `../etc` would write outside
+# PP_STATE_DIR. Reject anything other than [a-zA-Z0-9_-] (the "default"
+# sentinel + 8-hex sha8 prefixes both satisfy this); fall back to "default".
+_pp_dim_validate_sha8() {
+  local sha8="${1:-default}"
+  case "$sha8" in
+    ""|*[!a-zA-Z0-9_-]*) printf '%s' "default" ;;
+    *) printf '%s' "$sha8" ;;
+  esac
+}
+
 # pp_dim_state_file_path SHA8 → /path/to/dim-state.<sha8>.jsonl
 pp_dim_state_file_path() {
-  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-state.${1:-default}.jsonl"
+  local sha8
+  sha8=$(_pp_dim_validate_sha8 "${1:-default}")
+  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-state.${sha8}.jsonl"
 }
 
 # pp_dim_last_eval_path SHA8 → /path/to/dim-last-eval-epoch.<sha8>.txt
 pp_dim_last_eval_path() {
-  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-last-eval-epoch.${1:-default}.txt"
+  local sha8
+  sha8=$(_pp_dim_validate_sha8 "${1:-default}")
+  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-last-eval-epoch.${sha8}.txt"
 }
 
 # pp_dim_gate_eval_path SHA8 → /path/to/dim-gate-last-eval.<sha8>.jsonl
 pp_dim_gate_eval_path() {
-  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-gate-last-eval.${1:-default}.jsonl"
+  local sha8
+  sha8=$(_pp_dim_validate_sha8 "${1:-default}")
+  echo "${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/dim-gate-last-eval.${sha8}.jsonl"
 }
 
 # pp_dim_get_current_state SHA8 → current state (default: "monitoring")
@@ -66,6 +84,27 @@ pp_dim_get_current_state() {
   echo "$state"
 }
 
+# v0.5.6.1 FIX B2: lazy-source the shared JSONL rotation helper. dim-state
+# and dim-gate-last-eval are infrequent writers (max one transition per day
+# per project) but a long-lived install can still grow them past sensible
+# bounds. Cap rotates at PP_DIM_LOG_MAX_BYTES (default 1MB, smaller than
+# kpi/router because writes here are sparse).
+_pp_dim_load_rotator() {
+  if ! type _pp_rotate_jsonl >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "${_pp_dim_root:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/lib/metrics.sh" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
+_pp_dim_rotate_state_file() {
+  local _f="$1"
+  [ -n "$_f" ] || return 0
+  local _max="${PP_DIM_LOG_MAX_BYTES:-1048576}"
+  case "$_max" in (*[!0-9]*|"") _max=1048576 ;; esac
+  _pp_dim_load_rotator && _pp_rotate_jsonl "$_f" "$_max" 2>/dev/null || true
+}
+
 # pp_dim_append_transition SHA8 FROM TO REASON SOURCE GATE_SNAPSHOT_JSON
 # Atomically appends one transition row to dim-state.<sha8>.jsonl.
 # SOURCE: "auto" | "operator_override" | "auto_recovery"
@@ -75,6 +114,8 @@ pp_dim_append_transition() {
   local f
   f=$(pp_dim_state_file_path "$sha8")
   mkdir -p "$(dirname "$f")" 2>/dev/null
+  # v0.5.6.1 FIX B2: rotate BEFORE append at 1MB cap.
+  _pp_dim_rotate_state_file "$f"
   local ts row
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   row=$(jq -nc --arg ts "$ts" --arg from "$from" --arg to "$to" \
@@ -161,6 +202,16 @@ pp_dim_evaluate_gate_daily() {
   local oar="${2:-${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl}"
   # Gate 0: respect master enable flag
   [ "${PP_DIM_ENABLE:-1}" = "1" ] || return 0
+  # v0.5.6.1 FIX B3: default-shard short-circuit. When sha8="default" AND
+  # the on-disk OAR has no rows tagged with project_root_sha8=="default",
+  # the rollup is guaranteed empty and the whole pipeline is wasted work.
+  # Skip silently — saves the daily eval cost on machines where DIM is
+  # installed globally but the user is currently outside a project root.
+  if [ "$sha8" = "default" ]; then
+    if ! [ -f "$oar" ] || ! LC_ALL=C grep -q '"project_root_sha8":"default"' "$oar" 2>/dev/null; then
+      return 0
+    fi
+  fi
   # Gate 1: once-per-UTC-date
   local today
   today=$(date -u +%Y%m%d)
@@ -183,10 +234,14 @@ pp_dim_evaluate_gate_daily() {
   if ! mkdir "$lock" 2>/dev/null; then
     return 0  # Another process is evaluating; bail.
   fi
-  # Symmetric cleanup: RETURN handles normal exit, INT/TERM handles Ctrl-C
-  # and TERM-signaled shutdown so a stale lock dir never blocks tomorrow's eval.
+  # Signal-only cleanup so a Ctrl-C / TERM never leaves a stale lock dir that
+  # blocks tomorrow's eval. NOTE: do NOT add RETURN here — this function calls
+  # nested functions (pp_dim_evaluate_gate, pp_dim_apply_transition, ...) and
+  # under `set -T` (functrace, which bats enables) a function-scoped RETURN
+  # trap fires on every nested return, releasing the lock mid-evaluation and
+  # defeating the concurrency guard. Normal-exit cleanup is explicit below.
   # shellcheck disable=SC2064
-  trap "rm -rf '$lock' 2>/dev/null; true" RETURN INT TERM
+  trap "rm -rf '$lock' 2>/dev/null; true" INT TERM
   # Double-checked locking: re-read last-eval inside the lock
   if [ -f "$last_file" ]; then
     local last_epoch2
@@ -197,23 +252,26 @@ pp_dim_evaluate_gate_daily() {
                   || date -u -d "@$last_epoch2" +%Y%m%d 2>/dev/null \
                   || echo "")
       if [ "$last_day2" = "$today" ]; then
-        return 0  # trap handles lock cleanup
+        rm -rf "$lock" 2>/dev/null
+        return 0
       fi
     fi
   fi
   # Evaluate gate
   local gate
   gate=$(pp_dim_evaluate_gate "$oar" "$sha8")
-  # Append forensic row
+  # Append forensic row (v0.5.6.1 FIX B2: rotate before append)
   local eval_file
   eval_file=$(pp_dim_gate_eval_path "$sha8")
   mkdir -p "$(dirname "$eval_file")" 2>/dev/null
+  _pp_dim_rotate_state_file "$eval_file"
   printf '%s\n' "$gate" >> "$eval_file"
   # Update last-eval epoch
   date +%s > "$last_file"
   # Apply state transition
   pp_dim_apply_transition "$sha8" "$gate"
-  return 0  # trap handles lock cleanup
+  rm -rf "$lock" 2>/dev/null
+  return 0
 }
 
 # pp_dim_apply_transition SHA8 GATE_JSON
@@ -246,7 +304,7 @@ pp_dim_apply_transition() {
         age_days=$(pp_dim_days_since "$entered_at")
         if [ "$age_days" -ge "$PP_DIM_HOLDOUT_VALIDATION_DAYS" ]; then
           # Check for drift; if no drift, promote
-          if pp_dim_holdout_no_drift "$sha8" "$gate"; then
+          if pp_dim_holdout_no_drift "$sha8"; then
             next="active"; reason="holdout validation passed (${age_days}d, no drift)"
           fi
         fi
@@ -254,7 +312,7 @@ pp_dim_apply_transition() {
       ;;
     active)
       # Continuous drift surveillance
-      if ! pp_dim_holdout_no_drift "$sha8" "$gate"; then
+      if ! pp_dim_holdout_no_drift "$sha8"; then
         next="quarantine"; reason="post-activation drift detected"
       fi
       ;;
@@ -265,7 +323,7 @@ pp_dim_apply_transition() {
       [ -n "$entered_at" ] || return 0
       age_days=$(pp_dim_days_since "$entered_at")
       if [ "$age_days" -ge "$PP_DIM_QUARANTINE_RECOVERY_DAYS" ] && \
-         pp_dim_holdout_no_drift "$sha8" "$gate"; then
+         pp_dim_holdout_no_drift "$sha8"; then
         next="monitoring"; reason="quarantine cleared after ${age_days}d clean window"
       fi
       ;;
@@ -295,9 +353,13 @@ pp_dim_days_since() {
   echo $(( (now_epoch - then_epoch) / 86400 ))
 }
 
-# pp_dim_holdout_no_drift SHA8 GATE_JSON → 0 (no drift) / 1 (drift)
+# pp_dim_holdout_no_drift SHA8 → 0 (no drift) / 1 (drift)
 # Compares holdout acted% vs gated acted% using pooled SE.
 # Drift = |holdout_pct - gated_pct| > 2*SE. Returns 0 (no drift) if holdout_n < 20.
+#
+# v0.5.6.1 FIX A6: previously took a second $gate arg that the body ignored
+# (it re-reads OAR fresh on every call). The unused parameter invited
+# callers to plumb stale gate snapshots through; drop it.
 pp_dim_holdout_no_drift() {
   local sha8="$1"
   local oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"

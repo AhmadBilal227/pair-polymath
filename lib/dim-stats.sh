@@ -128,6 +128,14 @@ _pp_dim_stats_ensure_salt() {
 pp_dim_stats_holdout_slot() {
   local sid="${1:-}" lens="${2:-}" ts="${3:-}"
   _pp_dim_stats_ensure_salt || { echo "0"; return 1; }
+  # v0.5.6.1 FIX A1: sanitize inputs BEFORE hashing. Defense-in-depth against
+  # an attacker who can write OAR rows — the hash is salt-prefixed so this is
+  # belt-and-suspenders, but it forecloses bucket-grinding attacks by limiting
+  # the input alphabet + length. Sanitize via tr (drop disallowed bytes), then
+  # cut to bounded length. LC_ALL=C so tr's class is byte-oriented.
+  sid=$(printf '%s' "$sid" | LC_ALL=C tr -cd 'a-zA-Z0-9._:-' | cut -c1-128)
+  lens=$(printf '%s' "$lens" | LC_ALL=C tr -cd 'A-Z_' | cut -c1-32)
+  ts=$(printf '%s' "$ts" | LC_ALL=C tr -cd '0-9TZ:.-' | cut -c1-32)
   local home="${PP_HOME:-${CLAUDE_DIR:-$HOME/.claude}/pair-polymath}"
   local salt
   salt=$(cat "$home/dim-holdout-salt" 2>/dev/null) || { echo "0"; return 1; }
@@ -234,6 +242,17 @@ pp_dim_stats_per_lens_rollup() {
   # Stamp holdout_slot per row in a temp jsonl, then group server-side via jq.
   local stamped
   stamped=$(mktemp) || return 1
+  # v0.5.6.1 FIX A7 (corrected): clean up the temp file on signal-driven
+  # shutdown (Ctrl-C, pipeline kill). The success path + jq-failure path both
+  # fall through to the explicit `rm -f "$stamped"` below (it runs regardless
+  # of the inner jq's exit code), so RETURN is NOT needed here — and a RETURN
+  # trap is actively harmful: under `set -T` (functrace, which bats enables),
+  # a function-scoped RETURN trap fires on EVERY nested function return, so
+  # each pp_dim_stats_holdout_slot call inside the loop below would delete the
+  # accumulator file, leaving only the final row. Signal traps (INT/TERM) are
+  # unaffected by functrace.
+  # shellcheck disable=SC2064
+  trap "rm -f '$stamped' 2>/dev/null; true" INT TERM
   local sid lens ts slot row_sha row
   while IFS= read -r row; do
     [ -z "$row" ] && continue
@@ -249,17 +268,24 @@ pp_dim_stats_per_lens_rollup() {
     printf '%s\n' "$row" | jq -c --argjson slot "$slot" '. + {_dim_holdout_slot: $slot}' >> "$stamped"
   done < "$oar"
   # Group by bucket × lens via jq.
+  # v0.5.6.1 FIX A4: date_of returns null (not "") when inject_ts is missing or
+  # malformed, so distinct_dates ignores them instead of collapsing all missing
+  # rows into a single sentinel date. Without this, 250 rows missing inject_ts
+  # would falsely count distinct_dates: 1 and could clear the floor.
   local rollup
   rollup=$(jq -sc '
     def acted_filter: . | select(.outcome == "acted") | .;
-    def date_of: (.inject_ts // "")[0:10];
+    def date_of:
+      if ((.inject_ts // "") | type == "string"
+            and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}"))
+      then .inject_ts[0:10] else null end;
     def group_lens(bucket):
       . | group_by(.lens)
         | map({
             lens: .[0].lens,
             s: ([.[] | select(.outcome == "acted")] | length),
             n: length,
-            distinct_dates: ([.[] | date_of] | unique | length)
+            distinct_dates: ([.[] | date_of] | map(select(. != null)) | unique | length)
           });
     {
       gated:   ([.[] | select(._dim_holdout_slot != 0)] | group_lens("gated")),

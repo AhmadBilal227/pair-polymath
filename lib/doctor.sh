@@ -910,18 +910,68 @@ doctor_check_dim_data_quality() {
   [ -z "$sha8" ] && sha8="default"
   local state
   state=$(pp_dim_get_current_state "$sha8")
-  # Pre-activation: nothing to check
+  # v0.5.6.1 FIX A5: OAR schema sanity. Runs in EVERY state (including
+  # monitoring/gated, where the original "pre-activation" short-circuit hid
+  # a silent schema break). When the on-disk OAR has >100 rows AND the
+  # rollup projects n=0 for this project, the schema almost certainly
+  # changed under us — surface yellow rather than silently look healthy.
+  local oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
+  if [ -f "$oar" ]; then
+    local _oar_rows _rollup_n
+    _oar_rows=$(LC_ALL=C wc -l < "$oar" 2>/dev/null | tr -d ' ')
+    case "$_oar_rows" in (*[!0-9]*|"") _oar_rows=0 ;; esac
+    if [ "$_oar_rows" -gt 100 ]; then
+      _rollup_n=$(pp_dim_stats_per_lens_rollup "$oar" "$sha8" 2>/dev/null \
+        | jq '[.gated[].n, .holdout[].n] | add // 0' 2>/dev/null)
+      case "$_rollup_n" in (*[!0-9]*|"") _rollup_n=0 ;; esac
+      if [ "$_rollup_n" = "0" ]; then
+        _pp_doctor_yellow "DIM data quality" \
+          "rollup empty but OAR has ${_oar_rows} rows; possible schema break (run polymath logs to inspect)"
+        return 1
+      fi
+    fi
+  fi
+  # Pre-activation: nothing more to check
   case "$state" in
     monitoring|gated)
       _pp_doctor_green "DIM data quality" "pre-activation (no holdout validation needed)"
       return 0
       ;;
   esac
-  # Active or quarantine: compare holdout vs gated
-  local oar="${PP_CACHE_DIR:-${CLAUDE_DIR:-$HOME/.claude}/cache}/oar-labeled.jsonl"
-  local gate
-  gate=$(pp_dim_evaluate_gate "$oar" "$sha8")
-  if pp_dim_holdout_no_drift "$sha8" "$gate"; then
+  # v0.5.6.1 FIX B4: prefer the most recent cached gate-eval row when
+  # it's fresh (<48h). Doctor used to call pp_dim_evaluate_gate which
+  # re-reads the entire OAR. The daily evaluator already wrote the
+  # forensic snapshot; reuse it. We DON'T short-circuit the drift
+  # check below because that's a cheap pooled-SE calc — but if the
+  # cached row already shows qualifies=false, we surface the failure
+  # mode from the snapshot instead of running a redundant rollup.
+  local _eval_file _eval_mtime=0 _eval_age=999999 _now
+  _eval_file=$(pp_dim_gate_eval_path "$sha8")
+  if [ -f "$_eval_file" ]; then
+    case "${_PP_STAT_FLAVOR:-}" in
+      bsd) _eval_mtime=$(stat -f %m "$_eval_file" 2>/dev/null) ;;
+      gnu) _eval_mtime=$(stat -c %Y "$_eval_file" 2>/dev/null) ;;
+      *)
+        _eval_mtime=$(stat -c %Y "$_eval_file" 2>/dev/null)
+        case "$_eval_mtime" in (*[!0-9]*|"") _eval_mtime=$(stat -f %m "$_eval_file" 2>/dev/null) ;; esac
+        ;;
+    esac
+    case "$_eval_mtime" in (*[!0-9]*|"") _eval_mtime=0 ;; esac
+    _now=$(date +%s 2>/dev/null || echo 0)
+    [ "$_eval_mtime" -gt 0 ] 2>/dev/null && _eval_age=$(( _now - _eval_mtime ))
+  fi
+  # 48h = 172800s. Within that window AND a non-empty last row, trust it.
+  if [ "$_eval_age" -lt 172800 ] && [ -s "$_eval_file" ]; then
+    local _cached_q
+    _cached_q=$(tail -n 1 "$_eval_file" 2>/dev/null | jq -r '.qualifies // false' 2>/dev/null)
+    if [ "$_cached_q" = "true" ]; then
+      _pp_doctor_green "DIM data quality" "cached gate eval qualifies (forensic row age=${_eval_age}s)"
+      return 0
+    fi
+    # Cached qualifies=false → fall through to drift check (it may still be
+    # in monitoring/gated transient state which we filtered earlier).
+  fi
+  if pp_dim_holdout_no_drift "$sha8"; then
     _pp_doctor_green "DIM data quality" "holdout matches gated rate (no drift)"
     return 0
   fi

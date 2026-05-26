@@ -3,6 +3,40 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.6.1] — 2026-05-22 — DIM hardening followups
+
+Post-merge bundle of 12 surgical fixes from the 5-reviewer pass on v0.5.6.0 (PR #81). No new features; safety, correctness, observability, and operator UX. All v0.5.6.0 behavior preserved; 17 new regression tests added.
+
+### Fixed (security)
+
+- **A1 — sanitize holdout-slot inputs.** `pp_dim_stats_holdout_slot` now strips disallowed bytes from `session_id`/`lens`/`inject_ts` before hashing. Belt-and-suspenders against bucket-grinding by an attacker who can write OAR rows (the hash is already salt-prefixed).
+- **A2 — validate sha8 in path helpers.** `pp_dim_state_file_path` / `pp_dim_last_eval_path` / `pp_dim_gate_eval_path` reject shell-meta/slash/empty args via a single validator helper; tainted callers fall back to the `default` sentinel instead of escaping `PP_CACHE_DIR`.
+
+### Fixed (correctness)
+
+- **A3 — `polymath dim status --json` reports `lenses_required` from `PP_DIM_MIN_LENSES`** (was hardcoded `3`); operators tuning the floor now see the actual configured value.
+- **A4 — `distinct_dates` excludes rows missing `inject_ts`.** The jq rollup used to collapse all missing-ts rows into the single `""` date, falsely satisfying the floor; now `date_of` returns `null` and nulls are filtered before `unique | length`.
+- **A6 — drop unused `$gate` arg from `pp_dim_holdout_no_drift`.** Function always re-read OAR fresh; the param invited staleness bugs. All three call sites updated.
+- **A7 — temp-file cleanup on jq failure** in `pp_dim_stats_per_lens_rollup` via `trap RETURN INT TERM` (previously only cleaned on the success path).
+
+### Added (observability / safety nets)
+
+- **A5 — OAR schema doctor check.** `doctor_check_dim_data_quality` now flags yellow when OAR has >100 rows but the rollup projects `n=0` for this project's `sha8`; runs in every state (previously short-circuited on monitoring/gated, hiding silent schema breaks).
+- **B1 — 5s timeout wrapper around `pp_dim_evaluate_gate_daily`** in `hooks/inject-monitor-insight.sh`. A buggy DIM evaluator can no longer block `UserPromptSubmit`. Bash 3.2-portable background-kill pattern (no `timeout` dependency). Optional debug log to `dim-hook-debug.log` when `PP_DIM_DEBUG=1`.
+- **B2 — state-file rotation at 1MB.** `dim-state.<sha8>.jsonl` and `dim-gate-last-eval.<sha8>.jsonl` now rotate via the shared `_pp_rotate_jsonl` helper before each append (override cap via `PP_DIM_LOG_MAX_BYTES`).
+
+### Changed (performance / UX)
+
+- **B3 — default-shard short-circuit.** When `sha8="default"` AND the on-disk OAR has no rows tagged `project_root_sha8="default"`, the daily eval returns 0 early. Saves the full eval cost on machines where DIM is installed globally but the user is outside a project root.
+- **B4 — doctor reuses cached gate-eval row when fresh (<48h).** `doctor_check_dim_data_quality` now tails the forensic file and short-circuits green on `qualifies=true` instead of re-running the full evaluator + rollup.
+- **C1 — `polymath dim status` next-actions vary by state.** The old block always printed `force-activate` + `disable`, confusing for operators on already-active or quarantined installs. Now state-specific (force-disable in `active`, drift + recovery note in `quarantine`).
+
+### Test plan
+
+- `bats test/v0.5.6.1-hardening.bats` — 17/17 new regression tests green
+- `bats test/v0.5.3-dim.bats test/v0.5.3-dim-stats.bats test/doctor.bats` — no regressions
+- `shellcheck -S warning lib/dim.sh lib/dim-stats.sh bin/polymath hooks/inject-monitor-insight.sh lib/doctor.sh` — clean
+
 ## [0.5.6.0] — 2026-05-20 — v0.5.3 DIM (control plane)
 
 The **Developer Insights Module** control plane. Ships shadow-by-default with a metric-gated auto-promotion from `monitoring → gated → active`. Statistical gate uses time-uniform Wilson LCB (Howard et al. 2021), no fixed peek budget. Per-project state sharding from day one. Workforce-management CLI (`polymath agents *`) and trajectory engine are deferred to v0.5.4+ and consume this control plane.

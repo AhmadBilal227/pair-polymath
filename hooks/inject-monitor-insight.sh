@@ -52,7 +52,28 @@ if [ "${PP_DIM_ENABLE:-1}" = "1" ]; then
         _pp_dim_sha8=$(pp_project_root_sha8 2>/dev/null || echo "default")
     fi
     : "${_pp_dim_sha8:=default}"
-    pp_dim_evaluate_gate_daily "$_pp_dim_sha8" 2>/dev/null || true
+    # v0.5.6.1 FIX B1: wrap with a 5s wall-clock timeout so a buggy DIM
+    # cannot block the hot path (UserPromptSubmit is on every turn). We use
+    # a bash 3.2-portable background-kill pattern (no GNU `timeout` dep).
+    # Failures and timeouts are silent — DIM must never block prompts.
+    (
+      pp_dim_evaluate_gate_daily "$_pp_dim_sha8" 2>/dev/null
+    ) &
+    _pp_dim_pid=$!
+    (
+      sleep 5
+      kill "$_pp_dim_pid" 2>/dev/null
+    ) &
+    _pp_dim_killer=$!
+    wait "$_pp_dim_pid" 2>/dev/null
+    kill "$_pp_dim_killer" 2>/dev/null
+    wait "$_pp_dim_killer" 2>/dev/null
+    if [ "${PP_DIM_DEBUG:-0}" = "1" ]; then
+      printf '%s dim eval pid=%s sha8=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pp_dim_pid" "$_pp_dim_sha8" \
+        >> "${PP_CACHE_DIR}/dim-hook-debug.log" 2>/dev/null || true
+    fi
+    unset _pp_dim_pid _pp_dim_killer
   fi
 fi
 

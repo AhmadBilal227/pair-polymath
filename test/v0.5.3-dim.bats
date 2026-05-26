@@ -77,12 +77,14 @@ teardown() {
 
 @test "dim: evaluate_gate clears with 3 strong lenses meeting all floors" {
   oar=$(mktemp)
-  # 3 lenses × 350 rows × ~10% acted × 10 distinct dates (span 9d > MIN_CALENDAR_DAYS=7)
-  # 350 rows: worst-case ~35 holdout → ~315 gated, safely above min_n=250
+  # 3 lenses × 350 rows × ~20% acted × 10 distinct dates (span 9d > MIN_CALENDAR_DAYS=7)
+  # 350 rows: worst-case ~35 holdout → ~315 gated, safely above min_n=250.
+  # 20% acted (i%5) clears LCB ≈0.13, far above the 0.05 floor regardless of
+  # which rows the per-install salt slots into the holdout bucket (salt-stable).
   for lens in ENG SEC UX; do
     for i in $(seq 1 350); do
       out="ignored"
-      [ "$((i % 10))" = "0" ] && out="acted"
+      [ "$((i % 5))" = "0" ] && out="acted"
       day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
@@ -201,7 +203,7 @@ teardown() {
   oar="$PP_CACHE_DIR/oar-labeled.jsonl"
   for lens in ENG SEC UX; do
     for i in $(seq 1 500); do
-      out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+      out="ignored"; [ "$((i % 5))" = "0" ] && out="acted"
       day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
@@ -221,7 +223,7 @@ teardown() {
   oar="$PP_CACHE_DIR/oar-labeled.jsonl"
   for lens in ENG SEC UX; do
     for i in $(seq 1 500); do
-      out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+      out="ignored"; [ "$((i % 5))" = "0" ] && out="acted"
       day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
@@ -486,9 +488,10 @@ teardown() {
 
 @test "dim: FIX#9 — calendar span exposed on every gate evaluation" {
   oar=$(mktemp)
+  # 20% acted (i%5) keeps the gate clear regardless of holdout salt split.
   for lens in ENG SEC UX; do
     for i in $(seq 1 350); do
-      out="ignored"; [ "$((i % 10))" = "0" ] && out="acted"
+      out="ignored"; [ "$((i % 5))" = "0" ] && out="acted"
       day=$(( (i % 10) + 10 ))
       printf '{"schema_version":2,"lens":"%s","outcome":"%s","session_id":"s%s%d","inject_ts":"2026-05-%02dT00:00:00Z","project_root_sha8":"abcd1234"}\n' \
         "$lens" "$out" "$lens" "$i" "$day" >> "$oar"
@@ -533,9 +536,14 @@ teardown() {
   tail -n 1 "$state_file" | jq -e '.source == "operator_override" and .to == "active"'
 }
 
-@test "dim: FIX#5 — daily eval trap covers RETURN INT TERM" {
-  # The trap inside pp_dim_evaluate_gate_daily must clean the lock dir on
-  # normal return AND on Ctrl-C / TERM signals; otherwise a stale lock
-  # blocks tomorrow's eval.
-  grep -E 'rm -rf .*\$lock.*RETURN INT TERM' "$PP_ROOT/lib/dim.sh"
+@test "dim: FIX#5 — daily eval lock cleaned on signals + explicit normal-exit" {
+  # The lock dir must be cleaned on Ctrl-C / TERM (signal trap) AND on normal
+  # return (explicit rm before each return). RETURN must NOT be in the trap:
+  # under set -T (functrace, which bats enables) a function-scoped RETURN trap
+  # fires on every nested return, releasing the lock mid-eval. Signal trap is
+  # INT TERM only; normal-exit cleanup is explicit.
+  grep -E "trap .*rm -rf .*\\\$lock.* INT TERM" "$PP_ROOT/lib/dim.sh"
+  ! grep -E "trap .*\\\$lock.*RETURN" "$PP_ROOT/lib/dim.sh"
+  # At least two explicit rm -rf "$lock" cleanup sites (the two return paths)
+  [ "$(grep -cE 'rm -rf "\$lock"' "$PP_ROOT/lib/dim.sh")" -ge 2 ]
 }

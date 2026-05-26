@@ -242,12 +242,17 @@ pp_dim_stats_per_lens_rollup() {
   # Stamp holdout_slot per row in a temp jsonl, then group server-side via jq.
   local stamped
   stamped=$(mktemp) || return 1
-  # v0.5.6.1 FIX A7: ensure the temp file is removed even if the inner jq
-  # exits non-zero (or the loop is interrupted). The old `rm -f` after the
-  # jq call only ran on the success path. RETURN handles normal exit; INT/TERM
-  # handles signal-driven shutdown (Ctrl-C, pipeline kill).
+  # v0.5.6.1 FIX A7 (corrected): clean up the temp file on signal-driven
+  # shutdown (Ctrl-C, pipeline kill). The success path + jq-failure path both
+  # fall through to the explicit `rm -f "$stamped"` below (it runs regardless
+  # of the inner jq's exit code), so RETURN is NOT needed here — and a RETURN
+  # trap is actively harmful: under `set -T` (functrace, which bats enables),
+  # a function-scoped RETURN trap fires on EVERY nested function return, so
+  # each pp_dim_stats_holdout_slot call inside the loop below would delete the
+  # accumulator file, leaving only the final row. Signal traps (INT/TERM) are
+  # unaffected by functrace.
   # shellcheck disable=SC2064
-  trap "rm -f '$stamped' 2>/dev/null; true" RETURN INT TERM
+  trap "rm -f '$stamped' 2>/dev/null; true" INT TERM
   local sid lens ts slot row_sha row
   while IFS= read -r row; do
     [ -z "$row" ] && continue

@@ -234,10 +234,14 @@ pp_dim_evaluate_gate_daily() {
   if ! mkdir "$lock" 2>/dev/null; then
     return 0  # Another process is evaluating; bail.
   fi
-  # Symmetric cleanup: RETURN handles normal exit, INT/TERM handles Ctrl-C
-  # and TERM-signaled shutdown so a stale lock dir never blocks tomorrow's eval.
+  # Signal-only cleanup so a Ctrl-C / TERM never leaves a stale lock dir that
+  # blocks tomorrow's eval. NOTE: do NOT add RETURN here — this function calls
+  # nested functions (pp_dim_evaluate_gate, pp_dim_apply_transition, ...) and
+  # under `set -T` (functrace, which bats enables) a function-scoped RETURN
+  # trap fires on every nested return, releasing the lock mid-evaluation and
+  # defeating the concurrency guard. Normal-exit cleanup is explicit below.
   # shellcheck disable=SC2064
-  trap "rm -rf '$lock' 2>/dev/null; true" RETURN INT TERM
+  trap "rm -rf '$lock' 2>/dev/null; true" INT TERM
   # Double-checked locking: re-read last-eval inside the lock
   if [ -f "$last_file" ]; then
     local last_epoch2
@@ -248,7 +252,8 @@ pp_dim_evaluate_gate_daily() {
                   || date -u -d "@$last_epoch2" +%Y%m%d 2>/dev/null \
                   || echo "")
       if [ "$last_day2" = "$today" ]; then
-        return 0  # trap handles lock cleanup
+        rm -rf "$lock" 2>/dev/null
+        return 0
       fi
     fi
   fi
@@ -265,7 +270,8 @@ pp_dim_evaluate_gate_daily() {
   date +%s > "$last_file"
   # Apply state transition
   pp_dim_apply_transition "$sha8" "$gate"
-  return 0  # trap handles lock cleanup
+  rm -rf "$lock" 2>/dev/null
+  return 0
 }
 
 # pp_dim_apply_transition SHA8 GATE_JSON

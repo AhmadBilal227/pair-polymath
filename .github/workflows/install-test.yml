@@ -30,7 +30,7 @@ jobs:
     # install-test workflow into install + bats jobs.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Force a clean baseline (review fix H1+M1)
         # ubuntu-latest ships with jq pre-installed; remove it so the installer
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Ensure jq present for the dry-run path to reach completion
         run: |

@@ -323,7 +323,10 @@ TIP_LOCK="/tmp/cc-tips-fetch.lock"
 mkdir -p "${HOME}/.claude/cache" 2>/dev/null
 
 cache_age=$(($(date +%s) - $(stat -f %m "$TIP_CACHE" 2>/dev/null || echo 0)))
-if [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; then
+# PP_EXTERNAL_LLM=0 promises "disable all LLM calls" (config/default.env) —
+# that must gate the teacher digest too, not just the advisor cycle: this
+# block curls HN/arXiv and calls gpt-5-mini from EVERY open session.
+if [ "${PP_EXTERNAL_LLM:-1}" = "1" ] && { [ ! -f "$TIP_CACHE" ] || [ "$cache_age" -gt 1800 ]; }; then
   # Atomic lock primitive (Ralph R2 H3). The previous
   # `[ ! -f "$LOCK" ] && touch "$LOCK"` was a check-then-touch TOCTOU race —
   # two parallel statuslines could both see absent + both touch + both spawn
@@ -387,7 +390,9 @@ fi
 # Resolve tip — split topic and body for slot-based display
 tip_topic=""
 tip_body=""
-if [ -f "$TIP_CACHE" ] && [ -s "$TIP_CACHE" ]; then
+# Display is gated too: with the refresh paused, an ungated read would
+# rotate the last cached digest forever — looking "still running" while off.
+if [ "${PP_EXTERNAL_LLM:-1}" = "1" ] && [ -f "$TIP_CACHE" ] && [ -s "$TIP_CACHE" ]; then
   count=$(wc -l < "$TIP_CACHE" | tr -d ' ')
   if [ "$count" -gt 0 ]; then
     # Rotate slowly (90s per tip) so user can read across multiple slot cycles

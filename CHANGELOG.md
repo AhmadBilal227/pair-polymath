@@ -3,6 +3,11 @@
 All notable changes to Pair Polymath are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **`PP_EXTERNAL_LLM=0` now actually disables ALL LLM calls.** The teacher tip digest (HN/arXiv fetch + `gpt-5-mini` compression, every 30 min from every open session) never checked the flag — `polymath disable` paused the advisor but the teacher kept fetching and the cached digest kept rotating on line 2 indefinitely. Both the background refresh and the line-2 tip display are now gated (`bin/statusline.sh`), with regression coverage in `test/status-only.bats`.
+
 ## [0.2.0] — 2026-05-12
 
 Second release. Ships the trust-building feature set: USD cost transparency, verifiable privacy log, headless installer, end-to-end self-test, and a documentation tree. **247 bats tests across 11 suites.** Required CI green on every PR under β branch protection (PRs only, status checks required, linear history).

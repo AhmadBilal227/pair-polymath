@@ -102,7 +102,7 @@ Removes our entries from `settings.json`, matched **by basename** (`statusline.s
 | **Daily cap, intervals, model choice** | `~/.claude/pair-polymath/config/user.env` | `PP_*=value` (sourced after `config/default.env`; takes effect next cycle) |
 | **Add a new lens** | `~/.claude/pair-polymath/lenses/08-mylens.json` | [Lens schema](#lens-schema) (loaded on every cycle — no restart needed) |
 | **Override the analyst prompt for your domain** | `~/.claude/pair-polymath/prompts/analyst-primary.md` | Markdown with `${lens_group}`, `${lens_hats}`, `${lens_focus}` placeholders |
-| **Disable the advisor (status-only mode)** | `user.env`: `PP_EXTERNAL_LLM=0` | Effective next cycle |
+| **Disable the advisor + teacher digest (status-only mode)** | `user.env`: `PP_EXTERNAL_LLM=0` | Advisor stops next cycle; teacher line 2 clears on next statusline refresh |
 | **Disable deep-investigation escalation** | `user.env`: `PP_ENABLE_ESCALATION=0` | Effective next cycle |
 
 Override resolution is **by id** for lenses (the `id` field in the JSON) and **by filename** for prompts (e.g. `analyst-primary.md`). Your file replaces the built-in if the id/filename matches; otherwise it's added on top.

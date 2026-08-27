@@ -22,7 +22,7 @@ All knobs live in `config/default.env`. To override, copy any line to `~/.claude
 
 | Var | Default | Controls |
 |---|---|---|
-| `PP_EXTERNAL_LLM` | `1` | `0` disables all LLM calls (status-only mode). Line 1 still renders; line 2 freezes. `polymath disable` flips this. |
+| `PP_EXTERNAL_LLM` | `1` | `0` disables all LLM calls (status-only mode) — advisor cycle AND teacher tip digest (refresh + display). Line 1 still renders; line 2 goes quiet. `polymath disable` flips this. |
 | `PP_ENABLE_ESCALATION` | `1` | `0` disables the deep-investigation escalation pre-pass. Saves ~1-7 calls/cycle when a lens has been dropping ≥3 cycles in a row, at the cost of never escalating. |
 
 ## Lens / prompt loader
